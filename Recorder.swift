@@ -301,7 +301,7 @@ final class Recorder: NSObject, ObservableObject {
         if let error { say(L("保存失败：", "Save failed: ") + error.localizedDescription, error: true); return }
         if let f = lastFile, FileManager.default.fileExists(atPath: f.path) {
             say(L("已保存：", "Saved: ") + f.lastPathComponent)
-            NSWorkspace.shared.activateFileViewerSelecting([f])
+            NSWorkspace.shared.open(f)   // 录完直接用默认播放器打开
         }
     }
 }
