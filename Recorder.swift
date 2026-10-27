@@ -185,12 +185,12 @@ final class Recorder: NSObject, ObservableObject {
         message = text; isError = error
     }
 
-    // 盖上遮罩让用户拖一个框，选好后列表里出现「选定区域」并选中它
+    // 盖上遮罩让用户调一个框，点「录制」就录这块；列表里会留下「选定区域」方便下次直接录
     func pickRegion() {
-        RegionPicker.pick { [weak self] r in
+        RegionPicker.pick(initial: region) { [weak self] r in
             guard let self else { return }
             self.region = r; self.selection = "r"
-            Task { await self.refresh() }
+            self.toggle()   // 点了「录制」就直接开录
         }
     }
 
@@ -327,93 +327,223 @@ final class HotKey {
     }
 }
 
-// ---- 选区域：每块屏幕盖一层半透明遮罩，按住拖一个框，松手就选好；Esc 取消 ----
+// ---- 选区域（仿系统截图 ⌘⇧5）：每块屏幕盖一层遮罩，一打开就有个框；拖框内移动、拖八个点改大小、框外拖画新框
+//      底下工具栏：✕ 取消 / 尺寸 / 录制；回车 = 录制，Esc = 取消，框内双击 = 录制 ----
+@MainActor
 final class RegionPicker {
-    private static var windows: [NSWindow] = []
-    static func pick(_ done: @escaping (Region) -> Void) {
-        close()
+    private static var current: RegionPicker?
+    // 自测：PICKERSHOT=图片路径 → 不显示、不抢焦点，把选区界面画成图片后退出
+    static let testShot = ProcessInfo.processInfo.environment["PICKERSHOT"]
+    private var windows: [NSWindow] = []
+    private var views: [RegionView] = []
+    private(set) var active: RegionView?        // 框在哪块屏幕上
+    private lazy var bar = PickerBar(picker: self)
+    private let done: (Region) -> Void
+
+    static func pick(initial: Region?, _ done: @escaping (Region) -> Void) {
+        current?.close()
+        let p = RegionPicker(done: done)
+        current = p
+        p.open(initial)
+    }
+    private init(done: @escaping (Region) -> Void) { self.done = done }
+
+    private func open(_ initial: Region?) {
         for screen in NSScreen.screens {
             let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? CGMainDisplayID()
             let w = OverlayWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
             w.level = .screenSaver
             w.isOpaque = false; w.backgroundColor = .clear; w.hasShadow = false
             w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            let v = RegionView(frame: CGRect(origin: .zero, size: screen.frame.size))
-            v.onDone = { rect in
-                DispatchQueue.main.async { close() }   // 别在这个窗口自己的鼠标事件里把它关掉
-                guard let rect, rect.width >= 20, rect.height >= 20 else { return }
-                // 视图坐标左下角为原点，录屏要左上角为原点
-                done(Region(display: id, rect: CGRect(x: rect.minX, y: screen.frame.height - rect.maxY, width: rect.width, height: rect.height)))
-            }
+            let v = RegionView(frame: CGRect(origin: .zero, size: screen.frame.size), picker: self, display: id)
             w.contentView = v
-            w.orderFrontRegardless()
-            if NSMouseInRect(NSEvent.mouseLocation, screen.frame, false) { w.makeKey() }   // 鼠标所在的屏幕接收 Esc
-            windows.append(w)
+            windows.append(w); views.append(v)
+            // 上次选过的框还在这块屏幕上就沿用
+            if let r = initial, r.display == id { v.rect = v.flip(r.rect); active = v }
         }
-        NSApp.activate(ignoringOtherApps: true)
+        if active == nil {
+            // 默认：鼠标所在屏幕中间 60% 的框
+            let mouse = NSEvent.mouseLocation
+            let i = NSScreen.screens.firstIndex { NSMouseInRect(mouse, $0.frame, false) } ?? 0
+            let v = views[i], b = v.bounds
+            v.rect = CGRect(x: b.width * 0.2, y: b.height * 0.2, width: b.width * 0.6, height: b.height * 0.6).integral
+            active = v
+        }
+        if Self.testShot == nil {
+            windows.forEach { $0.orderFrontRegardless() }
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        setActive(active!)
     }
-    static func close() { windows.forEach { $0.orderOut(nil) }; windows = [] }
+
+    // 框换到另一块屏幕：原来那块的框去掉，工具栏跟过去
+    func setActive(_ v: RegionView) {
+        if let old = active, old !== v { old.rect = nil }
+        active = v
+        bar.removeFromSuperview(); v.addSubview(bar); bar.place(in: v.bounds)
+        v.window?.makeKey(); v.window?.makeFirstResponder(v)
+        changed()
+    }
+    static func snapshot(to path: String) {
+        guard let v = current?.active, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
+        v.cacheDisplay(in: v.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+    }
+    func changed() { bar.size = active?.rect?.size ?? .zero }
+
+    func confirm() {
+        guard let v = active, let r = v.rect, r.width >= 20, r.height >= 20 else { NSSound.beep(); return }
+        let region = Region(display: v.display, rect: v.flip(r))
+        close()
+        done(region)
+    }
+    func close() {
+        let ws = windows
+        ws.forEach { $0.orderOut(nil) }
+        windows = []; views = []
+        DispatchQueue.main.async { _ = ws }   // 别在窗口自己的鼠标事件里把它释放掉
+        if Self.current === self { Self.current = nil }
+    }
 }
 
 final class OverlayWindow: NSWindow {
     override var canBecomeKey: Bool { true }
 }
 
+// 底部工具栏
+final class PickerBar: NSVisualEffectView {
+    private weak var picker: RegionPicker?
+    private let label = NSTextField(labelWithString: "")
+    var size: CGSize = .zero { didSet { label.stringValue = "\(Int(size.width)) × \(Int(size.height))" } }
+
+    init(picker: RegionPicker) {
+        self.picker = picker
+        super.init(frame: CGRect(x: 0, y: 0, width: 300, height: 52))
+        appearance = NSAppearance(named: .darkAqua)
+        material = .hudWindow; blendingMode = .behindWindow; state = .active
+        wantsLayer = true; layer?.cornerRadius = 12
+        let close = NSButton(image: NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: L("取消", "Cancel"))!,
+                             target: self, action: #selector(cancel))
+        close.isBordered = false; close.contentTintColor = .secondaryLabelColor
+        close.symbolConfiguration = .init(pointSize: 18, weight: .regular)
+        close.keyEquivalent = "\u{1b}"   // Esc
+        label.font = .monospacedDigitSystemFont(ofSize: 13, weight: .medium)
+        label.alignment = .center
+        label.widthAnchor.constraint(equalToConstant: 110).isActive = true
+        let rec = NSButton(title: L("录制", "Record"), target: self, action: #selector(record))
+        rec.bezelStyle = .push; rec.controlSize = .large
+        rec.keyEquivalent = "\r"            // 回车；同时让按钮显示成蓝色
+        let stack = NSStackView(views: [close, label, rec])
+        stack.spacing = 14; stack.alignment = .centerY
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([stack.centerXAnchor.constraint(equalTo: centerXAnchor),
+                                     stack.centerYAnchor.constraint(equalTo: centerYAnchor)])
+        setFrameSize(CGSize(width: stack.fittingSize.width + 28, height: 52))
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func place(in b: CGRect) { setFrameOrigin(CGPoint(x: (b.width - frame.width) / 2, y: 70)) }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .arrow) }
+    @objc private func cancel() { picker?.close() }
+    @objc private func record() { picker?.confirm() }
+}
+
 final class RegionView: NSView {
-    var onDone: ((CGRect?) -> Void)?
-    private var start: CGPoint?
-    private var rect: CGRect?
+    unowned let picker: RegionPicker
+    let display: CGDirectDisplayID
+    var rect: CGRect? { didSet { needsDisplay = true; window?.invalidateCursorRects(for: self) } }
+
+    private enum Drag { case new(CGPoint, CGRect?), move(CGPoint, CGRect), resize(Int, CGRect) }
+    private var drag: Drag?
+
+    init(frame: CGRect, picker: RegionPicker, display: CGDirectDisplayID) {
+        self.picker = picker; self.display = display
+        super.init(frame: frame)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    // 视图坐标左下角为原点、录屏要左上角为原点，两边互换是同一个公式
+    func flip(_ r: CGRect) -> CGRect { CGRect(x: r.minX, y: bounds.height - r.maxY, width: r.width, height: r.height) }
+
+    // 八个控制点：0 左下、1 下中、2 右下、3 右中、4 右上、5 上中、6 左上、7 左中
+    private func handles(_ r: CGRect) -> [CGPoint] {
+        [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.midX, y: r.minY), CGPoint(x: r.maxX, y: r.minY), CGPoint(x: r.maxX, y: r.midY),
+         CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.midX, y: r.maxY), CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.minX, y: r.midY)]
+    }
 
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func viewDidMoveToWindow() { window?.makeFirstResponder(self) }
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .crosshair) }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .crosshair)
+        guard let r = rect else { return }
+        addCursorRect(r.insetBy(dx: 8, dy: 8), cursor: .openHand)
+        for (i, h) in handles(r).enumerated() {
+            let c: NSCursor = i == 1 || i == 5 ? .resizeUpDown : i == 3 || i == 7 ? .resizeLeftRight : .crosshair
+            addCursorRect(CGRect(x: h.x - 8, y: h.y - 8, width: 16, height: 16), cursor: c)
+        }
+    }
 
     override func mouseDown(with e: NSEvent) {
-        window?.makeKey(); window?.makeFirstResponder(self)
-        start = convert(e.locationInWindow, from: nil); rect = nil; needsDisplay = true
+        if picker.active !== self { picker.setActive(self) }
+        let p = convert(e.locationInWindow, from: nil)
+        if e.clickCount == 2, rect?.contains(p) == true { picker.confirm(); return }
+        if let r = rect, let i = handles(r).firstIndex(where: { hypot($0.x - p.x, $0.y - p.y) <= 10 }) {
+            drag = .resize(i, r)
+        } else if let r = rect, r.contains(p) {
+            drag = .move(p, r); NSCursor.closedHand.set()
+        } else {
+            drag = .new(p, rect)
+        }
     }
     override func mouseDragged(with e: NSEvent) {
-        guard let s = start else { return }
-        let p = convert(e.locationInWindow, from: nil)
-        rect = CGRect(x: min(s.x, p.x), y: min(s.y, p.y), width: abs(p.x - s.x), height: abs(p.y - s.y)).integral
-        needsDisplay = true
+        var p = convert(e.locationInWindow, from: nil)
+        p.x = min(max(p.x, 0), bounds.width); p.y = min(max(p.y, 0), bounds.height)
+        switch drag {
+        case .new(let s, _):
+            rect = CGRect(x: min(s.x, p.x), y: min(s.y, p.y), width: abs(p.x - s.x), height: abs(p.y - s.y)).integral
+        case .move(let s, let r):
+            var n = r.offsetBy(dx: p.x - s.x, dy: p.y - s.y)
+            n.origin.x = min(max(n.minX, 0), bounds.width - n.width)
+            n.origin.y = min(max(n.minY, 0), bounds.height - n.height)
+            rect = n.integral
+        case .resize(let i, let r):
+            var x0 = r.minX, x1 = r.maxX, y0 = r.minY, y1 = r.maxY
+            if [0, 6, 7].contains(i) { x0 = p.x }
+            if [2, 3, 4].contains(i) { x1 = p.x }
+            if [0, 1, 2].contains(i) { y0 = p.y }
+            if [4, 5, 6].contains(i) { y1 = p.y }
+            rect = CGRect(x: min(x0, x1), y: min(y0, y1), width: abs(x1 - x0), height: abs(y1 - y0)).integral
+        case nil: return
+        }
+        picker.changed()
     }
-    override func mouseUp(with e: NSEvent) { if start != nil { onDone?(rect) } }
-    override func keyDown(with e: NSEvent) {
-        if e.keyCode == UInt16(kVK_Escape) { onDone?(nil) } else { super.keyDown(with: e) }
+    override func mouseUp(with e: NSEvent) {
+        // 框外只点一下没拖（或拖得太小）：保留原来的框
+        if case .new(_, let old) = drag, (rect?.width ?? 0) < 20 || (rect?.height ?? 0) < 20 { rect = old; picker.changed() }
+        drag = nil
+        window?.invalidateCursorRects(for: self)
     }
-    override func cancelOperation(_ sender: Any?) { onDone?(nil) }
+    override func cancelOperation(_ sender: Any?) { picker.close() }
 
     override func draw(_ dirtyRect: NSRect) {
-        // 框外变暗；框内几乎透明（完全透明的地方鼠标会点穿到下面的程序）
-        NSColor(white: 0, alpha: 0.35).setFill()
+        // 框外稍微压暗；框内几乎透明（完全透明的地方鼠标会点穿到下面的程序）
+        NSColor(white: 0, alpha: 0.25).setFill()
         let dim = NSBezierPath(rect: bounds)
         if let r = rect { dim.append(NSBezierPath(rect: r)); dim.windingRule = .evenOdd }
         dim.fill()
-        if let r = rect {
-            NSColor(white: 0, alpha: 0.01).setFill(); r.fill()
-            NSColor.white.setStroke()
-            let b = NSBezierPath(rect: r.insetBy(dx: -1, dy: -1)); b.lineWidth = 2; b.stroke()
-            let below = r.minY - 28 >= 0
-            tag("\(Int(r.width)) × \(Int(r.height))", at: CGPoint(x: r.minX, y: below ? r.minY - 28 : r.maxY + 6))
-        } else {
-            let text = L("拖一个框，选择要录的区域　·　Esc 取消", "Drag to select the area to record  ·  Esc to cancel")
-            let size = (text as NSString).size(withAttributes: Self.attrs(18))
-            tag(text, at: CGPoint(x: bounds.midX - size.width / 2 - 12, y: bounds.midY), font: 18)
+        guard let r = rect else { return }
+        NSColor(white: 0, alpha: 0.01).setFill(); r.fill()
+        // 虚线框：先描一道深色底，浅色背景上也看得清
+        let edge = NSBezierPath(rect: r.insetBy(dx: -0.5, dy: -0.5))
+        NSColor(white: 0, alpha: 0.4).setStroke(); edge.lineWidth = 3; edge.stroke()
+        NSColor.white.setStroke(); edge.lineWidth = 1.5; edge.setLineDash([6, 4], count: 2, phase: 0); edge.stroke()
+        for h in handles(r) {
+            let dot = NSBezierPath(ovalIn: CGRect(x: h.x - 5, y: h.y - 5, width: 10, height: 10))
+            NSColor.white.setFill(); dot.fill()
+            NSColor(white: 0, alpha: 0.35).setStroke(); dot.lineWidth = 1; dot.stroke()
         }
-    }
-    // 黑底白字的小标签
-    private func tag(_ text: String, at p: CGPoint, font: CGFloat = 13) {
-        let a = Self.attrs(font)
-        let size = (text as NSString).size(withAttributes: a)
-        let box = CGRect(x: p.x, y: p.y, width: size.width + 24, height: size.height + 8)
-        NSColor(white: 0, alpha: 0.75).setFill()
-        NSBezierPath(roundedRect: box, xRadius: 6, yRadius: 6).fill()
-        (text as NSString).draw(at: CGPoint(x: box.minX + 12, y: box.minY + 4), withAttributes: a)
-    }
-    private static func attrs(_ size: CGFloat) -> [NSAttributedString.Key: Any] {
-        [.font: NSFont.monospacedDigitSystemFont(ofSize: size, weight: .medium), .foregroundColor: NSColor.white]
     }
 }
 
@@ -487,6 +617,14 @@ struct RecorderApp: App {
             ContentView(rec: rec)
                 .onAppear {
                     HotKey.action = { [weak rec] in rec?.toggle() }
+                    if let path = RegionPicker.testShot {
+                        Task { @MainActor in
+                            rec.pickRegion()
+                            try? await Task.sleep(for: .seconds(0.5))
+                            RegionPicker.snapshot(to: path)
+                            NSApp.terminate(nil)
+                        }
+                    }
                     // 自测：AUTOTEST=秒数 → 录整个屏幕这么久，结果写到 /tmp/recorder_test.txt，然后退出
                     if let t = ProcessInfo.processInfo.environment["AUTOTEST"], let secs = Double(t) {
                         Task { @MainActor in
