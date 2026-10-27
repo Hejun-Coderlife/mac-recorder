@@ -8,6 +8,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -parse-as-library -swift-version 5 -target arm64-apple-macos15.0 \
   -framework ScreenCaptureKit -framework AVFoundation -framework Carbon \
   Recorder.swift -o "$APP/Contents/MacOS/Recorder"
+cp AppIcon.icns "$APP/Contents/Resources/"   # 图标由 tools/make_icon.swift 画出
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -15,6 +16,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>录屏</string>
   <key>CFBundleDisplayName</key><string>录屏</string>
   <key>CFBundleIdentifier</key><string>com.hejun.screenrecorder</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleExecutable</key><string>Recorder</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
