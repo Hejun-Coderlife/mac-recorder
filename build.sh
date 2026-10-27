@@ -1,5 +1,5 @@
 #!/bin/sh
-# 编译成 录屏.app（只要命令行开发工具，不用 Xcode），装到 ~/Applications
+# 编译成 录屏.app（只要命令行开发工具，不用 Xcode），装到 /Applications
 set -e
 cd "$(dirname "$0")"
 APP="build/录屏.app"
@@ -28,7 +28,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 # 用固定的本机证书签名（钥匙串里的 Hejun Local Code Signing）：重新编译后系统仍认得是同一个程序，录屏权限不会失效；没有证书时退回临时签名
 if security find-identity -v -p codesigning | grep -q "Hejun Local Code Signing"; then codesign --force --deep -s "Hejun Local Code Signing" "$APP"; else codesign --force --deep -s - "$APP"; fi
-mkdir -p "$HOME/Applications"
-rm -rf "$HOME/Applications/录屏.app"
-cp -R "$APP" "$HOME/Applications/"
-echo "OK: $HOME/Applications/录屏.app"
+mkdir -p /Applications
+rm -rf "/Applications/录屏.app" "$HOME/Applications/录屏.app"
+cp -R "$APP" /Applications/
+echo "OK: /Applications/录屏.app"
