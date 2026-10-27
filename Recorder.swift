@@ -13,7 +13,10 @@ let isZh = Locale.preferredLanguages.first?.hasPrefix("zh") ?? false
 func L(_ zh: String, _ en: String) -> String { isZh ? zh : en }
 let appName = L("录屏", "Screen Recorder")
 
-// 可录的东西：整个屏幕或某个窗口
+// 框选的区域：在哪块屏幕上、框的位置（点，左上角为原点）
+struct Region { let display: CGDirectDisplayID; let rect: CGRect }
+
+// 可录的东西：整个屏幕、框选区域或某个窗口
 struct Source: Identifiable, Hashable {
     let id: String
     let title: String
@@ -128,6 +131,7 @@ final class Recorder: NSObject, ObservableObject {
     @Published var elapsed: TimeInterval = 0
     @Published var message = ""
     @Published var isError = false        // 提示是不是出错（标红）
+    @Published var region: Region?        // 框选的区域（列表里 id = "r"）
     private var needsPermission = false
     @Published var lastFile: URL?
 
@@ -149,6 +153,10 @@ final class Recorder: NSObject, ObservableObject {
             let c = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
             content = c
             var list: [Source] = []
+            if let r = region {
+                list.append(Source(id: "r", title: L("选定区域", "Selected Area"),
+                                   detail: "\(Int(r.rect.width)) × \(Int(r.rect.height))", isDisplay: false))
+            }
             for (i, d) in c.displays.enumerated() {
                 list.append(Source(id: "d\(d.displayID)", title: c.displays.count > 1 ? L("整个屏幕 \(i + 1)", "Entire Screen \(i + 1)") : L("整个屏幕", "Entire Screen"),
                                    detail: "\(d.width) × \(d.height)", isDisplay: true))
@@ -177,6 +185,15 @@ final class Recorder: NSObject, ObservableObject {
         message = text; isError = error
     }
 
+    // 盖上遮罩让用户拖一个框，选好后列表里出现「选定区域」并选中它
+    func pickRegion() {
+        RegionPicker.pick { [weak self] r in
+            guard let self else { return }
+            self.region = r; self.selection = "r"
+            Task { await self.refresh() }
+        }
+    }
+
     func toggle() {
         guard !busy else { return }
         Task { recording ? await stop() : await start() }
@@ -193,7 +210,15 @@ final class Recorder: NSObject, ObservableObject {
         }
         // 画面范围
         let filter: SCContentFilter
-        if sel.hasPrefix("d"), let d = c.displays.first(where: { "d\($0.displayID)" == sel }) {
+        var crop: CGRect?
+        if sel == "r" {
+            guard let r = region, let d = c.displays.first(where: { $0.displayID == r.display }) else {
+                say(L("那块屏幕不见了，重新选一下区域", "That screen is gone, select the area again"), error: true); return
+            }
+            let mine = c.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
+            filter = SCContentFilter(display: d, excludingApplications: mine, exceptingWindows: [])
+            crop = r.rect
+        } else if sel.hasPrefix("d"), let d = c.displays.first(where: { "d\($0.displayID)" == sel }) {
             // 整个屏幕：把本程序自己的窗口排除掉
             let mine = c.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
             filter = SCContentFilter(display: d, excludingApplications: mine, exceptingWindows: [])
@@ -204,8 +229,10 @@ final class Recorder: NSObject, ObservableObject {
         let cfg = SCStreamConfiguration()
         let scale = CGFloat(filter.pointPixelScale)
         // 宽高按像素、取偶数（H.264 要求）
-        cfg.width = max(2, Int(filter.contentRect.width * scale) / 2 * 2)
-        cfg.height = max(2, Int(filter.contentRect.height * scale) / 2 * 2)
+        let size = crop?.size ?? filter.contentRect.size
+        cfg.width = max(2, Int(size.width * scale) / 2 * 2)
+        cfg.height = max(2, Int(size.height * scale) / 2 * 2)
+        if let crop { cfg.sourceRect = crop }
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         cfg.queueDepth = 6
         // 色彩：COLORMODE 环境变量用来对比试验（默认 = 试验选出来的那种）
@@ -300,6 +327,96 @@ final class HotKey {
     }
 }
 
+// ---- 选区域：每块屏幕盖一层半透明遮罩，按住拖一个框，松手就选好；Esc 取消 ----
+final class RegionPicker {
+    private static var windows: [NSWindow] = []
+    static func pick(_ done: @escaping (Region) -> Void) {
+        close()
+        for screen in NSScreen.screens {
+            let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? CGMainDisplayID()
+            let w = OverlayWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
+            w.level = .screenSaver
+            w.isOpaque = false; w.backgroundColor = .clear; w.hasShadow = false
+            w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            let v = RegionView(frame: CGRect(origin: .zero, size: screen.frame.size))
+            v.onDone = { rect in
+                DispatchQueue.main.async { close() }   // 别在这个窗口自己的鼠标事件里把它关掉
+                guard let rect, rect.width >= 20, rect.height >= 20 else { return }
+                // 视图坐标左下角为原点，录屏要左上角为原点
+                done(Region(display: id, rect: CGRect(x: rect.minX, y: screen.frame.height - rect.maxY, width: rect.width, height: rect.height)))
+            }
+            w.contentView = v
+            w.orderFrontRegardless()
+            if NSMouseInRect(NSEvent.mouseLocation, screen.frame, false) { w.makeKey() }   // 鼠标所在的屏幕接收 Esc
+            windows.append(w)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    static func close() { windows.forEach { $0.orderOut(nil) }; windows = [] }
+}
+
+final class OverlayWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+}
+
+final class RegionView: NSView {
+    var onDone: ((CGRect?) -> Void)?
+    private var start: CGPoint?
+    private var rect: CGRect?
+
+    override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func viewDidMoveToWindow() { window?.makeFirstResponder(self) }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .crosshair) }
+
+    override func mouseDown(with e: NSEvent) {
+        window?.makeKey(); window?.makeFirstResponder(self)
+        start = convert(e.locationInWindow, from: nil); rect = nil; needsDisplay = true
+    }
+    override func mouseDragged(with e: NSEvent) {
+        guard let s = start else { return }
+        let p = convert(e.locationInWindow, from: nil)
+        rect = CGRect(x: min(s.x, p.x), y: min(s.y, p.y), width: abs(p.x - s.x), height: abs(p.y - s.y)).integral
+        needsDisplay = true
+    }
+    override func mouseUp(with e: NSEvent) { if start != nil { onDone?(rect) } }
+    override func keyDown(with e: NSEvent) {
+        if e.keyCode == UInt16(kVK_Escape) { onDone?(nil) } else { super.keyDown(with: e) }
+    }
+    override func cancelOperation(_ sender: Any?) { onDone?(nil) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        // 框外变暗；框内几乎透明（完全透明的地方鼠标会点穿到下面的程序）
+        NSColor(white: 0, alpha: 0.35).setFill()
+        let dim = NSBezierPath(rect: bounds)
+        if let r = rect { dim.append(NSBezierPath(rect: r)); dim.windingRule = .evenOdd }
+        dim.fill()
+        if let r = rect {
+            NSColor(white: 0, alpha: 0.01).setFill(); r.fill()
+            NSColor.white.setStroke()
+            let b = NSBezierPath(rect: r.insetBy(dx: -1, dy: -1)); b.lineWidth = 2; b.stroke()
+            let below = r.minY - 28 >= 0
+            tag("\(Int(r.width)) × \(Int(r.height))", at: CGPoint(x: r.minX, y: below ? r.minY - 28 : r.maxY + 6))
+        } else {
+            let text = L("拖一个框，选择要录的区域　·　Esc 取消", "Drag to select the area to record  ·  Esc to cancel")
+            let size = (text as NSString).size(withAttributes: Self.attrs(18))
+            tag(text, at: CGPoint(x: bounds.midX - size.width / 2 - 12, y: bounds.midY), font: 18)
+        }
+    }
+    // 黑底白字的小标签
+    private func tag(_ text: String, at p: CGPoint, font: CGFloat = 13) {
+        let a = Self.attrs(font)
+        let size = (text as NSString).size(withAttributes: a)
+        let box = CGRect(x: p.x, y: p.y, width: size.width + 24, height: size.height + 8)
+        NSColor(white: 0, alpha: 0.75).setFill()
+        NSBezierPath(roundedRect: box, xRadius: 6, yRadius: 6).fill()
+        (text as NSString).draw(at: CGPoint(x: box.minX + 12, y: box.minY + 4), withAttributes: a)
+    }
+    private static func attrs(_ size: CGFloat) -> [NSAttributedString.Key: Any] {
+        [.font: NSFont.monospacedDigitSystemFont(ofSize: size, weight: .medium), .foregroundColor: NSColor.white]
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var rec: Recorder
     var body: some View {
@@ -307,11 +424,12 @@ struct ContentView: View {
             HStack {
                 Text(L("录什么", "What to record")).font(.headline)
                 Spacer()
+                Button(L("选区域…", "Select Area…")) { rec.pickRegion() }.disabled(rec.recording)
                 Button(L("刷新列表", "Refresh")) { Task { await rec.refresh() } }.disabled(rec.recording)
             }
             List(rec.sources, selection: $rec.selection) { s in
                 HStack(spacing: 10) {
-                    Image(systemName: s.isDisplay ? "display" : "macwindow").frame(width: 20)
+                    Image(systemName: s.id == "r" ? "rectangle.dashed" : s.isDisplay ? "display" : "macwindow").frame(width: 20)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(s.title).font(.body.weight(.medium))
                         Text(s.detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -374,6 +492,11 @@ struct RecorderApp: App {
                         Task { @MainActor in
                             try? await Task.sleep(for: .seconds(1.5))
                             rec.selection = rec.sources.first(where: { $0.isDisplay })?.id
+                            // AUTOREGION=x,y,宽,高 → 改成录主屏幕上的这块区域
+                            if let a = ProcessInfo.processInfo.environment["AUTOREGION"]?.split(separator: ",").compactMap({ Double($0) }), a.count == 4 {
+                                rec.region = Region(display: CGMainDisplayID(), rect: CGRect(x: a[0], y: a[1], width: a[2], height: a[3]))
+                                rec.selection = "r"
+                            }
                             rec.toggle()
                             try? await Task.sleep(for: .seconds(secs + 1))
                             rec.toggle()
