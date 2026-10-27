@@ -228,10 +228,13 @@ final class Recorder: NSObject, ObservableObject {
 
         let cfg = SCStreamConfiguration()
         let scale = CGFloat(filter.pointPixelScale)
-        // 宽高按像素、取偶数（H.264 要求）
+        // 宽高按像素；H.264 要偶数，奇数时往上补 1 像素（边上留一条空白），画面按原尺寸放、不缩放
+        // （以前往下取偶数：差 1 像素也会把整个画面重新缩放一遍，字全糊了。Retina 屏乘 2 本来就是偶数，只有 1 倍屏的奇数窗口会补）
         let size = crop?.size ?? filter.contentRect.size
-        cfg.width = max(2, Int(size.width * scale) / 2 * 2)
-        cfg.height = max(2, Int(size.height * scale) / 2 * 2)
+        let pw = max(2, Int((size.width * scale).rounded())), ph = max(2, Int((size.height * scale).rounded()))
+        cfg.width = (pw + 1) / 2 * 2
+        cfg.height = (ph + 1) / 2 * 2
+        if cfg.width != pw || cfg.height != ph { cfg.destinationRect = CGRect(origin: .zero, size: size) }
         if let crop { cfg.sourceRect = crop }
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         cfg.queueDepth = 6
@@ -630,6 +633,10 @@ struct RecorderApp: App {
                         Task { @MainActor in
                             try? await Task.sleep(for: .seconds(1.5))
                             rec.selection = rec.sources.first(where: { $0.isDisplay })?.id
+                            // AUTOWINDOW=程序名 → 改成录这个程序的第一个窗口
+                            if let app = ProcessInfo.processInfo.environment["AUTOWINDOW"] {
+                                rec.selection = rec.sources.first(where: { !$0.isDisplay && $0.title == app })?.id
+                            }
                             // AUTOREGION=x,y,宽,高 → 改成录主屏幕上的这块区域
                             if let a = ProcessInfo.processInfo.environment["AUTOREGION"]?.split(separator: ",").compactMap({ Double($0) }), a.count == 4 {
                                 rec.region = Region(display: CGMainDisplayID(), rect: CGRect(x: a[0], y: a[1], width: a[2], height: a[3]))
@@ -639,7 +646,7 @@ struct RecorderApp: App {
                             try? await Task.sleep(for: .seconds(secs + 1))
                             rec.toggle()
                             try? await Task.sleep(for: .seconds(3))
-                            try? "\(rec.message)\n\(rec.lastFile?.path ?? "")".write(toFile: "/tmp/recorder_test.txt", atomically: true, encoding: .utf8)
+                            try? "\(rec.sources.map(\.title))\n\(rec.message)\n\(rec.lastFile?.path ?? "")".write(toFile: "/tmp/recorder_test.txt", atomically: true, encoding: .utf8)
                             NSApp.terminate(nil)
                         }
                     }
