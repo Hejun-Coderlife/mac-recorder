@@ -8,7 +8,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -parse-as-library -swift-version 5 -target arm64-apple-macos15.0 \
   -framework ScreenCaptureKit -framework AVFoundation -framework Carbon \
   Recorder.swift -o "$APP/Contents/MacOS/Recorder"
-cp AppIcon.icns "$APP/Contents/Resources/"   # 图标由 tools/make_icon.swift 画出
+cp AppIcon.icns "$APP/Contents/Resources/"   # 图标原稿是 tools/icon.svg（1024 画布）
 # App 名字和系统菜单（退出、窗口…）跟随系统语言：中文叫「录屏」，其他语言叫 Screen Recorder
 mkdir -p "$APP/Contents/Resources/zh-Hans.lproj" "$APP/Contents/Resources/en.lproj"
 printf '"CFBundleName" = "录屏";\n"CFBundleDisplayName" = "录屏";\n"NSMicrophoneUsageDescription" = "录屏时同时录下你的声音（需要时才打开）";\n' > "$APP/Contents/Resources/zh-Hans.lproj/InfoPlist.strings"
