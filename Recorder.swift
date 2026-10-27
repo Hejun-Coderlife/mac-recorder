@@ -110,6 +110,8 @@ final class Writer: NSObject, SCStreamOutput, @unchecked Sendable {
         lut.withUnsafeBufferPointer { _ = vImageTableLookUp_Planar8(&buf, &buf, $0.baseAddress!, vImage_Flags(kvImageNoFlags)) }
     }
 
+    var hasTwoAudioTracks: Bool { sysAudio != nil && micAudio != nil }
+
     func finish() async throws {
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in queue.async { c.resume() } }   // 等采集线程上排着的样本写完
         guard started else { writer.cancelWriting(); throw NSError(domain: "录屏", code: 2, userInfo: [NSLocalizedDescriptionKey: L("没有录到画面（选的窗口被挡住或最小化了？）", "No frames captured (is the window covered or minimized?)")]) }
@@ -289,7 +291,14 @@ final class Recorder: NSObject, ObservableObject {
         stream = nil; writer = nil; recording = false
         NSSound(named: "Pop")?.play()
         guard let w else { return }
-        do { try await w.finish(); finished(nil) } catch { finished(error) }
+        do { try await w.finish() } catch { finished(error); return }
+        // 电脑声音和麦克风都录了：合成一条音轨（不然很多播放器、网站只放第一条，麦克风的声音会丢）
+        if w.hasTwoAudioTracks, let f = lastFile {
+            say(L("正在合成声音…", "Mixing audio…"))
+            do { try await AudioMerge.run(f) }
+            catch { say(L("合成声音失败，视频里电脑声音和麦克风还是两条音轨：", "Couldn't mix audio, the video keeps two audio tracks: ") + error.localizedDescription, error: true); return }
+        }
+        finished(nil)
     }
     // 录到一半出错（写文件失败、窗口关了）：停下，提示原因
     fileprivate func fail(_ e: Error) {
@@ -311,6 +320,58 @@ extension Recorder: SCStreamDelegate {
         Task { @MainActor in
             // 被录的窗口关掉了之类：自动停下并保存
             if self.recording { self.say(L("录制中断：", "Recording interrupted: ") + error.localizedDescription, error: true); self.toggle() }
+        }
+    }
+}
+
+// ---- 录完把「电脑声音」「麦克风」两条音轨混成一条：抖音、微信、很多网页播放器只放第一条音轨，麦克风会丢 ----
+//      画面原样拷贝、不重新压缩，只重新编码声音（几秒钟）；先写到同目录的临时文件，成功了再替换原文件
+enum AudioMerge {
+    static func run(_ url: URL) async throws {
+        let asset = AVURLAsset(url: url)
+        let audio = try await asset.loadTracks(withMediaType: .audio)
+        guard let vt = try await asset.loadTracks(withMediaType: .video).first, audio.count >= 2 else { return }
+        let tmp = url.deletingLastPathComponent().appendingPathComponent(".mixing-\(UUID().uuidString).mp4")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let reader = try AVAssetReader(asset: asset)
+        let vOut = AVAssetReaderTrackOutput(track: vt, outputSettings: nil)
+        let aOut = AVAssetReaderAudioMixOutput(audioTracks: audio, audioSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 48000, AVNumberOfChannelsKey: 2,
+            AVLinearPCMBitDepthKey: 32, AVLinearPCMIsFloatKey: true, AVLinearPCMIsBigEndianKey: false, AVLinearPCMIsNonInterleaved: false,
+        ])
+        reader.add(vOut); reader.add(aOut)
+
+        let writer = try AVAssetWriter(outputURL: tmp, fileType: .mp4)
+        let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: try await vt.load(.formatDescriptions).first)
+        vIn.transform = try await vt.load(.preferredTransform)
+        let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+            AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48000, AVNumberOfChannelsKey: 2, AVEncoderBitRateKey: 192_000,
+        ])
+        writer.add(vIn); writer.add(aIn)
+        guard reader.startReading() else { throw reader.error ?? NSError(domain: "录屏", code: 10) }
+        guard writer.startWriting() else { throw writer.error ?? NSError(domain: "录屏", code: 11) }
+        writer.startSession(atSourceTime: .zero)   // 读出来的时间都从 0 开始（文件里的编辑表已经换算好）
+
+        await withTaskGroup(of: Void.self) { g in
+            g.addTask { await pump(vOut, into: vIn, label: "video") }
+            g.addTask { await pump(aOut, into: aIn, label: "audio") }
+        }
+        if reader.status == .failed { writer.cancelWriting(); throw reader.error ?? NSError(domain: "录屏", code: 12) }
+        await writer.finishWriting()
+        guard writer.status == .completed else { throw writer.error ?? NSError(domain: "录屏", code: 13) }
+        _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+    }
+
+    // 把一路读出的样本全部写进对应的输入，读完为止
+    private static func pump(_ output: AVAssetReaderOutput, into input: AVAssetWriterInput, label: String) async {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            input.requestMediaDataWhenReady(on: DispatchQueue(label: "recorder.mix.\(label)")) {
+                while input.isReadyForMoreMediaData {
+                    guard let sb = output.copyNextSampleBuffer() else { input.markAsFinished(); c.resume(); return }
+                    input.append(sb)
+                }
+            }
         }
     }
 }
@@ -620,6 +681,14 @@ struct RecorderApp: App {
             ContentView(rec: rec)
                 .onAppear {
                     HotKey.action = { [weak rec] in rec?.toggle() }
+                    // 自测：MIXTEST=视频路径 → 把这个文件的两条音轨合成一条（会改动文件，先复制一份再测），然后退出
+                    if let path = ProcessInfo.processInfo.environment["MIXTEST"] {
+                        Task { @MainActor in
+                            do { try await AudioMerge.run(URL(fileURLWithPath: path)); print("MIX OK") } catch { print("MIX FAIL", error) }
+                            NSApp.terminate(nil)
+                        }
+                        return
+                    }
                     if let path = RegionPicker.testShot {
                         Task { @MainActor in
                             rec.pickRegion()
