@@ -8,6 +8,11 @@ import AVFoundation
 import Carbon.HIToolbox
 import Accelerate
 
+// 界面语言跟随系统：系统首选语言是中文就显示中文，否则英文
+let isZh = Locale.preferredLanguages.first?.hasPrefix("zh") ?? false
+func L(_ zh: String, _ en: String) -> String { isZh ? zh : en }
+let appName = L("录屏", "Screen Recorder")
+
 // 可录的东西：整个屏幕或某个窗口
 struct Source: Identifiable, Hashable {
     let id: String
@@ -104,7 +109,7 @@ final class Writer: NSObject, SCStreamOutput, @unchecked Sendable {
 
     func finish() async throws {
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in queue.async { c.resume() } }   // 等采集线程上排着的样本写完
-        guard started else { writer.cancelWriting(); throw NSError(domain: "录屏", code: 2, userInfo: [NSLocalizedDescriptionKey: "没有录到画面（选的窗口被挡住或最小化了？）"]) }
+        guard started else { writer.cancelWriting(); throw NSError(domain: "录屏", code: 2, userInfo: [NSLocalizedDescriptionKey: L("没有录到画面（选的窗口被挡住或最小化了？）", "No frames captured (is the window covered or minimized?)")]) }
         video.markAsFinished(); sysAudio?.markAsFinished(); micAudio?.markAsFinished()
         await writer.finishWriting()
         if writer.status != .completed { throw writer.error ?? NSError(domain: "录屏", code: 3) }
@@ -122,6 +127,8 @@ final class Recorder: NSObject, ObservableObject {
     @Published var busy = false
     @Published var elapsed: TimeInterval = 0
     @Published var message = ""
+    @Published var isError = false        // 提示是不是出错（标红）
+    private var needsPermission = false
     @Published var lastFile: URL?
 
     private var content: SCShareableContent?
@@ -143,7 +150,7 @@ final class Recorder: NSObject, ObservableObject {
             content = c
             var list: [Source] = []
             for (i, d) in c.displays.enumerated() {
-                list.append(Source(id: "d\(d.displayID)", title: c.displays.count > 1 ? "整个屏幕 \(i + 1)" : "整个屏幕",
+                list.append(Source(id: "d\(d.displayID)", title: c.displays.count > 1 ? L("整个屏幕 \(i + 1)", "Entire Screen \(i + 1)") : L("整个屏幕", "Entire Screen"),
                                    detail: "\(d.width) × \(d.height)", isDisplay: true))
             }
             let me = Bundle.main.bundleIdentifier
@@ -152,15 +159,22 @@ final class Recorder: NSObject, ObservableObject {
                 w.owningApplication?.bundleIdentifier != me && !(w.title ?? "").isEmpty
             }.sorted { ($0.owningApplication?.applicationName ?? "") < ($1.owningApplication?.applicationName ?? "") }
             for w in wins {
-                list.append(Source(id: "w\(w.windowID)", title: w.owningApplication?.applicationName ?? "窗口",
+                list.append(Source(id: "w\(w.windowID)", title: w.owningApplication?.applicationName ?? L("窗口", "Window"),
                                    detail: w.title ?? "", isDisplay: false))
             }
             sources = list
             if selection == nil || !list.contains(where: { $0.id == selection }) { selection = list.first?.id }
-            if message.hasPrefix("需要") { message = "" }
+            if needsPermission { needsPermission = false; say("") }
         } catch {
-            message = "需要屏幕录制权限：系统设置 → 隐私与安全性 → 屏幕与系统录音，打开「录屏」，然后退出并重新打开本程序"
+            needsPermission = true
+            say(L("需要屏幕录制权限：系统设置 → 隐私与安全性 → 屏幕与系统录音，打开「\(appName)」，然后退出并重新打开本程序",
+                  "Screen recording permission needed: System Settings → Privacy & Security → Screen & System Audio Recording, turn on “\(appName)”, then quit and reopen this app"), error: true)
         }
+    }
+
+    // 底部提示：error = true 时标红
+    func say(_ text: String, error: Bool = false) {
+        message = text; isError = error
     }
 
     func toggle() {
@@ -171,10 +185,11 @@ final class Recorder: NSObject, ObservableObject {
     private func start() async {
         busy = true; defer { busy = false }
         await refresh()
-        guard let c = content, let sel = selection else { message = "先选一个要录的屏幕或窗口"; return }
+        guard let c = content, let sel = selection else { say(L("先选一个要录的屏幕或窗口", "Pick a screen or window to record first"), error: true); return }
         if microphone {
             let ok = await AVCaptureDevice.requestAccess(for: .audio)
-            if !ok { message = "没有麦克风权限：系统设置 → 隐私与安全性 → 麦克风，打开「录屏」"; return }
+            if !ok { say(L("没有麦克风权限：系统设置 → 隐私与安全性 → 麦克风，打开「\(appName)」",
+                         "No microphone permission: System Settings → Privacy & Security → Microphone, turn on “\(appName)”"), error: true); return }
         }
         // 画面范围
         let filter: SCContentFilter
@@ -184,7 +199,7 @@ final class Recorder: NSObject, ObservableObject {
             filter = SCContentFilter(display: d, excludingApplications: mine, exceptingWindows: [])
         } else if let w = c.windows.first(where: { "w\($0.windowID)" == sel }) {
             filter = SCContentFilter(desktopIndependentWindow: w)
-        } else { message = "这个窗口已经关掉了，换一个"; await refresh(); return }
+        } else { say(L("这个窗口已经关掉了，换一个", "That window is gone, pick another one"), error: true); await refresh(); return }
 
         let cfg = SCStreamConfiguration()
         let scale = CGFloat(filter.pointPixelScale)
@@ -212,10 +227,10 @@ final class Recorder: NSObject, ObservableObject {
         cfg.captureMicrophone = microphone
 
         let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd HH.mm.ss"
-        let url = Recorder.folder.appendingPathComponent("录屏 \(fmt.string(from: Date())).mp4")
+        let url = Recorder.folder.appendingPathComponent("\(L("录屏", "Recording")) \(fmt.string(from: Date())).mp4")
         let w: Writer
         do { w = try Writer(url: url, width: cfg.width, height: cfg.height, system: systemAudio, mic: microphone) }
-        catch { message = "开始录制失败：\(error.localizedDescription)"; return }
+        catch { say(L("开始录制失败：", "Couldn't start recording: ") + error.localizedDescription, error: true); return }
         w.onError = { [weak self] e in Task { @MainActor in self?.fail(e) } }
         let s = SCStream(filter: filter, configuration: cfg, delegate: self)
         do {
@@ -224,12 +239,12 @@ final class Recorder: NSObject, ObservableObject {
             if microphone { try s.addStreamOutput(w, type: .microphone, sampleHandlerQueue: w.queue) }
             try await s.startCapture()
         } catch {
-            message = "开始录制失败：\(error.localizedDescription)"
+            say(L("开始录制失败：", "Couldn't start recording: ") + error.localizedDescription, error: true)
             try? FileManager.default.removeItem(at: url)
             return
         }
         stream = s; writer = w; lastFile = url
-        recording = true; startedAt = Date(); elapsed = 0; message = ""
+        recording = true; startedAt = Date(); elapsed = 0; say("")
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in if let self, let t = self.startedAt { self.elapsed = Date().timeIntervalSince(t) } }
         }
@@ -248,14 +263,14 @@ final class Recorder: NSObject, ObservableObject {
     }
     // 录到一半出错（写文件失败、窗口关了）：停下，提示原因
     fileprivate func fail(_ e: Error) {
-        message = "录制出错：\(e.localizedDescription)"
+        say(L("录制出错：", "Recording error: ") + e.localizedDescription, error: true)
         if recording { toggle() }
     }
 
     fileprivate func finished(_ error: Error?) {
-        if let error { message = "保存失败：\(error.localizedDescription)"; return }
+        if let error { say(L("保存失败：", "Save failed: ") + error.localizedDescription, error: true); return }
         if let f = lastFile, FileManager.default.fileExists(atPath: f.path) {
-            message = "已保存：\(f.lastPathComponent)"
+            say(L("已保存：", "Saved: ") + f.lastPathComponent)
             NSWorkspace.shared.activateFileViewerSelecting([f])
         }
     }
@@ -265,7 +280,7 @@ extension Recorder: SCStreamDelegate {
     nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {
         Task { @MainActor in
             // 被录的窗口关掉了之类：自动停下并保存
-            if self.recording { self.message = "录制中断：\(error.localizedDescription)"; self.toggle() }
+            if self.recording { self.say(L("录制中断：", "Recording interrupted: ") + error.localizedDescription, error: true); self.toggle() }
         }
     }
 }
@@ -290,9 +305,9 @@ struct ContentView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("录什么").font(.headline)
+                Text(L("录什么", "What to record")).font(.headline)
                 Spacer()
-                Button("刷新列表") { Task { await rec.refresh() } }.disabled(rec.recording)
+                Button(L("刷新列表", "Refresh")) { Task { await rec.refresh() } }.disabled(rec.recording)
             }
             List(rec.sources, selection: $rec.selection) { s in
                 HStack(spacing: 10) {
@@ -307,14 +322,14 @@ struct ContentView: View {
             .disabled(rec.recording)
 
             HStack(spacing: 22) {
-                Toggle("录电脑声音", isOn: $rec.systemAudio)
-                Toggle("录麦克风", isOn: $rec.microphone)
-                Toggle("显示鼠标", isOn: $rec.showCursor)
+                Toggle(L("录电脑声音", "System audio"), isOn: $rec.systemAudio)
+                Toggle(L("录麦克风", "Microphone"), isOn: $rec.microphone)
+                Toggle(L("显示鼠标", "Show cursor"), isOn: $rec.showCursor)
             }.disabled(rec.recording)
 
             HStack(alignment: .center, spacing: 16) {
                 Button(action: rec.toggle) {
-                    Label(rec.recording ? "停止" : "开始录制", systemImage: rec.recording ? "stop.fill" : "record.circle")
+                    Label(rec.recording ? L("停止", "Stop") : L("开始录制", "Record"), systemImage: rec.recording ? "stop.fill" : "record.circle")
                         .font(.title3.weight(.semibold)).frame(minWidth: 140)
                 }
                 .controlSize(.large)
@@ -328,15 +343,15 @@ struct ContentView: View {
                         .font(.title2.monospacedDigit())
                 }
                 Spacer()
-                Text("⌥⌘R 开始 / 停止").font(.callout).foregroundStyle(.secondary)
+                Text(L("⌥⌘R 开始 / 停止", "⌥⌘R start / stop")).font(.callout).foregroundStyle(.secondary)
             }
 
             HStack {
-                Text(rec.message.isEmpty ? "保存到：影片 / 录屏" : rec.message)
-                    .font(.callout).foregroundStyle(rec.message.contains("失败") || rec.message.contains("需要") || rec.message.contains("没有") ? .red : .secondary)
+                Text(rec.message.isEmpty ? L("保存到：影片 / ", "Saved to: Movies / ") + Recorder.folder.lastPathComponent : rec.message)
+                    .font(.callout).foregroundStyle(rec.isError ? .red : .secondary)
                     .lineLimit(2)
                 Spacer()
-                Button("打开文件夹") { NSWorkspace.shared.open(Recorder.folder) }
+                Button(L("打开文件夹", "Open Folder")) { NSWorkspace.shared.open(Recorder.folder) }
             }
         }
         .padding(18)
@@ -350,7 +365,7 @@ struct RecorderApp: App {
     @StateObject private var rec = Recorder()
     private let hotKey = HotKey()
     var body: some Scene {
-        WindowGroup("录屏") {
+        WindowGroup(appName) {
             ContentView(rec: rec)
                 .onAppear {
                     HotKey.action = { [weak rec] in rec?.toggle() }

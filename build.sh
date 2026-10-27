@@ -9,6 +9,10 @@ swiftc -O -parse-as-library -swift-version 5 -target arm64-apple-macos15.0 \
   -framework ScreenCaptureKit -framework AVFoundation -framework Carbon \
   Recorder.swift -o "$APP/Contents/MacOS/Recorder"
 cp AppIcon.icns "$APP/Contents/Resources/"   # 图标由 tools/make_icon.swift 画出
+# App 名字和系统菜单（退出、窗口…）跟随系统语言：中文叫「录屏」，其他语言叫 Screen Recorder
+mkdir -p "$APP/Contents/Resources/zh-Hans.lproj" "$APP/Contents/Resources/en.lproj"
+printf '"CFBundleName" = "录屏";\n"CFBundleDisplayName" = "录屏";\n"NSMicrophoneUsageDescription" = "录屏时同时录下你的声音（需要时才打开）";\n' > "$APP/Contents/Resources/zh-Hans.lproj/InfoPlist.strings"
+printf '"CFBundleName" = "Screen Recorder";\n"CFBundleDisplayName" = "Screen Recorder";\n' > "$APP/Contents/Resources/en.lproj/InfoPlist.strings"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -16,6 +20,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>录屏</string>
   <key>CFBundleDisplayName</key><string>录屏</string>
   <key>CFBundleIdentifier</key><string>com.hejun.screenrecorder</string>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
+  <key>LSHasLocalizedDisplayName</key><true/>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleExecutable</key><string>Recorder</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -23,7 +30,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSMicrophoneUsageDescription</key><string>录屏时同时录下你的声音（需要时才打开）</string>
+  <key>NSMicrophoneUsageDescription</key><string>Records your voice along with the screen (only when turned on)</string>
 </dict></plist>
 PLIST
 # 用固定的本机证书签名（钥匙串里的 Hejun Local Code Signing）：重新编译后系统仍认得是同一个程序，录屏权限不会失效；没有证书时退回临时签名
