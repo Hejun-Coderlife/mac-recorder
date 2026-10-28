@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="zh">
+<!-- 抖音宣传视频（1080×1920 竖屏）：每一帧由 frame(T) 按时间算出来，record.mjs 逐帧截图合成 MP4
+     浏览器里直接打开可预览（自动循环播放）；?rec=1 时不自动播放，等脚本调 frame(T)
+     抖音安全区：上 ~180、下 ~420、右 ~150 像素会被标题/按钮挡住，重点内容放中间 -->
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1080px; height: 1920px; overflow: hidden; background: #f5f5f7; }
+  body { font-family: "PingFang SC", -apple-system, "Helvetica Neue", sans-serif; color: #1d1d1f; -webkit-font-smoothing: antialiased; }
+  #stage { position: absolute; inset: 0; overflow: hidden; }
+  .abs { position: absolute; }
+  .scene { position: absolute; inset: 0; opacity: 0; }
+  /* 柔和的彩色背景光斑 */
+  .blob { position: absolute; border-radius: 50%; filter: blur(90px); opacity: .55; }
+
+  /* 标题字幕 */
+  .cap { position: absolute; left: 0; right: 0; top: 250px; text-align: center; }
+  .cap .num { display: inline-block; font-size: 30px; font-weight: 600; color: #fff; background: #ff3b30; border-radius: 30px; padding: 6px 22px; margin-bottom: 22px; }
+  .cap h2 { font-size: 76px; font-weight: 800; letter-spacing: 2px; }
+  .cap p { font-size: 36px; color: #6e6e73; margin-top: 18px; }
+
+  /* ---- 仿真的「录屏」窗口（浅色），按真实界面 1.5 倍画 ---- */
+  .win { position: absolute; width: 900px; background: #fff; border-radius: 20px; box-shadow: 0 40px 100px rgba(0,0,0,.18), 0 0 0 1px rgba(0,0,0,.08); overflow: hidden; }
+  .tb { height: 52px; position: relative; display: flex; align-items: center; padding-left: 22px; gap: 12px; }
+  .tb i { width: 19px; height: 19px; border-radius: 50%; display: block; }
+  .tb b { position: absolute; left: 0; right: 0; text-align: center; font-size: 21px; font-weight: 600; color: #3a3a3c; }
+  .wc { padding: 10px 27px 26px; }
+  .hdr { display: flex; align-items: center; height: 54px; }
+  .hdr h3 { font-size: 22px; font-weight: 700; flex: 1; }
+  .pill { background: #e9e9eb; border-radius: 10px; font-size: 20px; padding: 8px 18px; margin-left: 12px; color: #1d1d1f; }
+  .list { height: 400px; margin: 14px 0 12px; position: relative; }
+  .row { height: 64px; display: flex; align-items: center; padding: 0 16px; gap: 16px; border-radius: 10px; position: relative; }
+  .row + .row::before { content: ""; position: absolute; left: 62px; right: 10px; top: 0; border-top: 1px solid #e5e5ea; }
+  .row.sel { background: #0a64e0; color: #fff; }
+  .row.sel::before, .row.sel + .row::before { display: none; }
+  .row svg { width: 30px; height: 30px; flex: none; }
+  .row .t { font-size: 21px; font-weight: 600; line-height: 1.2; }
+  .row .d { font-size: 16px; color: #8e8e93; }
+  .row.sel .d { color: rgba(255,255,255,.85); }
+  .tg { display: flex; gap: 34px; font-size: 21px; align-items: center; height: 44px; }
+  .tg span { display: flex; align-items: center; gap: 10px; }
+  .tg em { font-style: normal; }
+  .cb { width: 25px; height: 25px; border-radius: 7px; background: #0a7aff; display: flex; align-items: center; justify-content: center; }
+  .cb.off { background: #e9e9eb; box-shadow: inset 0 0 0 1px #d1d1d6; }
+  .cb.off svg { display: none; }
+  .ctl { display: flex; align-items: center; height: 84px; gap: 22px; }
+  .rec { height: 58px; min-width: 230px; border-radius: 16px; background: #0a7aff; color: #fff; font-size: 25px; font-weight: 600; display: flex; align-items: center; justify-content: center; gap: 12px; padding: 0 30px; }
+  .rec.red { background: #ff3b30; }
+  .timer { display: none; align-items: center; gap: 14px; font-size: 32px; font-variant-numeric: tabular-nums; }
+  .timer i { width: 16px; height: 16px; border-radius: 50%; background: #ff3b30; display: block; }
+  .hint { margin-left: auto; font-size: 18px; color: #8e8e93; }
+  .ftr { display: flex; align-items: center; height: 50px; font-size: 18px; color: #8e8e93; }
+  .ftr .pill { margin-left: auto; font-size: 19px; }
+
+  /* 鼠标 */
+  #cursor { position: absolute; width: 44px; height: 44px; z-index: 50; pointer-events: none; }
+  #ripple { position: absolute; width: 70px; height: 70px; border-radius: 50%; border: 4px solid rgba(10,122,255,.7); z-index: 49; opacity: 0; }
+
+  /* 框选场景：一块浅色的「屏幕」 */
+  .screen { position: absolute; left: 60px; top: 560px; width: 960px; height: 620px; border-radius: 22px; overflow: hidden; background: #fbfbfd; box-shadow: 0 40px 100px rgba(0,0,0,.18), 0 0 0 10px #1d1d1f; }
+  .menubar { height: 30px; background: rgba(240,240,245,.95); display: flex; align-items: center; gap: 18px; padding: 0 18px; font-size: 15px; color: #333; }
+  .page { position: absolute; left: 20px; top: 44px; width: 920px; height: 558px; background: #fff; border-radius: 12px; box-shadow: 0 6px 30px rgba(0,0,0,.1); overflow: hidden; }
+  .addr { height: 40px; background: #f2f2f5; display: flex; align-items: center; padding: 0 16px; gap: 8px; }
+  .addr i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+  .addr div { margin-left: 30px; height: 26px; flex: 1; background: #fff; border-radius: 7px; font-size: 15px; color: #3a3a3c; text-align: center; line-height: 26px; }
+  #dim { position: absolute; inset: 0; }
+  #region { position: absolute; box-shadow: 0 0 0 3000px rgba(0,0,0,.28); }
+  #region .edge { position: absolute; inset: -1px; border: 2px dashed #fff; outline: 1px solid rgba(0,0,0,.25); }
+  #region .h { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.35); }
+  .bar { position: absolute; left: 50%; bottom: 26px; transform: translateX(-50%); height: 58px; border-radius: 14px; background: rgba(40,40,44,.88); display: flex; align-items: center; gap: 18px; padding: 0 12px 0 16px; color: #fff; font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .bar .x { width: 24px; height: 24px; border-radius: 50%; background: #8e8e93; color: #2c2c2e; font-size: 17px; line-height: 24px; text-align: center; }
+  .bar .r { background: #0a7aff; border-radius: 9px; padding: 8px 20px; }
+  .bar .sz { width: 120px; text-align: center; }
+
+  /* 声音场景 */
+  .track { position: absolute; left: 90px; width: 900px; height: 190px; background: #fff; border-radius: 24px; box-shadow: 0 20px 60px rgba(0,0,0,.08); padding: 26px 32px; }
+  .track .lb { display: flex; align-items: center; gap: 14px; font-size: 32px; font-weight: 700; }
+  .track .lb .cb { width: 32px; height: 32px; border-radius: 9px; }
+  .wave { position: absolute; left: 32px; right: 32px; bottom: 26px; height: 80px; display: flex; align-items: center; gap: 7px; }
+  .wave i { flex: 1; border-radius: 6px; display: block; }
+  .keys { position: absolute; left: 0; right: 0; top: 1130px; display: flex; justify-content: center; gap: 26px; }
+  .key { width: 130px; height: 130px; border-radius: 26px; background: #fff; box-shadow: 0 10px 0 #d1d1d6, 0 20px 40px rgba(0,0,0,.12); display: flex; align-items: center; justify-content: center; font-size: 64px; font-weight: 500; color: #1d1d1f; }
+
+  /* 旁白字幕（抖音底部按钮区上面） */
+  #sub { position: absolute; left: 70px; right: 70px; top: 1440px; text-align: center; z-index: 60; opacity: 0; }
+  #sub span { display: inline-block; font-size: 42px; font-weight: 600; line-height: 1.35; color: #1d1d1f; background: rgba(255,255,255,.88);
+              padding: 12px 28px; border-radius: 18px; box-shadow: 0 8px 30px rgba(0,0,0,.08); }
+  /* 播放器 */
+  .player { position: absolute; left: 140px; top: 700px; width: 800px; background: #fff; border-radius: 20px; overflow: hidden; opacity: 0; z-index: 10;
+            box-shadow: 0 50px 120px rgba(0,0,0,.28), 0 0 0 1px rgba(0,0,0,.08); }
+  .player .pv { height: 450px; overflow: hidden; background: #000; }
+  .player .pc { height: 66px; display: flex; align-items: center; gap: 18px; padding: 0 24px; font-size: 19px; color: #6e6e73; font-variant-numeric: tabular-nums; }
+  .player .prog { flex: 1; height: 6px; border-radius: 3px; background: #e5e5ea; overflow: hidden; }
+  .player .prog i { display: block; height: 100%; width: 0; background: #0a7aff; }
+  /* 保存的文件 */
+  .file { position: absolute; left: 140px; width: 800px; height: 130px; background: #fff; border-radius: 22px; box-shadow: 0 24px 70px rgba(0,0,0,.16); display: flex; align-items: center; gap: 26px; padding: 0 30px; }
+  .file .ic { width: 76px; height: 88px; border-radius: 10px; background: linear-gradient(160deg, #6a82fb, #a06bff); position: relative; flex: none; }
+  .file .ic::after { content: ""; position: absolute; left: 30px; top: 30px; border-left: 22px solid #fff; border-top: 14px solid transparent; border-bottom: 14px solid transparent; }
+  .file .n { font-size: 28px; font-weight: 600; }
+  .file .s { font-size: 22px; color: #8e8e93; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="blob" id="b1" style="width:700px;height:700px;background:#ffb3ad;left:-200px;top:-120px"></div>
+  <div class="blob" id="b2" style="width:760px;height:760px;background:#b9d4ff;right:-260px;top:700px"></div>
+  <div class="blob" id="b3" style="width:600px;height:600px;background:#ffd9a8;left:-120px;top:1350px"></div>
+
+  <!-- A 开场：痛点 -->
+  <div class="scene" id="sA">
+    <div class="abs" id="a1" style="left:0;right:0;top:520px;text-align:center;font-size:52px;font-weight:600;color:#6e6e73">Mac 自带录屏</div>
+    <div class="abs" id="a2" style="left:0;right:0;top:610px;text-align:center;font-size:104px;font-weight:900;letter-spacing:2px">录不到<span style="color:#ff3b30">电脑声音</span>？</div>
+    <svg class="abs" id="a3" style="left:390px;top:860px;width:300px;height:300px" viewBox="0 0 100 100">
+      <path d="M18 38h14l20-16v56L32 62H18z" fill="#1d1d1f"/>
+      <g id="a3x" stroke="#ff3b30" stroke-width="7" stroke-linecap="round"><path d="M64 38l20 24M84 38L64 62"/></g>
+      <g id="a3w" stroke="#0a7aff" stroke-width="6" stroke-linecap="round" fill="none" opacity="0"><path d="M62 38q8 12 0 24"/><path d="M72 30q14 20 0 40"/><path d="M82 22q20 28 0 56"/></g>
+    </svg>
+    <div class="abs" id="a4" style="left:0;right:0;top:1210px;text-align:center;font-size:46px;font-weight:600;color:#1d1d1f">试试这个 ↓</div>
+  </div>
+
+  <!-- B 图标 + 名字 -->
+  <div class="scene" id="sB">
+    <img class="abs" id="b_icon" src="icon.png" style="left:290px;top:430px;width:500px;height:500px">
+    <div class="abs" id="b_name" style="left:0;right:0;top:960px;text-align:center;font-size:110px;font-weight:900;letter-spacing:8px">录屏</div>
+    <div class="abs" id="b_tag" style="left:0;right:0;top:1110px;text-align:center;font-size:42px;color:#6e6e73;letter-spacing:4px">免费 · 开源 · 只有 1MB</div>
+  </div>
+
+  <!-- C 选屏幕 / 窗口 -->
+  <div class="scene" id="sC">
+    <div class="cap" id="c_cap"><div class="num">①</div><h2>想录什么，点一下</h2><p>整个屏幕 · 任意一个窗口</p></div>
+  </div>
+
+  <!-- D 框选区域 -->
+  <div class="scene" id="sD">
+    <div class="cap" id="d_cap"><div class="num">②</div><h2>框选任意区域</h2><p>拖一拖，大小随便调</p></div>
+    <div class="screen" id="d_screen">
+      <div class="menubar" id="d_menu"><b>Safari</b><span>文件</span><span>编辑</span><span>显示</span></div>
+      <div class="page">
+        <div class="addr"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><div id="d_url"></div></div>
+        <img src="site.png" style="display:block;width:920px">
+        <img id="d_vid" class="abs" style="object-fit:cover">
+      </div>
+      <div id="dim">
+        <div id="region"><div class="edge"></div></div>
+      </div>
+      <div class="bar" id="d_bar"><div class="x">✕</div><div class="sz" id="d_size">1152 × 648</div><div class="r" id="d_rec">录制</div></div>
+    </div>
+  </div>
+
+  <!-- E 声音 + 快捷键 -->
+  <div class="scene" id="sE">
+    <div class="cap" id="e_cap"><div class="num">③</div><h2>边录边说，声音一起录</h2><p>电脑声音 + 麦克风，自动合成一条</p></div>
+    <div class="track" id="e_t1" style="top:560px"><div class="lb"><div class="cb"><svg width="20" height="20" viewBox="0 0 20 20"><path d="M4 10.5l4 4 8-9" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><span id="e_l1">🔊 电脑声音</span></div><div class="wave" id="w1"></div></div>
+    <div class="track" id="e_t2" style="top:780px"><div class="lb"><div class="cb off" id="e_mcb"><svg width="20" height="20" viewBox="0 0 20 20"><path d="M4 10.5l4 4 8-9" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><span id="e_l2">🎙️ 麦克风</span></div><div class="wave" id="w2"></div></div>
+    <div class="keys" id="e_keys"><div class="key" id="k1">⌥</div><div class="key" id="k2">⌘</div><div class="key" id="k3">R</div></div>
+    <div class="abs" id="e_kt" style="left:0;right:0;top:1310px;text-align:center;font-size:40px;font-weight:600;color:#6e6e73">快捷键一按，开始 / 停止</div>
+  </div>
+
+  <!-- F 停止即保存 -->
+  <div class="scene" id="sF">
+    <div class="cap" id="f_cap"><div class="num">④</div><h2>停止，马上打开看</h2><p>画面和声音都录下来了</p></div>
+    <div class="abs" id="f_credit" style="left:0;right:0;top:1370px;text-align:center;font-size:22px;color:#8e8e93">演示片段：Big Buck Bunny © Blender Foundation · CC BY 3.0</div>
+  </div>
+
+  <!-- G 结尾：去哪下载 -->
+  <div class="scene" id="sG">
+    <img class="abs" id="g_icon" src="icon.png" style="left:390px;top:330px;width:300px;height:300px">
+    <div class="abs" id="g_t1" style="left:0;right:0;top:680px;text-align:center;font-size:120px;font-weight:900;letter-spacing:10px">录屏</div>
+    <div class="abs" id="g_box" style="left:0;right:0;top:850px;text-align:center;font-size:48px;font-weight:600;color:#1d1d1f">Mac 免费录屏小工具</div>
+    <div class="abs" id="g_req" style="left:0;right:0;top:960px;text-align:center;font-size:32px;color:#6e6e73">M 系列芯片 · macOS 15 以上 · 中英双语</div>
+    <div class="abs" id="g_credit" style="left:0;right:0;top:1030px;text-align:center;font-size:22px;color:#a1a1a6">演示片段：Big Buck Bunny © Blender Foundation · CC BY 3.0</div>
+  </div>
+
+  <!-- 共用的窗口（C、F 场景） -->
+  <div class="win" id="win" style="left:90px;top:620px;opacity:0">
+    <div class="tb"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><b id="w_title">录屏</b></div>
+    <div class="wc">
+      <div class="hdr"><h3 id="w_h3">录什么</h3><span class="pill" id="w_btn1">选区域…</span><span class="pill" id="w_btn2">刷新列表</span></div>
+      <div class="list" id="w_list"></div>
+      <div class="tg">
+        <span><div class="cb"><svg width="16" height="16" viewBox="0 0 20 20"><path d="M4 10.5l4 4 8-9" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><em id="w_t1">录电脑声音</em></span>
+        <span><div class="cb" id="w_mic"><svg width="16" height="16" viewBox="0 0 20 20"><path d="M4 10.5l4 4 8-9" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><em id="w_t2">录麦克风</em></span>
+        <span><div class="cb"><svg width="16" height="16" viewBox="0 0 20 20"><path d="M4 10.5l4 4 8-9" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><em id="w_t3">显示鼠标</em></span>
+      </div>
+      <div class="ctl">
+        <div class="rec" id="w_rec"></div>
+        <div class="timer" id="w_timer"><i></i><span id="w_time">00:00</span></div>
+        <div class="hint" id="w_hint">⌥⌘R 开始 / 停止</div>
+      </div>
+      <div class="ftr"><span id="w_msg">保存到：影片 / 录屏</span><span class="pill" id="w_open">打开文件夹</span></div>
+    </div>
+  </div>
+
+  <!-- 录好的视频自动打开播放（第④段）：画面就是第②段框选的那块网页 -->
+  <div class="player" id="f_player">
+    <div class="tb"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><b id="f_title">录屏 2026-10-27 10.30.15.mp4</b></div>
+    <div class="pv"><img id="f_vid" style="width:100%;height:100%;object-fit:cover;display:block"></div>
+    <div class="pc">
+      <svg width="26" height="26" viewBox="0 0 26 26" id="f_play"><path d="M7 4.5v17l14-8.5z" fill="#1d1d1f"/></svg>
+      <svg width="26" height="26" viewBox="0 0 26 26" id="f_pause" style="display:none"><rect x="6" y="4.5" width="5" height="17" rx="1.5" fill="#1d1d1f"/><rect x="15" y="4.5" width="5" height="17" rx="1.5" fill="#1d1d1f"/></svg>
+      <div class="prog"><i id="f_prog"></i></div>
+      <span id="f_pt">00:00 / 00:12</span>
+    </div>
+  </div>
+
+  <div id="sub"></div>
+  <div id="ripple"></div>
+  <svg id="cursor" viewBox="0 0 24 24" style="opacity:0"><path d="M5 2.5v17.2l4.3-4.1 2.8 6.4 3-1.3-2.8-6.3h6z" fill="#000" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg>
+</div>
+
+<script src="site.js"></script>
+<script>
+  // 语言：?lang=en 出英文版（界面、字幕、旁白都换），默认中文
+  const LANG = new URLSearchParams(location.search).get('lang') === 'en' ? 'en' : 'zh';
+  document.write(`<script src="${LANG === 'en' ? 'voice_en' : 'voice'}/voice.js"><\/script>`);
+</script>
+<script>
+const $ = id => document.getElementById(id);
+const TX = (zh, en) => LANG === 'en' ? en : zh;
+// 英文版：把页面上写死的中文换掉
+if (LANG === 'en') {
+  document.body.style.fontFamily = '-apple-system, "Helvetica Neue", sans-serif';
+  const EN = {
+    a1: "Mac's built-in recorder", a2: 'Can’t record<br><span style="color:#ff3b30">system audio</span>?', a4: 'Try this ↓',
+    b_name: 'Screen Recorder', b_tag: 'Free · Open source · Just 1 MB',
+    c_cap: '<div class="num">1</div><h2>Pick what to record</h2><p>The whole screen · any window</p>',
+    d_cap: '<div class="num">2</div><h2>Select any area</h2><p>Drag to move, drag the dots to resize</p>',
+    d_menu: '<b>Safari</b><span>File</span><span>Edit</span><span>View</span>', d_rec: 'Record',
+    e_cap: '<div class="num">3</div><h2>Talk while you record</h2><p>System audio + mic, mixed into one track</p>',
+    e_l1: '🔊 System audio', e_l2: '🎙️ Microphone', e_kt: 'One shortcut to start / stop',
+    f_cap: '<div class="num">4</div><h2>Stop, and it opens</h2><p>Picture and sound, all captured</p>',
+    f_credit: 'Demo clip: Big Buck Bunny © Blender Foundation · CC BY 3.0', g_credit: 'Demo clip: Big Buck Bunny © Blender Foundation · CC BY 3.0',
+    g_t1: 'Screen Recorder', g_box: 'A free screen recorder for Mac', g_req: 'Apple silicon · macOS 15+ · English & Chinese',
+    w_title: 'Screen Recorder', w_h3: 'What to record', w_btn1: 'Select Area…', w_btn2: 'Refresh',
+    w_t1: 'System audio', w_t2: 'Microphone', w_t3: 'Show cursor', w_hint: '⌥⌘R start / stop', w_open: 'Open Folder',
+    f_title: 'Recording 2026-10-27 10.30.15.mp4',
+  };
+  for (const id in EN) $(id).innerHTML = EN[id];
+  // 英文字更长：开场两行、App 名不加字距
+  Object.assign($('a2').style, { fontSize: '96px', lineHeight: '1.12', top: '600px' });
+  Object.assign($('a3').style, { top: '880px' });
+  Object.assign($('b_name').style, { fontSize: '96px', letterSpacing: '0' });
+  Object.assign($('g_t1').style, { fontSize: '96px', letterSpacing: '0', top: '700px' });
+  for (const id of ['c_cap', 'd_cap', 'e_cap', 'f_cap']) $(id).querySelector('h2').style.fontSize = '68px';
+}
+// ---- 工具：时间段进度、缓动 ----
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const seg = (t, a, b) => clamp((t - a) / (b - a));
+const out = p => 1 - Math.pow(1 - p, 3);
+const inout = p => p < .5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+const back = p => { const c = 1.7; return 1 + (c + 1) * Math.pow(p - 1, 3) + c * Math.pow(p - 1, 2); };
+const lerp = (a, b, p) => a + (b - a) * p;
+// 元素淡入（从下往上滑）、淡出
+function show(el, t, t0, t1, dy = 40) {
+  const pin = out(seg(t, t0, t0 + .45)), pout = seg(t, t1 - .3, t1);
+  el.style.opacity = pin * (1 - pout);
+  el.style.transform = `translateY(${(1 - pin) * dy}px)`;
+}
+
+// 场景时间表（秒）
+// 场景时间表（秒）：每段至少 MIN 秒，旁白长就自动拉长（旁白时长来自 voice/voice.js）
+const MIN = { A: 3.6, B: 3.0, C: 4.4, D: 5.8, E: 4.6, F: 6.6, G: 5.2 };
+const VO = window.VOICE || [];
+const S = {};
+let END = 0;
+for (const k in MIN) {
+  const need = Math.max(0, ...VO.filter(v => v.scene === k).map(v => v.at + v.dur + .35));
+  S[k] = [END, END + Math.max(MIN[k], need)];
+  END = S[k][1];
+}
+END = +(END + .3).toFixed(2);
+// 每句旁白在整片里的开始时间
+const voiceTrack = () => VO.map(v => ({ key: v.key, text: v.text, at: +(S[v.scene][0] + v.at).toFixed(3), dur: v.dur }));
+// 演示用的动画片段（Big Buck Bunny 第 99–112 秒，拆成 30 帧/秒的图片）：第②段网页里在播，点「录制」时片子播到 REC_AT 秒
+const CLIP_FPS = 30, CLIP_N = 390, REC_AT = 5.0;
+const clipSrc = sec => `clip/c${String(clamp(Math.floor(sec * CLIP_FPS) + 1, 1, CLIP_N)).padStart(4, '0')}.jpg`;
+function setClip(img, sec) { const src = clipSrc(sec); if (img.getAttribute('src') !== src) img.setAttribute('src', src); }
+// 时间线上的声音事件（record.mjs 读出来合成音效）：鼠标点击、转场、开始/停止录制、按键、弹出
+const CLICKS = new Set();
+function events() {
+  const ev = [...CLICKS].map(t => ({ t, type: 'click' }));
+  for (const k of ['B', 'C', 'D', 'E', 'F', 'G']) ev.push({ t: S[k][0] - .15, type: 'whoosh' });
+  ev.push({ t: S.A[0] + 2.2, type: 'pop' }, { t: S.B[0], type: 'pop' }, { t: S.G[0], type: 'pop' });
+  ev.push({ t: S.D[0] + REC_AT + .05, type: 'recstart' }, { t: S.F[0] + 1.6, type: 'recstop' }, { t: S.F[0] + 1.95, type: 'pop' });
+  [0, 1, 2].forEach(i => ev.push({ t: S.E[0] + KEYS_AT + i * .18, type: 'key' }));
+  return ev.sort((a, b) => a.t - b.t);
+}
+// 片子的声音什么时候放：第②段网页在播（小声），第④段打开后播录下来的那段
+function clipAudio() {
+  const stopAt = S.F[0] + 1.6, playAt = stopAt + 1;
+  const segs = [{ at: S.D[0], from: 0, dur: S.D[1] - S.D[0], vol: .35 },
+                { at: playAt, from: REC_AT, dur: S.F[1] - playAt, vol: 2.5 }];   // 这一段原声本来就轻（蝴蝶飞过），提响一些
+  // 有旁白的时候原声让一让：把片段在旁白处切开，旁白期间音量降到 40%
+  const out = [];
+  for (const sg of segs) {
+    let cuts = [sg.at, sg.at + sg.dur];
+    for (const v of voiceTrack()) for (const x of [v.at - .1, v.at + v.dur + .2]) if (x > sg.at && x < sg.at + sg.dur) cuts.push(x);
+    cuts = [...new Set(cuts)].sort((a, b) => a - b);
+    for (let i = 0; i + 1 < cuts.length; i++) {
+      const a = cuts[i], b = cuts[i + 1], mid = (a + b) / 2;
+      const talk = voiceTrack().some(v => mid > v.at - .1 && mid < v.at + v.dur + .2);
+      // 淡入淡出：整段的头尾 0.25 秒，切口处只用 0.06 秒（不然声音在切口处会一沉）
+      const fin = i === 0 ? .25 : .06, fout = i + 2 === cuts.length ? .3 : .06;
+      out.push({ at: +a.toFixed(3), from: +(sg.from + a - sg.at).toFixed(3), dur: +(b - a).toFixed(3), vol: sg.vol * (talk ? .4 : 1), main: sg.vol >= 1, fin, fout });
+    }
+  }
+  return out;
+}
+
+// ---- 窗口列表 ----
+const ICON = {
+  display: '<svg viewBox="0 0 30 30"><rect x="3" y="5" width="24" height="16" rx="2.5" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M10 25h10M15 21v4" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>',
+  region: '<svg viewBox="0 0 30 30"><rect x="4" y="6" width="22" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-dasharray="4 3"/></svg>',
+  window: '<svg viewBox="0 0 30 30"><rect x="3" y="6" width="24" height="18" rx="3" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M3 11h24" stroke="currentColor" stroke-width="2"/><circle cx="7" cy="8.6" r="1" fill="currentColor"/><circle cx="10" cy="8.6" r="1" fill="currentColor"/></svg>',
+};
+const ROWS = [
+  ['display', TX('整个屏幕', 'Entire Screen'), '2560 × 1664'],
+  ['window', 'Safari', 'Big Buck Bunny - YouTube'],
+  ['window', 'Keynote', TX('新品发布会.key', 'Launch Event.key')],
+  ['window', TX('网易云音乐', 'Music'), TX('每日推荐', 'Daily Mix')],
+  ['window', TX('访达', 'Finder'), TX('下载', 'Downloads')],
+  ['window', TX('备忘录', 'Notes'), TX('周末计划', 'Weekend plans')],
+];
+$('d_url').textContent = SITE.url;
+let rowEls, rowsHaveRegion = null;
+function setRows(region) {
+  if (region === rowsHaveRegion) return;
+  rowsHaveRegion = region;
+  const rows = region ? [['region', TX('选定区域', 'Selected Area'), REGION_SIZE], ...ROWS] : ROWS;
+  $('w_list').innerHTML = rows.map(r => `<div class="row">${ICON[r[0]]}<div><div class="t">${r[1]}</div><div class="d">${r[2]}</div></div></div>`).join('');
+  rowEls = [...$('w_list').children];
+}
+// 第②段框选的最终大小（演示屏幕 960 宽代表 2560 像素）
+const REGION = (() => { const sk = 920 / SITE.w, tg = SITE.target; return { w: tg.w * sk + 8, h: tg.h * sk + 8 }; })();
+const REGION_SIZE = `${Math.round(REGION.w * 2560 / 960 / 2) * 2} × ${Math.round(REGION.h * 2560 / 960 / 2) * 2}`;
+setRows(false);
+function select(i) { rowEls.forEach((r, k) => r.classList.toggle('sel', k === i)); }
+function recState(on, secs) {
+  $('w_rec').className = 'rec' + (on ? ' red' : '');
+  $('w_rec').innerHTML = on ? '<span style="width:20px;height:20px;background:#fff;border-radius:3px;display:block"></span>' + TX('停止', 'Stop') : '<span style="width:24px;height:24px;border:3px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center"><span style="width:10px;height:10px;background:#fff;border-radius:50%"></span></span>' + TX('开始录制', 'Record');
+  $('w_timer').style.display = on ? 'flex' : 'none';
+  $('w_time').textContent = `00:${String(Math.floor(secs)).padStart(2, '0')}`;
+}
+// 窗口里元素的舞台坐标（鼠标要点它）
+function centerOf(el) { const r = el.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; }
+
+// ---- 鼠标：按关键帧移动，点击时出波纹 ----
+function cursor(t, keys, clicks) {
+  const c = $('cursor');
+  if (!keys) { c.style.opacity = 0; $('ripple').style.opacity = 0; return; }
+  let x = keys[0][1], y = keys[0][2];
+  for (let i = 1; i < keys.length; i++) {
+    const [t0, x0, y0] = keys[i - 1], [t1, x1, y1] = keys[i];
+    if (t >= t0) { const p = inout(seg(t, t0, t1)); x = lerp(x0, x1, p); y = lerp(y0, y1, p); }
+  }
+  c.style.opacity = 1;
+  let press = 0;
+  const rp = $('ripple'); rp.style.opacity = 0;
+  for (const ct of clicks) {
+    CLICKS.add(ct);
+    const p = seg(t, ct, ct + .45);
+    if (p > 0 && p < 1) { rp.style.opacity = 1 - p; rp.style.left = (x - 35) + 'px'; rp.style.top = (y - 35) + 'px'; rp.style.transform = `scale(${.4 + p})`; }
+    if (t >= ct && t < ct + .12) press = 1;
+  }
+  c.style.left = (x - 10) + 'px'; c.style.top = (y - 6) + 'px';
+  c.style.transform = `scale(${press ? .85 : 1})`;
+}
+
+// ---- 声波 ----
+const N = 46;
+for (const id of ['w1', 'w2']) $(id).innerHTML = '<i></i>'.repeat(N);
+// 第③段：几秒时点开麦克风、几秒时按快捷键
+const MIC_ON = .9, KEYS_AT = 2.8;
+// 麦克风声波：音量跟着当前这句旁白的包络（voice.js 里的 env，每 1/30 秒一个值）
+function micWave(t, on) {
+  const v = voiceTrack().find(v => t >= v.at && t < v.at + v.dur);
+  const e = v ? (VO.find(x => x.key === v.key).env || [])[Math.floor((t - v.at) * 30)] || 0 : 0;
+  [...$('w2').children].forEach((b, i) => {
+    const shape = .35 + .65 * Math.abs(Math.sin(i * .9 + t * 13) * .6 + Math.sin(i * .31 - t * 7) * .4);
+    b.style.height = (on ? 8 + e * 72 * shape : 6) + 'px';
+    b.style.background = on ? '#ff3b30' : '#d1d1d6';
+  });
+}
+function wave(id, t, color, k) {
+  [...$(id).children].forEach((b, i) => {
+    const v = Math.abs(Math.sin(i * .55 + t * 7 * k) * .55 + Math.sin(i * 1.7 - t * 11 * k) * .3 + Math.sin(i * .13 + t * 3) * .25);
+    b.style.height = (10 + v * 70) + 'px'; b.style.background = color;
+  });
+}
+
+function frame(T) {
+  const t = T;
+  // 背景光斑缓慢漂移
+  $('b1').style.transform = `translate(${Math.sin(t * .4) * 60}px, ${Math.cos(t * .3) * 40}px)`;
+  $('b2').style.transform = `translate(${Math.cos(t * .35) * 70}px, ${Math.sin(t * .25) * 60}px)`;
+  $('b3').style.transform = `translate(${Math.sin(t * .3) * 50}px, ${Math.cos(t * .45) * 50}px)`;
+  for (const k in S) { const [a, b] = S[k]; $('s' + k).style.opacity = t >= a && t < b ? 1 : 0; }
+  let ck = null, clicks = [];
+  const win = $('win');
+  win.style.opacity = 0; $('f_player').style.opacity = 0;
+
+  // A 开场
+  if (t < S.A[1]) {
+    const [a, b] = S.A;
+    show($('a1'), t, a + .1, b); show($('a2'), t, a + .35, b);
+    const ic = $('a3'); const p = back(seg(t, a + .7, a + 1.2));
+    ic.style.opacity = seg(t, a + .7, a + 1) * (1 - seg(t, b - .3, b)); ic.style.transform = `scale(${.5 + .5 * p})`;
+    // 2.2 秒起：叉号消失，声波出来
+    const sw = seg(t, a + 2.2, a + 2.5);
+    $('a3x').style.opacity = 1 - sw; $('a3w').style.opacity = sw;
+    show($('a4'), t, a + 2.4, b);
+  }
+  // B 图标
+  else if (t < S.B[1]) {
+    const [a, b] = S.B;
+    const p = back(seg(t, a, a + .6));
+    const icon = $('b_icon');
+    icon.style.transform = `scale(${.3 + .7 * p}) rotate(${(1 - p) * -12}deg)`;
+    icon.style.opacity = seg(t, a, a + .2) * (1 - seg(t, b - .3, b));
+    show($('b_name'), t, a + .4, b); show($('b_tag'), t, a + .8, b);
+  }
+  // C 选屏幕 / 窗口
+  else if (t < S.C[1]) {
+    const [a, b] = S.C;
+    show($('c_cap'), t, a, b);
+    const p = out(seg(t, a + .2, a + .8));
+    win.style.opacity = p * (1 - seg(t, b - .3, b)); win.style.top = (620 + (1 - p) * 120) + 'px';
+    setRows(false); recState(false, 0); $('w_mic').classList.add('off'); $('w_msg').textContent = TX('保存到：影片 / 录屏', 'Saved to: Movies / 录屏');
+    const r2 = centerOf(rowEls[2]), r1 = centerOf(rowEls[1]), pk = centerOf($('w_btn1'));
+    ck = [[a + .8, 980, 1500], [a + 1.6, r1[0] - 60, r1[1]], [a + 2.6, r2[0] - 120, r2[1]], [a + 3.6, pk[0], pk[1]]];
+    clicks = [a + 1.7, a + 2.7, a + 3.7];
+    select(t < a + 1.7 ? 0 : t < a + 2.7 ? 1 : 2);
+    $('w_btn1').style.background = t >= a + 3.7 && t < a + 3.9 ? '#d1d1d6' : '';   // 「选区域…」按下
+  }
+  // D 框选
+  else if (t < S.D[1]) {
+    const [a, b] = S.D;
+    show($('d_cap'), t, a, b);
+    const sc = $('d_screen'), p = out(seg(t, a + .1, a + .7));
+    { const sk = 920 / SITE.w, tg = SITE.target, v = $('d_vid');
+      v.style.left = tg.x * sk + 'px'; v.style.top = 40 + tg.y * sk + 'px'; v.style.width = tg.w * sk + 'px'; v.style.height = tg.h * sk + 'px';
+      setClip(v, t - a); }
+    sc.style.opacity = p * (1 - seg(t, b - .3, b)); sc.style.transform = `translateY(${(1 - p) * 100}px)`;
+    // 框：先出现在中间 60%，再拖右下角缩到视频上，然后整体挪一下对齐
+    const W = 960, H = 620;
+    let x = W * .2, y = H * .2, w = W * .6, h = H * .6;
+    // 框最后对准网页截图里的目标（site.js 给的是网页坐标，换算到演示屏幕里；留一点余量）
+    const sk = 920 / SITE.w, tg = SITE.target;
+    const vx = 20 + tg.x * sk - 4, vy = 84 + tg.y * sk - 4, vw = tg.w * sk + 8, vh = tg.h * sk + 8;
+    const p1 = inout(seg(t, a + 1.6, a + 2.8));   // 拖右下角
+    const p2 = inout(seg(t, a + 3.2, a + 4.2));   // 拖动整个框
+    const midX = x + 0, midY = y + 0;
+    const rw = lerp(w, vw, p1), rh = lerp(h, vh, p1);
+    x = lerp(midX, vx, p2); y = lerp(midY, vy, p2); w = rw; h = rh;
+    const rg = $('region');
+    rg.style.left = x + 'px'; rg.style.top = y + 'px'; rg.style.width = w + 'px'; rg.style.height = h + 'px';
+    if (!rg.querySelector('.h')) rg.insertAdjacentHTML('beforeend', '<i class="h"></i>'.repeat(8));
+    const hs = [[0, 0], [.5, 0], [1, 0], [1, .5], [1, 1], [.5, 1], [0, 1], [0, .5]];
+    rg.querySelectorAll('.h').forEach((e, i) => { e.style.left = hs[i][0] * w + 'px'; e.style.top = hs[i][1] * h + 'px'; });
+    const k = 2560 / W;
+    $('d_size').textContent = `${Math.round(w * k / 2) * 2} × ${Math.round(h * k / 2) * 2}`;
+    // 点「录制」后：遮罩和框消失 = 开始录了
+    const go = seg(t, a + REC_AT + .05, a + REC_AT + .3);
+    $('dim').style.opacity = 1 - go; $('d_bar').style.opacity = 1 - go;
+    // 鼠标（舞台坐标 = 屏幕块左上 60,560）
+    const ox = 60, oy = 560;
+    const brX = ox + W * .8, brY = oy + H * .8;
+    const rec = $('d_rec').getBoundingClientRect();
+    ck = [[a + .7, 900, 1500], [a + 1.5, brX, brY], [a + 2.8, ox + midX + vw, oy + midY + vh],   // 拖右下角
+          [a + 3.1, ox + 300, oy + 300], [a + 4.2, ox + 300 + (vx - midX), oy + 300 + (vy - midY)],   // 按住框内拖
+          [a + REC_AT - .05, rec.left + rec.width / 2, rec.top + rec.height / 2], [a + REC_AT + .8, 1000, 1500]];   // 点录制
+    clicks = [a + REC_AT];
+  }
+  // E 声音 + 快捷键
+  else if (t < S.E[1]) {
+    const [a, b] = S.E;
+    show($('e_cap'), t, a, b); show($('e_t1'), t, a + .2, b); show($('e_t2'), t, a + .4, b);
+    show($('e_keys'), t, a + 1.6, b); show($('e_kt'), t, a + 1.8, b);
+    wave('w1', t, '#0a7aff', 1);
+    // 鼠标点开「麦克风」，之后麦克风的声波跟着旁白说话跳（不说话就平）
+    const micOn = t >= a + MIC_ON;
+    $('e_mcb').classList.toggle('off', !micOn);
+    micWave(t, micOn);
+    const cb = centerOf($('e_mcb'));
+    ck = [[a + .2, 980, 1500], [a + MIC_ON - .1, cb[0], cb[1]], [a + MIC_ON + .7, 1000, 1500]];
+    clicks = [a + MIC_ON];
+    // 依次按下 ⌥ ⌘ R
+    ['k1', 'k2', 'k3'].forEach((id, i) => {
+      const d = a + KEYS_AT + i * .18, down = t >= d && t < a + KEYS_AT + 1;
+      $(id).style.transform = down ? 'translateY(8px)' : 'none';
+      $(id).style.boxShadow = down ? '0 2px 0 #d1d1d6, 0 8px 20px rgba(0,0,0,.12)' : '';
+      $(id).style.background = down ? '#f2f2f7' : '#fff';
+    });
+  }
+  // F 停止 → 保存
+  else if (t < S.F[1]) {
+    const [a, b] = S.F;
+    show($('f_cap'), t, a, b);
+    const p = out(seg(t, a + .1, a + .6));
+    win.style.opacity = p * (1 - seg(t, b - .3, b)); win.style.top = (545 + (1 - p) * 80) + 'px';
+    setRows(true); select(0); $('w_mic').classList.remove('off');
+    const stopAt = a + 1.6;
+    const recStart = S.D[0] + REC_AT, recLen = stopAt - recStart;
+    recState(t < stopAt, Math.min(t, stopAt) - recStart);
+    $('w_msg').textContent = t < stopAt ? TX('保存到：影片 / 录屏', 'Saved to: Movies / 录屏') : TX('已保存：录屏 2026-10-27 10.30.15.mp4', 'Saved: Recording 2026-10-27 10.30.15.mp4');
+    const r = $('w_rec').getBoundingClientRect();
+    ck = [[a + .3, 900, 1500], [a + 1.4, r.left + r.width / 2, r.top + r.height / 2], [stopAt + .5, r.left + r.width / 2, r.top + r.height / 2], [stopAt + 1.1, 1000, 1520]];
+    clicks = [stopAt];
+    // 停止后录好的视频自动打开：从窗口的位置放大弹出，开始播放
+    const pl = $('f_player'), op = back(seg(t, stopAt + .35, stopAt + .9));
+    pl.style.opacity = seg(t, stopAt + .35, stopAt + .55) * (1 - seg(t, b - .3, b));
+    pl.style.transform = `translateY(${(1 - op) * 120}px) scale(${.7 + .3 * op})`;
+    // 画面 = 第②段点录制那一刻起片子播的内容，按真实速度播
+    const played = clamp(t - (stopAt + 1), 0, recLen);
+    setClip($('f_vid'), REC_AT + played);
+    $('f_prog').style.width = (played / recLen * 100) + '%';
+    const mm = s => `00:${String(Math.floor(s)).padStart(2, '0')}`;
+    $('f_pt').textContent = `${mm(played)} / ${mm(recLen)}`;
+    show($('f_credit'), t, stopAt + .6, b, 0);
+    $('f_play').style.display = t > stopAt + 1 ? 'none' : ''; $('f_pause').style.display = t > stopAt + 1 ? '' : 'none';
+  }
+  // G 结尾
+  else {
+    const [a] = S.G;
+    const p = back(seg(t, a, a + .6));
+    $('g_icon').style.transform = `scale(${.4 + .6 * p})`; $('g_icon').style.opacity = seg(t, a, a + .2);
+    show($('g_t1'), t, a + .3, 99); show($('g_box'), t, a + .6, 99); show($('g_req'), t, a + 1.1, 99); show($('g_credit'), t, a + 1.3, 99);
+  }
+  cursor(t, ck, clicks);
+  // 字幕：当前在说的那句
+  const v = voiceTrack().find(v => t >= v.at - .1 && t < v.at + v.dur + .3), sub = $('sub');
+  if (v) {
+    if (sub.dataset.k !== v.key) { sub.dataset.k = v.key; sub.innerHTML = `<span>${v.text}</span>`; }
+    sub.style.opacity = Math.min(seg(t, v.at - .1, v.at + .05), 1 - seg(t, v.at + v.dur + .15, v.at + v.dur + .3));
+  } else sub.style.opacity = 0;
+}
+
+window.PROMO = { frame, END, events, clipAudio, voiceTrack };
+// 直接打开时循环预览；录制模式等脚本调用
+if (!location.search.includes('rec=1')) {
+  const t0 = performance.now();
+  (function loop() { frame(((performance.now() - t0) / 1000) % END); requestAnimationFrame(loop); })();
+} else frame(0);
+</script>
+</body>
+</html>
