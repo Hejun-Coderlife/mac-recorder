@@ -26,6 +26,9 @@ A tiny macOS screen recorder: record a whole screen, a single window or a select
 - 全局快捷键 **⌥⌘R** 开始 / 停止（游戏全屏、点不到按钮时也能用）
 - 按屏幕原始像素录制，不缩放；颜色和苹果自带录屏一致
 - 文件保存在「影片 / 录屏」
+- **Studio 效果**（像 Screen Studio）：打开开关后正常录就行，录完自动出片——点击、打字的地方镜头自动推近，鼠标轨迹更顺滑、点击有波纹，加渐变背景、圆角和阴影。原始素材留在「影片 / 录屏 / Studio 素材」
+
+  **Studio effects** (Screen Studio–style): record as usual and get a polished video automatically — auto-zoom on clicks and typing, smoothed cursor with click ripples, gradient background with rounded corners and shadow.
 
 ## 自己编译 Build from source
 

@@ -1,0 +1,177 @@
+<!doctype html>
+<!-- Studio 效果演示素材：一个「待办」App 窗口，画面完全由时间 T 决定（DEMO.frame(T)），鼠标轨迹按页面上元素的真实位置算（DEMO.track()）
+     由 make.mjs 用无界面 Chrome 逐帧截图成 raw.mp4 + track.json，再交给 Studio 导出 -->
+<html lang="zh"><head><meta charset="utf-8"><style>
+:root { --blue: #3b82f6; }
+* { box-sizing: border-box; margin: 0; }
+html, body { width: 1440px; height: 900px; overflow: hidden; background: #fff; color: #1d1d1f;
+  font: 15px -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; -webkit-font-smoothing: antialiased; }
+.titlebar { height: 52px; display: flex; align-items: center; padding: 0 20px; border-bottom: 1px solid #ececec; background: #fafafa; position: relative; }
+.lights span { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }
+.title { position: absolute; left: 0; right: 0; text-align: center; font-weight: 600; color: #444; pointer-events: none; }
+#share { margin-left: auto; height: 32px; padding: 0 14px; border-radius: 8px; display: flex; align-items: center; gap: 6px; color: #333; border: 1px solid #e2e2e6; background: #fff; }
+.body { display: flex; height: 848px; }
+.side { width: 240px; background: #f5f5f7; border-right: 1px solid #e8e8e8; padding: 20px 12px; }
+.side h4 { font-size: 12px; color: #8e8e93; font-weight: 600; margin: 18px 12px 6px; }
+.nav { padding: 9px 12px; border-radius: 8px; display: flex; justify-content: space-between; color: #3a3a3c; }
+.nav.on { background: #e3ebfd; color: var(--blue); font-weight: 600; }
+.nav i { font-style: normal; color: #8e8e93; } .nav.on i { color: var(--blue); }
+.main { flex: 1; padding: 40px 64px; position: relative; }
+h1 { font-size: 32px; font-weight: 700; letter-spacing: -.5px; }
+.sub { color: #86868b; margin-top: 6px; }
+.tabs { position: absolute; right: 64px; top: 50px; display: flex; background: #f0f0f2; border-radius: 9px; padding: 3px; }
+.tab { padding: 7px 18px; border-radius: 7px; color: #555; font-size: 14px; }
+.tab.on { background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.12); color: #111; font-weight: 600; }
+.tab.hover:not(.on) { background: #e6e6ea; }
+.add { margin-top: 30px; display: flex; gap: 12px; }
+#input { flex: 1; height: 50px; border: 1.5px solid #e2e2e6; border-radius: 12px; padding: 0 18px; display: flex; align-items: center; font-size: 16px; color: #a1a1a6; }
+#input.focus { border-color: var(--blue); box-shadow: 0 0 0 4px rgba(59,130,246,.15); color: #1d1d1f; }
+.caret { display: inline-block; width: 2px; height: 20px; background: var(--blue); margin-left: 1px; }
+#addBtn { height: 50px; padding: 0 26px; border-radius: 12px; background: var(--blue); color: #fff; font-weight: 600; display: flex; align-items: center; }
+#addBtn.hover { background: #2f74e8; }
+.list { margin-top: 22px; }
+.item { display: flex; align-items: center; gap: 14px; padding: 0 16px; height: 62px; border-radius: 12px; overflow: hidden; border-bottom: 1px solid #f2f2f4; }
+.item.hover { background: #f6f7f9; }
+.check { width: 24px; height: 24px; border-radius: 50%; border: 2px solid #c7c7cc; flex: none; display: flex; align-items: center; justify-content: center; }
+.check svg { opacity: 0; }
+.item.done .check { background: #34c759; border-color: #34c759; }
+.item.done .check svg { opacity: 1; }
+.item.done .text { color: #a1a1a6; text-decoration: line-through; }
+.text { font-size: 16px; }
+.tag { margin-left: auto; font-size: 12px; padding: 4px 10px; border-radius: 20px; }
+.press { transform: scale(.96); }
+.pop { position: absolute; right: 20px; top: 58px; width: 220px; background: #fff; border-radius: 12px; padding: 6px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.15), 0 0 0 1px rgba(0,0,0,.06); z-index: 5; }
+.mi { padding: 10px 12px; border-radius: 8px; display: flex; gap: 10px; align-items: center; }
+.mi.hover { background: var(--blue); color: #fff; }
+.toast { position: absolute; left: 50%; bottom: 44px; transform: translateX(-50%); background: #1d1d1f; color: #fff; padding: 12px 22px; border-radius: 24px; font-weight: 500; }
+</style></head><body>
+<div class="titlebar">
+  <div class="lights"><span style="background:#ff5f57"></span><span style="background:#febc2e"></span><span style="background:#28c840"></span></div>
+  <div class="title">待办</div>
+  <div id="share">↗ 分享</div>
+  <div id="popHost"></div>
+</div>
+<div class="body">
+  <div class="side">
+    <div class="nav on">今天 <i id="navCount"></i></div>
+    <div class="nav">计划 <i>12</i></div>
+    <div class="nav">全部 <i>34</i></div>
+    <div class="nav">已完成 <i>21</i></div>
+    <h4>我的列表</h4>
+    <div class="nav">门店 <i>8</i></div>
+    <div class="nav">运营 <i>5</i></div>
+    <div class="nav">培训 <i>3</i></div>
+  </div>
+  <div class="main">
+    <h1>今天</h1>
+    <div class="sub" id="sub"></div>
+    <div class="tabs"><div class="tab" id="tab-all">全部</div><div class="tab" id="tab-todo">未完成</div><div class="tab" id="tab-done">已完成</div></div>
+    <div class="add"><div id="input"></div><div id="addBtn">添加</div></div>
+    <div class="list" id="list"></div>
+    <div id="toastHost"></div>
+  </div>
+</div>
+<script>
+const TEXT = '给门店拍新品海报';
+// 时间表（秒）
+// 时间对着旁白排（voice.mjs 里每句的 at）
+const S = { input: 6.6, add: 9.8, b: 11.8, c: 13.4, tabDone: 21.5, tabAll: 23.0, share: 25.0, copy: 26.4, END: 33 };
+S.keys = [...TEXT].map((_, i) => 7.2 + i * 0.26);
+const ITEMS = [
+  { id: 'a', text: '整理本周销售数据', tag: '数据', c: '#eef2ff', f: '#4f46e5' },
+  { id: 'b', text: '回复顾客评价', tag: '客服', c: '#fff1f2', f: '#e11d48' },
+  { id: 'c', text: '预约下周员工培训', tag: '培训', c: '#ecfdf5', f: '#059669' },
+  { id: 'd', text: '更新会员价目表', tag: '运营', c: '#fff7ed', f: '#ea580c' },
+  { id: 'e', text: '检查门店库存', tag: '门店', c: '#f0f9ff', f: '#0284c7', done: true },
+];
+const NEW = { id: 'n', text: TEXT, tag: '门店', c: '#f0f9ff', f: '#0284c7' };
+const ease = u => u <= 0 ? 0 : u >= 1 ? 1 : 1 - Math.pow(1 - u, 3);
+const $ = s => document.querySelector(s);
+const tick = '<svg width="14" height="14" viewBox="0 0 14 14"><path d="M3 7.5l2.6 2.6L11 4.5" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+let CLICKS = [];   // [{t, sel}]，DEMO.track() 填上坐标
+
+function frame(T, mx = -1, my = -1) {
+  // 输入框
+  const n = S.keys.filter(k => k <= T).length, focus = T >= S.input && T < S.add;
+  const lastKey = n ? S.keys[n - 1] : S.input;
+  const caret = Math.floor((T - lastKey) * 2) % 2 === 0 ? '<span class="caret"></span>' : '<span class="caret" style="opacity:0"></span>';
+  $('#input').className = focus ? 'focus' : '';
+  $('#input').innerHTML = focus ? TEXT.slice(0, n) + caret : '添加新任务…';
+  // 列表
+  const done = new Set(['e']); if (T >= S.b) done.add('b'); if (T >= S.c) done.add('c');
+  const tab = T >= S.tabDone && T < S.tabAll ? 'done' : 'all';
+  const items = (T >= S.add ? [NEW, ...ITEMS] : ITEMS).filter(it => tab === 'all' || done.has(it.id));
+  $('#list').innerHTML = items.map(it => {
+    const grow = it.id === 'n' ? ease((T - S.add) / 0.35) : 1;
+    const pop = it.id === 'b' ? T - S.b : it.id === 'c' ? T - S.c : -1;
+    const sc = pop >= 0 && pop < 0.25 ? 1 + 0.25 * Math.sin(Math.PI * pop / 0.25) : 1;
+    return `<div class="item${done.has(it.id) ? ' done' : ''}" data-id="${it.id}" style="height:${62 * grow}px;opacity:${grow}">
+      <div class="check" style="transform:scale(${sc})">${tick}</div><div class="text">${it.text}</div>
+      <div class="tag" style="background:${it.c};color:${it.f}">${it.tag}</div></div>`;
+  }).join('');
+  const left = (T >= S.add ? 6 : 5) - done.size;
+  $('#sub').textContent = `10月28日 星期三 · 还剩 ${left} 项`;
+  $('#navCount').textContent = left;
+  for (const t of ['all', 'todo', 'done']) $('#tab-' + t).className = 'tab' + (t === tab ? ' on' : '');
+  // 分享菜单、提示
+  $('#popHost').innerHTML = T >= S.share && T < S.copy + 0.15 ? `<div class="pop"><div class="mi" id="copy">🔗 复制链接</div><div class="mi">📄 导出为 PDF</div><div class="mi">✉️ 通过邮件发送</div></div>` : '';
+  const ta = T - S.copy - 0.2, to = ta < 0 || ta > 2.6 ? 0 : Math.min(1, ta / 0.2, (2.6 - ta) / 0.3);
+  $('#toastHost').innerHTML = to > 0 ? `<div class="toast" style="opacity:${to}">✓ 链接已复制</div>` : '';
+  // 鼠标悬停、按下
+  const el = mx >= 0 ? document.elementFromPoint(mx, my)?.closest('.item,.tab,#addBtn,#share,.mi') : null;
+  if (el) el.classList.add('hover');
+  for (const c of CLICKS) if (T >= c.t && T < c.t + 0.15) $(c.sel)?.classList.add('press');
+}
+
+// 鼠标：每次点击前 0.5~0.9 秒从上一个位置移过去（缓动 + 一点弧度），中间停着；另有几个不点击的停留点
+function plan() {
+  CLICKS = [
+    { t: S.input, sel: '#input', dx: -0.25 }, { t: S.add, sel: '#addBtn' },
+    { t: S.b, sel: '[data-id=b] .check' }, { t: S.c, sel: '[data-id=c] .check' },
+    { t: S.tabDone, sel: '#tab-done' }, { t: S.tabAll, sel: '#tab-all' },
+    { t: S.share, sel: '#share' }, { t: S.copy, sel: '#copy' },
+  ];
+  for (const c of CLICKS) {
+    frame(c.t - 0.01);
+    const r = $(c.sel).getBoundingClientRect();
+    c.x = r.left + r.width * (0.5 + (c.dx || 0)); c.y = r.top + r.height / 2;
+  }
+  const pts = [{ t: 0, x: 980, y: 640 }, { t: 3.6, x: 880, y: 590 }, ...CLICKS, { t: 15.8, x: 760, y: 560 }, { t: 30.2, x: 1020, y: 610 }].sort((a, b) => a.t - b.t);
+  return pts;
+}
+let PTS;
+function mouse(T) {
+  let i = PTS.findIndex(p => p.t > T);
+  if (i === -1) return [PTS.at(-1).x, PTS.at(-1).y];
+  if (i === 0) return [PTS[0].x, PTS[0].y];
+  const a = PTS[i - 1], b = PTS[i], d = Math.hypot(b.x - a.x, b.y - a.y);
+  const dur = Math.min(b.t - a.t - 0.1, Math.max(0.5, Math.min(0.9, d / 1100)));
+  const s = b.t - 0.08 - dur;
+  if (T < s) return [a.x, a.y];
+  let u = Math.min(1, (T - s) / dur); u = u * u * u * (u * (u * 6 - 15) + 10);
+  const bow = Math.sin(Math.PI * u) * d * 0.06;   // 手移鼠标会有点弧度
+  const nx = -(b.y - a.y) / (d || 1), ny = (b.x - a.x) / (d || 1);
+  return [a.x + (b.x - a.x) * u + nx * bow, a.y + (b.y - a.y) * u + ny * bow];
+}
+
+window.DEMO = {
+  END: S.END,
+  init() { PTS = plan(); frame(0); return 1; },
+  frame(T) { const [x, y] = mouse(T); frame(T, x, y); },
+  // 轨迹文件（像素 = CSS 像素 × 2，和 Retina 屏录出来的一样）
+  track() {
+    const k = 2, moves = [];
+    for (let i = 0; i <= S.END * 120; i++) {
+      const t = i / 120, [x, y] = mouse(t);
+      const down = CLICKS.some(c => t >= c.t && t < c.t + 0.1) ? 1 : 0;
+      moves.push([+t.toFixed(4), +(x * k).toFixed(1), +(y * k).toFixed(1), 0, down]);
+    }
+    return {
+      width: 1440 * k, height: 900 * k, pixelsPerPoint: k, moves,
+      clicks: CLICKS.map(c => [c.t, +(c.x * k).toFixed(1), +(c.y * k).toFixed(1)]),
+      keys: S.keys, cursors: [{ file: 'cursor-0.png', hotX: 5, hotY: 5, w: 28, h: 40, arrow: true }],
+    };
+  },
+};
+</script></body></html>

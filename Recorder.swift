@@ -32,6 +32,7 @@ final class Writer: NSObject, SCStreamOutput, @unchecked Sendable {
     private let sysAudio: AVAssetWriterInput?
     private let micAudio: AVAssetWriterInput?
     private var started = false
+    private(set) var startSeconds = 0.0   // 第一帧的时间（主机时钟），鼠标轨迹按它对齐
     var onError: ((Error) -> Void)?
     // 亮度校正：苹果自带录屏把屏幕的 2.2 伽马按 2.4 重新编码（暗部、中间调更深），我们按同样的曲线改亮度平面，颜色看起来和它一样
     // （实测：苹果的数值 ≈ 我们的数值 ^ 1.09；GAMMA 环境变量用来试验）
@@ -89,7 +90,7 @@ final class Writer: NSObject, SCStreamOutput, @unchecked Sendable {
             // 只要完整的新画面（画面没变时系统会发「空闲帧」，跳过）
             guard let att = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
                   let raw = att.first?[.status] as? Int, SCFrameStatus(rawValue: raw) == .complete else { return }
-            if !started { writer.startSession(atSourceTime: sb.presentationTimeStamp); started = true }
+            if !started { writer.startSession(atSourceTime: sb.presentationTimeStamp); startSeconds = sb.presentationTimeStamp.seconds; started = true }
             if let px = CMSampleBufferGetImageBuffer(sb) { gammaY(px) }
             if video.isReadyForMoreMediaData { video.append(sb) }
         case .audio:
@@ -134,6 +135,8 @@ final class Recorder: NSObject, ObservableObject {
     @Published var message = ""
     @Published var isError = false        // 提示是不是出错（标红）
     @Published var region: Region?        // 框选的区域（列表里 id = "r"）
+    // Studio 效果：画面里不录鼠标、另记轨迹，录完自动放大点击处、平滑鼠标、加背景（见 Studio.swift）
+    @Published var studio = UserDefaults.standard.bool(forKey: "studio") { didSet { UserDefaults.standard.set(studio, forKey: "studio") } }
     private var needsPermission = false
     @Published var lastFile: URL?
 
@@ -142,12 +145,15 @@ final class Recorder: NSObject, ObservableObject {
     private var writer: Writer?
     private var timer: Timer?
     private var startedAt: Date?
+    private var tracker: CursorTracker?
+    private var project: URL?             // Studio 素材文件夹
 
     static let folder: URL = {
         let u = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0].appendingPathComponent("录屏", isDirectory: true)
         try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
         return u
     }()
+    static let studioFolder = folder.appendingPathComponent("Studio 素材", isDirectory: true)
 
     // 读一遍当前有哪些屏幕、窗口（第一次会弹系统的屏幕录制授权）
     func refresh() async {
@@ -213,6 +219,7 @@ final class Recorder: NSObject, ObservableObject {
         // 画面范围
         let filter: SCContentFilter
         var crop: CGRect?
+        let area: () -> CGRect?               // 录的范围在全局坐标里的位置（点，左上角为原点），给鼠标轨迹换算用
         if sel == "r" {
             guard let r = region, let d = c.displays.first(where: { $0.displayID == r.display }) else {
                 say(L("那块屏幕不见了，重新选一下区域", "That screen is gone, select the area again"), error: true); return
@@ -220,12 +227,22 @@ final class Recorder: NSObject, ObservableObject {
             let mine = c.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
             filter = SCContentFilter(display: d, excludingApplications: mine, exceptingWindows: [])
             crop = r.rect
+            let a = r.rect.offsetBy(dx: CGDisplayBounds(r.display).minX, dy: CGDisplayBounds(r.display).minY)
+            area = { a }
         } else if sel.hasPrefix("d"), let d = c.displays.first(where: { "d\($0.displayID)" == sel }) {
             // 整个屏幕：把本程序自己的窗口排除掉
             let mine = c.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
             filter = SCContentFilter(display: d, excludingApplications: mine, exceptingWindows: [])
+            let a = CGDisplayBounds(d.displayID)
+            area = { a }
         } else if let w = c.windows.first(where: { "w\($0.windowID)" == sel }) {
             filter = SCContentFilter(desktopIndependentWindow: w)
+            let id = w.windowID
+            area = {   // 窗口可能被拖动，每次现查位置
+                guard let info = (CGWindowListCopyWindowInfo(.optionIncludingWindow, id) as? [[String: Any]])?.first,
+                      let b = info[kCGWindowBounds as String] as! CFDictionary? else { return nil }
+                return CGRect(dictionaryRepresentation: b)
+            }
         } else { say(L("这个窗口已经关掉了，换一个", "That window is gone, pick another one"), error: true); await refresh(); return }
 
         let cfg = SCStreamConfiguration()
@@ -251,7 +268,8 @@ final class Recorder: NSObject, ObservableObject {
         case "none": break
         default: cfg.colorSpaceName = CGColorSpace.sRGB
         }
-        cfg.showsCursor = showCursor
+        let studioOn = studio
+        cfg.showsCursor = showCursor && !studioOn   // Studio 模式鼠标后期再画
         cfg.capturesAudio = systemAudio
         cfg.sampleRate = 48000
         cfg.channelCount = 2
@@ -259,23 +277,35 @@ final class Recorder: NSObject, ObservableObject {
         cfg.captureMicrophone = microphone
 
         let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd HH.mm.ss"
-        let url = Recorder.folder.appendingPathComponent("\(L("录屏", "Recording")) \(fmt.string(from: Date())).mp4")
+        let name = "\(L("录屏", "Recording")) \(fmt.string(from: Date()))"
+        let url = Recorder.folder.appendingPathComponent(name + ".mp4")
+        // Studio 模式：原始画面写进素材文件夹，成片录完再生成到 url
+        var rawURL = url, dir: URL?
+        if studioOn {
+            let d = Recorder.studioFolder.appendingPathComponent(name, isDirectory: true)
+            try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+            rawURL = d.appendingPathComponent("raw.mp4"); dir = d
+        }
         let w: Writer
-        do { w = try Writer(url: url, width: cfg.width, height: cfg.height, system: systemAudio, mic: microphone) }
+        do { w = try Writer(url: rawURL, width: cfg.width, height: cfg.height, system: systemAudio, mic: microphone) }
         catch { say(L("开始录制失败：", "Couldn't start recording: ") + error.localizedDescription, error: true); return }
+        let tr = studioOn ? CursorTracker(size: CGSize(width: pw, height: ph), pixelsPerPoint: Double(scale), area: area) : nil
         w.onError = { [weak self] e in Task { @MainActor in self?.fail(e) } }
         let s = SCStream(filter: filter, configuration: cfg, delegate: self)
         do {
             try s.addStreamOutput(w, type: .screen, sampleHandlerQueue: w.queue)
             if systemAudio { try s.addStreamOutput(w, type: .audio, sampleHandlerQueue: w.queue) }
             if microphone { try s.addStreamOutput(w, type: .microphone, sampleHandlerQueue: w.queue) }
+            tr?.start()   // 比画面早一点开始记，第一帧前后都有鼠标位置
             try await s.startCapture()
         } catch {
+            tr?.stop()
             say(L("开始录制失败：", "Couldn't start recording: ") + error.localizedDescription, error: true)
-            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: rawURL)
+            if let dir { try? FileManager.default.removeItem(at: dir) }
             return
         }
-        stream = s; writer = w; lastFile = url
+        stream = s; writer = w; lastFile = url; tracker = tr; project = dir
         recording = true; startedAt = Date(); elapsed = 0; say("")
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in if let self, let t = self.startedAt { self.elapsed = Date().timeIntervalSince(t) } }
@@ -287,11 +317,26 @@ final class Recorder: NSObject, ObservableObject {
         busy = true; defer { busy = false }
         timer?.invalidate(); timer = nil
         if let s = stream { try? await s.stopCapture() }
-        let w = writer
-        stream = nil; writer = nil; recording = false
+        let w = writer, tr = tracker, dir = project
+        stream = nil; writer = nil; tracker = nil; project = nil; recording = false
+        tr?.stop()
         NSSound(named: "Pop")?.play()
         guard let w else { return }
         do { try await w.finish() } catch { finished(error); return }
+        // Studio 模式：存轨迹，按轨迹生成成片（声音在生成时混成一条，不用再合成）
+        if let tr, let dir, let out = lastFile {
+            say(L("正在生成 Studio 版…", "Rendering Studio version…"))
+            do {
+                try tr.save(to: dir, start: w.startSeconds)
+                try await Studio.render(project: dir, to: out) { p in
+                    Task { @MainActor [weak self] in self?.say(L("正在生成 Studio 版… \(Int(p * 100))%", "Rendering Studio version… \(Int(p * 100))%")) }
+                }
+            } catch {
+                say(L("生成 Studio 版失败（原始素材在「Studio 素材」文件夹）：", "Studio render failed (raw footage is in the “Studio 素材” folder): ") + error.localizedDescription, error: true)
+                return
+            }
+            finished(nil); return
+        }
         // 电脑声音和麦克风都录了：合成一条音轨（不然很多播放器、网站只放第一条，麦克风的声音会丢）
         if w.hasTwoAudioTracks, let f = lastFile {
             say(L("正在合成声音…", "Mixing audio…"))
@@ -636,8 +681,10 @@ struct ContentView: View {
             HStack(spacing: 22) {
                 Toggle(L("录电脑声音", "System audio"), isOn: $rec.systemAudio)
                 Toggle(L("录麦克风", "Microphone"), isOn: $rec.microphone)
-                Toggle(L("显示鼠标", "Show cursor"), isOn: $rec.showCursor)
-            }.disabled(rec.recording)
+                Toggle(L("显示鼠标", "Show cursor"), isOn: $rec.showCursor).disabled(rec.studio)
+                Toggle(L("Studio 效果", "Studio effects"), isOn: $rec.studio)
+                    .help(L("自动放大点击和打字的地方、鼠标更顺滑、加背景和圆角阴影；录完自动生成", "Auto-zoom on clicks and typing, smooth cursor, background with rounded corners and shadow; rendered after recording"))
+            }.disabled(rec.recording || rec.busy)
 
             HStack(alignment: .center, spacing: 16) {
                 Button(action: rec.toggle) {
@@ -681,6 +728,7 @@ struct RecorderApp: App {
             ContentView(rec: rec)
                 .onAppear {
                     HotKey.action = { [weak rec] in rec?.toggle() }
+                    if Studio.selfTest() { return }
                     // 自测：MIXTEST=视频路径 → 把这个文件的两条音轨合成一条（会改动文件，先复制一份再测），然后退出
                     if let path = ProcessInfo.processInfo.environment["MIXTEST"] {
                         Task { @MainActor in
@@ -711,10 +759,15 @@ struct RecorderApp: App {
                                 rec.region = Region(display: CGMainDisplayID(), rect: CGRect(x: a[0], y: a[1], width: a[2], height: a[3]))
                                 rec.selection = "r"
                             }
+                            // AUTOSTUDIO=1 → 开 Studio 效果录（测完恢复原来的开关）
+                            let wasStudio = rec.studio
+                            if ProcessInfo.processInfo.environment["AUTOSTUDIO"] != nil { rec.studio = true }
                             rec.toggle()
                             try? await Task.sleep(for: .seconds(secs + 1))
                             rec.toggle()
                             try? await Task.sleep(for: .seconds(3))
+                            while rec.busy { try? await Task.sleep(for: .seconds(0.5)) }
+                            rec.studio = wasStudio
                             try? "\(rec.sources.map(\.title))\n\(rec.message)\n\(rec.lastFile?.path ?? "")".write(toFile: "/tmp/recorder_test.txt", atomically: true, encoding: .utf8)
                             NSApp.terminate(nil)
                         }
