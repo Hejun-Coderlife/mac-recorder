@@ -65,7 +65,7 @@ namespace ScreenRecorder
             top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            top.Controls.Add(head, 0, 0); top.Controls.Add(regionBtn, 1, 0); top.Controls.Add(refreshBtn, 2, 0);
+            top.Controls.Add(head, 0, 0);
             root.Controls.Add(top);
 
             // 列表：名字 + 说明
@@ -147,17 +147,19 @@ namespace ScreenRecorder
 
             // 状态 + 打开文件夹
             var bottom = Row();
-            status.AutoSize = true; status.Anchor = AnchorStyles.Left; status.MaximumSize = new Size(440, 0);
+            status.AutoSize = true; status.Anchor = AnchorStyles.Left; status.MaximumSize = new Size(470, 0);
             Btn(folderBtn, L("打开所在文件夹", "Show in Folder"), (s, e) => ShowInFolder());
             // 以前录的 Studio 素材：选一个文件夹，打开剪辑窗口接着改
             Btn(footageBtn, L("打开 Studio 素材…", "Open Studio Footage…"), (s, e) => OpenFootage());
             tips.SetToolTip(footageBtn, L("选「视频\\录屏\\Studio 素材」里的一个文件夹，打开剪辑窗口接着改", "Pick a folder in Videos\\录屏\\Studio 素材 to edit it again"));
-            footageBtn.Margin = new Padding(0, 3, 8, 3);
-            bottom.ColumnCount = 3;
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            bottom.Controls.Add(status, 0, 0); bottom.Controls.Add(footageBtn, 1, 0); bottom.Controls.Add(folderBtn, 2, 0);
+            bottom.Controls.Add(status, 0, 0); bottom.Controls.Add(folderBtn, 1, 0);
+            // 「打开 Studio 素材…」放在第一行（和选区域、刷新列表一排），底下那行放不下
+            top.ColumnCount = 4;
+            top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            top.Controls.Add(footageBtn, 1, 0); top.Controls.Add(regionBtn, 2, 0); top.Controls.Add(refreshBtn, 3, 0);
+            footageBtn.Margin = regionBtn.Margin = new Padding(0, 3, 6, 3);
             root.Controls.Add(bottom);
 
             // 更新：有新版本时左边出「有新版本 vX.Y · 更新」，右边常驻「检查更新」
