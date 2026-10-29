@@ -155,6 +155,12 @@ namespace ScreenRecorder
 
         // ---- 在预览上按下 / 拖 / 松手 ----
         string ovMode, ovId;                    // "create" / "move" / "h0".."h7" / "a0" "a1"
+        object ovNew;                           // 正在拖出来的新遮挡 / 标注（拖动每一步都从拖之前的工程重做，要把它再放进去）
+        void PutNew(StudioProject p)
+        {
+            if (ovNew is Redaction nr && !p.Redactions.Any(x => x.Id == nr.Id)) p.Redactions.Add(nr.Clone());
+            if (ovNew is Annotation na && !p.Annotations.Any(x => x.Id == na.Id)) p.Annotations.Add(na.Clone());
+        }
         double downNx, downNy;
         (double x, double y, double w, double h) ovBase;
 
@@ -162,6 +168,7 @@ namespace ScreenRecorder
         public bool OverlayDown(double vx, double vy)
         {
             var (nx, ny) = FromView(vx, vy);
+            if (OverlayLog.Length > 2000) OverlayLog = "";
             OverlayLog += $"down v({vx:0.000},{vy:0.000}) n({nx:0.000},{ny:0.000}) tool={Tool ?? "-"}; ";
             downNx = nx; downNy = ny;
             if (Tool != null)
@@ -201,16 +208,16 @@ namespace ScreenRecorder
             if (tool == "redact")
             {
                 var r = new Redaction { Start = t0, End = t1, X = nx, Y = ny, W = 0, H = 0 };
-                ovId = r.Id;
-                DragUpdate(p => p.Redactions.Add(r.Clone()));
+                ovId = r.Id; ovNew = r;
+                DragUpdate(PutNew);
                 SelectedRed = r.Id; SelectedAnn = null; Selected = null; SelectedCut = null;
             }
             else
             {
                 var a = new Annotation { Start = t0, End = t1, Kind = tool, X = nx, Y = ny, W = 0, H = 0, Text = tool == "text" ? L("文字", "Text") : "" };
                 if (tool == "highlight") a.Color = Annotation.Palette[2];
-                ovId = a.Id;
-                DragUpdate(p => p.Annotations.Add(a.Clone()));
+                ovId = a.Id; ovNew = a;
+                DragUpdate(PutNew);
                 SelectedAnn = a.Id; SelectedRed = null; Selected = null; SelectedCut = null;
             }
             ovMode = "create"; ovBase = (nx, ny, 0, 0);
@@ -224,6 +231,7 @@ namespace ScreenRecorder
             var b = ovBase; string mode = ovMode, id = ovId;
             DragUpdate(p =>
             {
+                PutNew(p);
                 var r = p.Redactions.FirstOrDefault(x => x.Id == id); var a = p.Annotations.FirstOrDefault(x => x.Id == id);
                 double x0, y0, w, h;
                 if (mode == "create") { x0 = b.x; y0 = b.y; w = nx - b.x; h = ny - b.y; if (a == null || a.Kind != "arrow") { x0 = Math.Min(b.x, nx); y0 = Math.Min(b.y, ny); w = Math.Abs(nx - b.x); h = Math.Abs(ny - b.y); } }
@@ -258,6 +266,7 @@ namespace ScreenRecorder
                 string id = ovId;
                 DragUpdate(p =>
                 {
+                    PutNew(p);
                     var r = p.Redactions.FirstOrDefault(x => x.Id == id); var a = p.Annotations.FirstOrDefault(x => x.Id == id);
                     if (r != null && (r.W < 0.01 || r.H < 0.01)) { r.W = 0.2; r.H = 0.12; r.X = Math.Min(Math.Max(0, r.X - 0.1), 0.8); r.Y = Math.Min(Math.Max(0, r.Y - 0.06), 0.88); }
                     if (a != null && a.Kind == "arrow" && Math.Abs(a.W) < 0.01 && Math.Abs(a.H) < 0.01) { a.W = 0.12; a.H = -0.1; }
@@ -266,7 +275,7 @@ namespace ScreenRecorder
                 });
                 bool text = Project.Annotations.FirstOrDefault(x => x.Id == id)?.Kind == "text";
                 Tool = null;
-                ovMode = null;
+                ovMode = null; ovNew = null;
                 DragEnd();
                 if (text) EditAnnotationText();
                 return;
