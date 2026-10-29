@@ -90,11 +90,21 @@ namespace ScreenRecorder
             if (Environment.GetEnvironmentVariable("STUDIO") != null) return SelfTest.RenderOnly();
             if (Environment.GetEnvironmentVariable("AUTOTEST") != null) return SelfTest.Run();
             if (Environment.GetEnvironmentVariable("UPDATE_TEST") != null) return Updater.SelfTest();
+            // 自测：UPDATESTATE_TEST=1 → 把「已更新到」（只给一次）写到 %TEMP%\update_state.txt 后退出
+            if (Environment.GetEnvironmentVariable("UPDATESTATE_TEST") != null)
+            {
+                System.IO.File.WriteAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "update_state.txt"), "updatedTo=" + Updater.TakeUpdatedTo() + "\r\n");
+                return 0;
+            }
             if (Environment.GetEnvironmentVariable("SHOTTEST") != null) return SelfTest.Shot();
             if (Environment.GetEnvironmentVariable("HOTKEY_HOG") != null) return SelfTest.Hog();
             if (Environment.GetEnvironmentVariable("HOTKEYTEST") != null) return SelfTest.Hotkeys();
             Shots.CleanTemp();
+            // 上次后台下好了新版、却没等到正常退出就被结束了：先换上，再打开新版
+            if (Updater.StagedVersion != null && Updater.ApplyStaged(true)) return 0;
             Application.Run(new MainForm());
+            // 正常退出：把后台下好的新版换上，下次打开就是新的（点了「现在重启」就顺便打开）
+            Updater.ApplyStaged(Updater.RestartAfterExit);
             return 0;
         }
     }

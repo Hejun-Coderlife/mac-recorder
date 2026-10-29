@@ -225,11 +225,11 @@ namespace ScreenRecorder
             foreach (var m in tr.Moves) if (m[4] == 1 && m[0] - lastDrag >= 0.3) { ev.Add(new Ev(m[0], m[1], H - m[2])); lastDrag = m[0]; }
             ev = ev.Where(e => e.t >= 0 && e.t <= duration - 1).OrderBy(e => e.t).ToList();
 
-            // 2) 合成放大段：事件前 0.6 秒开始推近，最后一个事件后停 2.2 秒；两段之间不到 1.5 秒就连成一段
+            // 2) 合成放大段：事件前 0.6 秒开始推近，最后一个事件后停 3.5 秒；两段之间不到 1.5 秒就连成一段
             var segs = new List<Seg>();
             foreach (var e in ev)
             {
-                double s = Math.Max(0, e.t - 0.6), end = e.t + 2.2;
+                double s = Math.Max(0, e.t - 0.6), end = e.t + 3.5;
                 var last = segs.LastOrDefault();
                 if (last != null && s <= last.end + 1.5) { last.end = Math.Max(last.end, end); last.ev.Add(e); }
                 else { var g = new Seg { start = s, end = end }; g.ev.Add(e); segs.Add(g); }
@@ -267,8 +267,8 @@ namespace ScreenRecorder
                     if (near.Count > 0 && (Math.Abs(near[0].x - fx) > hw * 0.5 || Math.Abs(near[0].y - fy) > hh * 0.5)) { fx = near[0].x; fy = near[0].y; }
                     else if (hasM && t >= seg.ev[0].t)
                     {
-                        // 鼠标快出镜头（超过中间 70%）才跟过去，平时镜头不动
-                        double rx = hw * 0.7, ry = hh * 0.7;
+                        // 推近时镜头跟着鼠标走（像 Screen Studio）：鼠标离开中间一小块（25%）就跟，弹簧让它走得顺
+                        double rx = hw * 0.25, ry = hh * 0.25;
                         if (mxv > fx + rx) fx = mxv - rx; else if (mxv < fx - rx) fx = mxv + rx;
                         if (myv > fy + ry) fy = myv - ry; else if (myv < fy - ry) fy = myv + ry;
                     }
@@ -701,6 +701,11 @@ namespace ScreenRecorder
             var lay = new StudioLayout(track, st);
             int n = Math.Max(1, (int)(info.Duration * st.Fps));
             var plan = StudioPlan.Make(track, lay, st, n, info.Duration);
+            // 自测：STUDIO_PLANDUMP=文件 → 每帧写「秒,放大倍数,鼠标离画面中心多远（横、竖，按半个画面算）」
+            var dump = Environment.GetEnvironmentVariable("STUDIO_PLANDUMP");
+            if (dump != null)
+                File.WriteAllLines(dump, plan.Select((f, i) => string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:F3},{1:F3},{2:F3},{3:F3}",
+                    i / (double)st.Fps, f.z, (lay.card.X + f.mx * lay.s - f.sx) * f.z / (lay.cw / 2), (lay.card.Y + f.my * lay.s - f.sy) * f.z / (lay.ch / 2))));
             var cpu = new Compositor(lay);
             var arrow = Sprites.Arrow(); var ring = Sprites.Ring();
             var art = new Dictionary<int, Sprite>();

@@ -145,6 +145,11 @@ jobs:
           if ($p.ExitCode -ne 0 -or $txt -notmatch "REPLACED OK") { throw "self-replace failed" }
           if ((Get-FileHash "$dir\录屏.exe").Hash -ne $expected) { throw "录屏.exe is not the release build" }
           if ((Get-FileHash "$dir\录屏.exe.old").Hash -ne $before) { throw "录屏.exe.old should be the previous exe" }
+          # 后台那套：先放进 %LOCALAPPDATA%\录屏\update，换上后那里清空，并记下「已更新到」最新版本号
+          $tag = (gh release view --repo "${{ github.repository }}" --json tagName -q .tagName).TrimStart('v')
+          if ($txt -notmatch "staged=True") { throw "update was not staged first" }
+          if ($txt -notmatch "stageLeft=False") { throw "staged copy not cleaned up" }
+          if ($txt -notmatch "updatedTo=$([regex]::Escape($tag))") { throw "updatedTo should be $tag" }
           foreach ($k in "UPDATE_TEST", "UPDATE_FAKE_VERSION", "UPDATE_NORELAUNCH", "UPDATE_TOKEN") { Remove-Item "env:$k" }
           # 下次启动删 .old
           $dir2 = Join-Path $env:RUNNER_TEMP "old"; New-Item -ItemType Directory -Force $dir2 | Out-Null
@@ -153,6 +158,36 @@ jobs:
           $p = Start-Process -FilePath "$dir2\录屏.exe" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "recording failed" }
           if (Test-Path "$dir2\录屏.exe.old") { throw ".old not removed" }
+
+      - name: Self-test (silent update - staged update applied at next launch after a forced quit; "updated" notice shown once)
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "staged"; New-Item -ItemType Directory -Force $dir | Out-Null
+          Copy-Item pkg/录屏.exe $dir
+          # 假装上次后台已经下好了新版（就是这次的构建），程序却被强制结束、没来得及换
+          $stage = Join-Path $env:LOCALAPPDATA "录屏\update"; New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item pkg/录屏.exe "$stage\ScreenRecorder.exe"
+          $env:UPDATE_FAKE_VERSION = "1.0"
+          Start-Process -FilePath "$dir\录屏.exe"
+          for ($i = 0; $i -lt 30 -and (Test-Path $stage); $i++) { Start-Sleep 1 }
+          Start-Sleep 5
+          $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq "$dir\录屏.exe" })
+          Write-Host "stage left: $(Test-Path $stage), running from $dir : $($running.Count)"
+          $running | Stop-Process -Force
+          Remove-Item env:UPDATE_FAKE_VERSION
+          if (Test-Path $stage) { throw "staged update not applied at launch" }
+          if ($running.Count -lt 1) { throw "app did not reopen after applying the staged update" }
+          # 「已更新到」只提示一次
+          $settings = Join-Path $env:APPDATA "录屏\settings.txt"
+          Add-Content $settings "updatedTo=1.4"
+          $env:UPDATESTATE_TEST = "1"
+          Start-Process -FilePath "$dir\录屏.exe" -Wait
+          $first = Get-Content "$env:TEMP\update_state.txt" -Raw
+          Start-Process -FilePath "$dir\录屏.exe" -Wait
+          $second = Get-Content "$env:TEMP\update_state.txt" -Raw
+          Remove-Item env:UPDATESTATE_TEST
+          Write-Host "first: $first second: $second"
+          if ($first -notmatch "updatedTo=1\.4") { throw "updated notice missing" }
+          if ($second -notmatch "updatedTo=\s*$") { throw "updated notice should show only once" }
 
       - name: Self-test (screen / region / window, no audio)
         run: |
@@ -270,6 +305,18 @@ jobs:
           if ($f0.white -lt 0.95) { throw "white background missing at 0.3s ($($f0.white))" }
           if ($f1.white -gt 0.5) { throw "not zoomed in at 2.6s ($($f1.white))" }
           if ($res -notmatch "compose=GPU") { throw "GPU compositor was not used" }
+          # 推近时镜头跟着鼠标：重新按素材算一遍镜头，放大着的帧里鼠标应该一直在画面中间附近
+          $env:STUDIO = (Join-Path $dir "project"); $env:STUDIO_OUT = (Join-Path $dir "follow.mp4"); $env:STUDIO_PLANDUMP = (Join-Path $dir "plan.csv")
+          foreach ($k in "AUTOTEST", "AUTOSTUDIO", "AUTOINPUT", "AUTOAUDIO", "AUTOOUT") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          foreach ($k in "STUDIO", "STUDIO_OUT", "STUDIO_PLANDUMP") { Remove-Item "env:$k" }
+          if ($p.ExitCode -ne 0) { throw "re-render for follow check failed" }
+          $zoomed = @(Get-Content (Join-Path $dir "plan.csv") | ForEach-Object { $c = $_ -split ','; [pscustomobject]@{ z = [double]$c[1]; d = [Math]::Max([Math]::Abs([double]$c[2]), [Math]::Abs([double]$c[3])) } } | Where-Object { $_.z -gt 1.8 })
+          if ($zoomed.Count -lt 30) { throw "too few zoomed frames ($($zoomed.Count))" }
+          $sorted = $zoomed.d | Sort-Object
+          $median = $sorted[[int]($sorted.Count / 2)]; $p90 = $sorted[[int]($sorted.Count * 0.9)]
+          Write-Host "zoomed frames: $($zoomed.Count)  cursor offset from center (1 = edge): median=$median p90=$p90"
+          if ($median -gt 0.3 -or $p90 -gt 0.6) { throw "camera does not follow the cursor closely enough" }
 
       - name: Studio GPU vs CPU compositor give the same picture; encoder fallback
         run: |
