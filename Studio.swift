@@ -138,6 +138,7 @@ struct StudioLook: Codable, Equatable {
     enum Aspect: String, Codable, CaseIterable { case original, wide = "16:9", tall = "9:16", square = "1:1", classic = "4:3" }
     enum Background: String, Codable, CaseIterable { case transparent, color, gradient, wallpaper, image }
     enum Blur: String, Codable, CaseIterable { case off, light, medium, strong }
+    enum Click: String, Codable, CaseIterable { case soft, mouse, thock, wood, pop, tick }
 
     var aspect = Aspect.original
     var background = Background.transparent
@@ -156,13 +157,14 @@ struct StudioLook: Codable, Equatable {
     var hideIdleCursor = false     // 鼠标不动几秒后自动隐藏
     var hideAfter = 2.0            // 1–5 秒
     var clickSound = false         // 点击时加一声轻响
+    var clickStyle = Click.soft    // 哪种声音：轻点 / 鼠标咔哒 / 低沉 / 木头 / 气泡 / 清脆滴答
     var ripple = true              // 点击波纹
     var blur = Blur.light          // 运动模糊：只在镜头快速移动时有
 
     init() {}
     enum CodingKeys: String, CodingKey {
         case aspect, background, color, gradient0, gradient1, gradientAngle, wallpaper, imagePath, imageBookmark, padding, cornerRadius,
-             shadow, shadowBlur, cursorScale, smoothing, hideIdleCursor, hideAfter, clickSound, ripple, blur
+             shadow, shadowBlur, cursorScale, smoothing, hideIdleCursor, hideAfter, clickSound, clickStyle, ripple, blur
     }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self), z = StudioLook()
@@ -173,6 +175,7 @@ struct StudioLook: Codable, Equatable {
         padding = v(.padding, z.padding); cornerRadius = v(.cornerRadius, z.cornerRadius); shadow = v(.shadow, z.shadow)
         shadowBlur = v(.shadowBlur, z.shadowBlur); cursorScale = v(.cursorScale, z.cursorScale); smoothing = v(.smoothing, z.smoothing)
         hideIdleCursor = v(.hideIdleCursor, z.hideIdleCursor); hideAfter = v(.hideAfter, z.hideAfter); clickSound = v(.clickSound, z.clickSound)
+        clickStyle = v(.clickStyle, z.clickStyle)
         ripple = v(.ripple, z.ripple); blur = v(.blur, z.blur)
     }
 
@@ -754,6 +757,7 @@ final class StudioJob: @unchecked Sendable {
     private let plan: [FramePlan]
     private let first: Int, last: Int          // 导出第 first..<last 帧
     private let clickTimes: [Double]           // 要加点击声的时刻（秒，素材时间）；不加就是空的
+    private let clickStyle: StudioLook.Click
     private let progress: @Sendable (Double) -> Void
 
     init(project dir: URL, out: URL, style: StudioStyle, project: StudioProject? = nil, progress: @escaping @Sendable (Double) -> Void) async throws {
@@ -772,6 +776,7 @@ final class StudioJob: @unchecked Sendable {
         first = min(max(0, Int((p.trimStart * fps).rounded())), plan.count - 1)
         last = max(first + 1, min(plan.count, Int((p.trimEnd * fps).rounded())))
         clickTimes = p.look.clickSound ? track.clicks.map { $0[0] } : []
+        clickStyle = p.look.clickStyle
     }
 
     func run() throws {
@@ -862,7 +867,7 @@ final class StudioJob: @unchecked Sendable {
         if let aIn {
             group.enter()
             var audioDone = false
-            let clicks = ClickSound(times: clickTimes)
+            let clicks = ClickSound(times: clickTimes, style: clickStyle)
             // 没有原声音只有点击声：自己按 0.1 秒一块生成静音 + 点击
             var genAt = Int64((range.start.seconds * 48000).rounded()), genEnd = Int64((range.end.seconds * 48000).rounded())
             aIn.requestMediaDataWhenReady(on: DispatchQueue(label: "studio.audio")) {
@@ -891,21 +896,61 @@ final class StudioJob: @unchecked Sendable {
     }
 }
 
-// 点击音效：程序合成一声短促的「嗒」（高频衰减正弦 + 一点噪声，40 毫秒），按点击时刻混进 48k 立体声浮点 PCM
+// 点击音效：程序合成的几种短声（衰减正弦 + 一点噪声，几十毫秒），按点击时刻混进 48k 立体声浮点 PCM
 final class ClickSound: @unchecked Sendable {
     private let starts: [Int64]                // 每次点击从第几个采样开始
     private let wave: [Float]
     private var format: CMAudioFormatDescription?
     var isEmpty: Bool { starts.isEmpty }
 
-    init(times: [Double]) {
+    init(times: [Double], style: StudioLook.Click = .soft) {
         starts = times.map { Int64(($0 * 48000).rounded()) }.sorted()
+        wave = Self.wave(style)
+    }
+
+    // 一声的波形（单声道，48k）
+    static func wave(_ style: StudioLook.Click) -> [Float] {
         var g = SystemRandomNumberGenerator()
-        wave = (0..<1920).map { k in
-            let t = Double(k) / 48000, env = exp(-t / 0.0045)
-            let tone = 0.65 * sin(2 * .pi * 3100 * t) + 0.35 * sin(2 * .pi * 1700 * t)
-            return Float(env * (0.8 * tone + 0.2 * Double.random(in: -1...1, using: &g)) * 0.32)
+        func noise() -> Double { Double.random(in: -1...1, using: &g) }
+        func burst(_ t: Double, _ decay: Double, _ f: Double, _ amp: Double) -> Double {
+            amp * exp(-t / decay) * (0.6 * sin(2 * .pi * f * t) + 0.4 * noise())
         }
+        let n: Int
+        let f: (Double) -> Double
+        switch style {
+        case .soft:   // 轻点：短促的「嗒」
+            n = 1920
+            f = { t in exp(-t / 0.0045) * (0.8 * (0.65 * sin(2 * .pi * 3100 * t) + 0.35 * sin(2 * .pi * 1700 * t)) + 0.2 * noise()) * 0.32 }
+        case .mouse:  // 鼠标咔哒：按下 + 60 毫秒后松开
+            n = 4800
+            f = { t in (t < 0.02 ? burst(t, 0.0018, 2600, 0.45) : 0) + (t >= 0.06 && t < 0.08 ? burst(t - 0.06, 0.0015, 3200, 0.25) : 0) }
+        case .thock:  // 低沉的「咚」
+            n = 4800
+            f = { t in exp(-t / 0.012) * (0.6 * sin(2 * .pi * 190 * t) + 0.3 * sin(2 * .pi * 620 * t)) * 0.5 + burst(t, 0.002, 1800, 0.12) }
+        case .wood:   // 木头（像木鱼）
+            n = 5760
+            f = { t in exp(-t / 0.018) * (0.6 * sin(2 * .pi * 880 * t) + 0.25 * sin(2 * .pi * 2350 * t)) * 0.42 }
+        case .pop:    // 气泡「啵」：音高往上扬
+            n = 2160
+            f = { t in let e = pow(sin(.pi * t / 0.045), 2); return 0.4 * e * sin(2 * .pi * (500 + 1200 * t / 0.045) * t) }
+        case .tick:   // 清脆的「嘀」
+            n = 1440
+            f = { t in exp(-t / 0.0025) * (0.7 * sin(2 * .pi * 5200 * t) + 0.3 * sin(2 * .pi * 7400 * t)) * 0.3 }
+        }
+        return (0..<n).map { Float(f(Double($0) / 48000)) }
+    }
+
+    // 试听用：一声包成 WAV
+    static func wav(_ style: StudioLook.Click) -> Data {
+        let pcm = wave(style).map { Int16(max(-1, min(1, $0)) * 32767) }
+        var d = Data()
+        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
+        func u16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
+        d.append(contentsOf: Array("RIFF".utf8)); u32(UInt32(36 + pcm.count * 2)); d.append(contentsOf: Array("WAVEfmt ".utf8))
+        u32(16); u16(1); u16(1); u32(48000); u32(96000); u16(2); u16(16)
+        d.append(contentsOf: Array("data".utf8)); u32(UInt32(pcm.count * 2))
+        pcm.withUnsafeBytes { d.append(contentsOf: $0) }
+        return d
     }
 
     // 往一块声音里加上落在它时间段里的点击，返回新的一块

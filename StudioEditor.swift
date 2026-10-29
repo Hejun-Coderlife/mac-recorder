@@ -1070,6 +1070,15 @@ struct StylePanel: View {
             Toggle(L("点击波纹", "Click ripple"), isOn: ed.look(\.ripple))
             Toggle(L("点击音效", "Click sound"), isOn: ed.look(\.clickSound))
                 .help(L("导出时在每次点击处加一声轻响（预览里听不到）", "Adds a soft click sound at each click when exporting (not in the preview)"))
+            if look.clickSound {
+                HStack(spacing: 6) {
+                    Picker("", selection: Binding(get: { look.clickStyle }, set: { v in ed.look(\.clickStyle).wrappedValue = v; ClickPreview.play(v) })) {
+                        ForEach(StudioLook.Click.allCases, id: \.self) { Text(ClickPreview.name($0)).tag($0) }
+                    }.labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
+                    Button { ClickPreview.play(look.clickStyle) } label: { Image(systemName: "speaker.wave.2.fill") }
+                        .help(L("试听", "Preview sound"))
+                }.controlSize(.small)
+            }
         }.toggleStyle(.checkbox).font(.callout)
     }
 
@@ -1382,5 +1391,24 @@ enum StudioTests {
         }
         Task { await StudioEditor.open(URL(fileURLWithPath: p)) }
         return true
+    }
+}
+
+// 点击音效试听：选了就响一声
+@MainActor enum ClickPreview {
+    private static var player: AVAudioPlayer?
+    static func name(_ c: StudioLook.Click) -> String {
+        switch c {
+        case .soft: L("轻点", "Soft tap")
+        case .mouse: L("鼠标咔哒", "Mouse click")
+        case .thock: L("低沉", "Deep thock")
+        case .wood: L("木头", "Wood")
+        case .pop: L("气泡", "Pop")
+        case .tick: L("清脆滴答", "Crisp tick")
+        }
+    }
+    static func play(_ c: StudioLook.Click) {
+        player = try? AVAudioPlayer(data: ClickSound.wav(c))
+        player?.play()
     }
 }
