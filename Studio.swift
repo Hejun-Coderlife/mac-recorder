@@ -1,6 +1,7 @@
 // Studio 效果（仿 Screen Studio）：录的时候画面里不录鼠标，另记一份鼠标轨迹；录完按轨迹自动放大点击、打字的地方，
 // 镜头和鼠标都用弹簧曲线走得顺滑，再加透明背景、圆角、阴影，逐帧合成（Core Image 走显卡）导出成片
-// 素材留在「影片/录屏/Studio 素材/<名字>/」：raw.mp4（没有鼠标的原始画面）、track.json（轨迹）、cursor-N.png（录到的指针图案），以后剪辑界面要用
+// 素材留在「影片/录屏/Studio 素材/<名字>/」：raw.mp4（没有鼠标的原始画面）、track.json（轨迹）、cursor-N.png（录到的指针图案）、
+// project.json（推近段和修剪，剪辑窗口里改）
 import AppKit
 import AVFoundation
 import CoreImage
@@ -172,14 +173,47 @@ struct FramePlan {
     var press = 1.0                // 点击时指针缩一下
 }
 
+// ---- 推近段（工程文件 project.json，存在素材夹里）：第一次按点击 / 打字 / 拖动自动生成，剪辑窗口里可以改 ----
+struct ZoomSegment: Codable, Equatable, Identifiable {
+    enum Mode: String, Codable { case follow, fixed }   // 跟着鼠标走 / 盯住一个固定位置
+    var id = UUID()
+    var start: Double
+    var end: Double
+    var zoom = 2.0
+    var mode = Mode.follow
+    var fixedX = 0.5, fixedY = 0.5     // 固定位置：在原画面里的比例，左上角为原点
+}
+
+struct StudioProject: Codable, Equatable {
+    var segments: [ZoomSegment] = []
+    var trimStart = 0.0
+    var trimEnd = 0.0
+
+    static func url(_ dir: URL) -> URL { dir.appendingPathComponent("project.json") }
+    // 有 project.json 就读，没有就按自动规则生成一份
+    static func load(_ dir: URL, track: Track, duration: Double, zoom: Double = 2.0) -> StudioProject {
+        if let d = try? Data(contentsOf: url(dir)), var p = try? JSONDecoder().decode(StudioProject.self, from: d) {
+            p.trimStart = min(max(0, p.trimStart), duration)
+            p.trimEnd = p.trimEnd > p.trimStart ? min(p.trimEnd, duration) : duration
+            p.segments.sort { $0.start < $1.start }
+            return p
+        }
+        return StudioProject(segments: StudioPlan.autoSegments(track, duration: duration, zoom: zoom), trimStart: 0, trimEnd: duration)
+    }
+    func save(_ dir: URL) throws {
+        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try enc.encode(self).write(to: Self.url(dir), options: .atomic)
+    }
+}
+
 enum StudioPlan {
     typealias Event = (t: Double, x: Double, y: Double)
 
-    static func make(_ tr: Track, _ L: StudioLayout, _ st: StudioStyle, frames n: Int, duration: Double) -> [FramePlan] {
-        let W = L.W, H = L.H, dt = 1 / Double(st.fps)
-        let ts = tr.moves.map { $0[0] }
-        // 鼠标在 t 秒的位置（前后两次采样之间插值），y 换成朝上
-        func mouse(_ t: Double) -> (x: Double, y: Double, shape: Int)? {
+    // 鼠标在 t 秒的位置（前后两次采样之间插值），y 换成朝上
+    struct Mouse {
+        let tr: Track, ts: [Double], H: Double
+        init(_ tr: Track) { self.tr = tr; ts = tr.moves.map { $0[0] }; H = Double(tr.height) }
+        func at(_ t: Double) -> (x: Double, y: Double, shape: Int)? {
             guard !ts.isEmpty else { return nil }
             var lo = 0, hi = ts.count
             while lo < hi { let m = (lo + hi) / 2; if ts[m] <= t { lo = m + 1 } else { hi = m } }
@@ -187,35 +221,45 @@ enum StudioPlan {
             let u = b[0] > a[0] ? min(1, max(0, (t - a[0]) / (b[0] - a[0]))) : 0
             return (a[1] + (b[1] - a[1]) * u, H - (a[2] + (b[2] - a[2]) * u), Int(a[3]))
         }
+    }
 
-        // 1) 值得放大的时刻：点击、打字、按住拖动（每 0.3 秒算一次）；最后 1 秒不算（多半是去点「停止」或按快捷键）
+    // 值得放大的时刻：点击、打字、按住拖动（每 0.3 秒算一次）；最后 1 秒不算（多半是去点「停止」或按快捷键）。y 朝上
+    static func events(_ tr: Track, duration: Double) -> [Event] {
+        let H = Double(tr.height), mouse = Mouse(tr)
         var ev: [Event] = tr.clicks.map { ($0[0], $0[1], H - $0[2]) }
-        for k in tr.keys { if let m = mouse(k) { ev.append((k, m.x, m.y)) } }
+        for k in tr.keys { if let m = mouse.at(k) { ev.append((k, m.x, m.y)) } }
         var lastDrag = -1.0
         for m in tr.moves where m[4] == 1 && m[0] - lastDrag >= 0.3 { ev.append((m[0], m[1], H - m[2])); lastDrag = m[0] }
-        ev = ev.filter { $0.t >= 0 && $0.t <= duration - 1 }.sorted { $0.t < $1.t }
+        return ev.filter { $0.t >= 0 && $0.t <= duration - 1 }.sorted { $0.t < $1.t }
+    }
 
-        // 2) 合成放大段：事件前 0.6 秒开始推近，最后一个事件后停 3.5 秒；两段之间不到 1.5 秒就连成一段（别刚拉远又推近）
-        struct Seg { var start: Double; var end: Double; var ev: [Event] }
-        var segs: [Seg] = []
-        for e in ev {
-            let s = max(0, e.t - 0.6), end = e.t + 3.5
-            if var last = segs.last, s <= last.end + 1.5 { last.end = max(last.end, end); last.ev.append(e); segs[segs.count - 1] = last }
-            else { segs.append(Seg(start: s, end: end, ev: [e])) }
+    // 自动生成推近段：事件前 0.6 秒开始推近，最后一个事件后停 3.5 秒；两段之间不到 1.5 秒就连成一段（别刚拉远又推近）
+    static func autoSegments(_ tr: Track, duration: Double, zoom: Double = 2.0) -> [ZoomSegment] {
+        let W = Double(tr.width), H = Double(tr.height)
+        var segs: [ZoomSegment] = []
+        for e in events(tr, duration: duration) {
+            let s = max(0, e.t - 0.6), end = min(duration, e.t + 3.5)
+            if let last = segs.last, s <= last.end + 1.5 { segs[segs.count - 1].end = max(last.end, end) }
+            else { segs.append(ZoomSegment(start: s, end: end, zoom: zoom, fixedX: e.x / W, fixedY: 1 - e.y / H)) }
         }
+        return segs
+    }
 
-        // 3) 逐帧：定目标，弹簧去追
-        let Z = st.zoom
-        let hw = L.cw / (2 * Z * L.s), hh = L.ch / (2 * Z * L.s)   // 放大时看得到的原画面半宽、半高
+    // 逐帧算镜头和鼠标：从 0 秒算到结尾（修剪只决定导出哪几帧，镜头怎么走不受影响，预览和成片一致）
+    static func make(_ tr: Track, _ L: StudioLayout, _ st: StudioStyle, segments: [ZoomSegment], frames n: Int, duration: Double) -> [FramePlan] {
+        let W = L.W, H = L.H, dt = 1 / Double(st.fps)
+        let mouse = Mouse(tr), ev = events(tr, duration: duration)
+        let segs = segments.sorted { $0.start < $1.start }
         var lz = Spring(x: 0, w: 4), cx = Spring(x: W / 2, w: 4), cy = Spring(x: H / 2, w: 4)
         var mx: Spring?, my: Spring?
-        var si = 0, cur = -1
+        var si = 0
+        var cur: UUID?
         var focus = (x: W / 2, y: H / 2)
         var out = [FramePlan](repeating: FramePlan(), count: n)
         for i in 0..<n {
             let t = Double(i) * dt
             var f = FramePlan()
-            let m = mouse(t)
+            let m = mouse.at(t)
             if let m {
                 if mx == nil { mx = Spring(x: m.x, w: 30); my = Spring(x: m.y, w: 30) }
                 mx!.step(to: m.x, dt: dt); my!.step(to: m.y, dt: dt)
@@ -226,16 +270,25 @@ enum StudioPlan {
             while si < segs.count && segs[si].end <= t { si += 1 }
             var tz = 1.0, tx = W / 2, ty = H / 2
             if si < segs.count && segs[si].start <= t {
-                let seg = segs[si]
-                if cur != si { cur = si; focus = (seg.ev[0].x, seg.ev[0].y) }
-                // 半秒内要点的地方离镜头远：提前转过去（录完再算，所以能「预知」）
-                if let e = seg.ev.first(where: { $0.t >= t && $0.t <= t + 0.5 }), abs(e.x - focus.x) > hw * 0.5 || abs(e.y - focus.y) > hh * 0.5 {
-                    focus = (e.x, e.y)
-                } else if let m, t >= seg.ev[0].t {
-                    // 推近时镜头跟着鼠标走（像 Screen Studio）：鼠标离开中间一小块（25%）就跟，弹簧让它走得顺
-                    let rx = hw * 0.25, ry = hh * 0.25
-                    if m.x > focus.x + rx { focus.x = m.x - rx } else if m.x < focus.x - rx { focus.x = m.x + rx }
-                    if m.y > focus.y + ry { focus.y = m.y - ry } else if m.y < focus.y - ry { focus.y = m.y + ry }
+                let seg = segs[si], Z = max(1, seg.zoom)
+                let hw = L.cw / (2 * Z * L.s), hh = L.ch / (2 * Z * L.s)   // 放大时看得到的原画面半宽、半高
+                let segEv = ev.filter { $0.t >= seg.start && $0.t < seg.end }
+                if seg.mode == .fixed {
+                    focus = (seg.fixedX * W, H - seg.fixedY * H)
+                } else {
+                    if cur != seg.id {
+                        cur = seg.id
+                        if let e = segEv.first { focus = (e.x, e.y) } else if let m { focus = (m.x, m.y) }
+                    }
+                    // 半秒内要点的地方离镜头远：提前转过去（录完再算，所以能「预知」）
+                    if let e = segEv.first(where: { $0.t >= t && $0.t <= t + 0.5 }), abs(e.x - focus.x) > hw * 0.5 || abs(e.y - focus.y) > hh * 0.5 {
+                        focus = (e.x, e.y)
+                    } else if let m, t >= (segEv.first?.t ?? seg.start) {
+                        // 推近时镜头跟着鼠标走（像 Screen Studio）：鼠标离开中间一小块（25%）就跟，弹簧让它走得顺
+                        let rx = hw * 0.25, ry = hh * 0.25
+                        if m.x > focus.x + rx { focus.x = m.x - rx } else if m.x < focus.x - rx { focus.x = m.x + rx }
+                        if m.y > focus.y + ry { focus.y = m.y - ry } else if m.y < focus.y - ry { focus.y = m.y + ry }
+                    }
                 }
                 focus.x = 2 * hw >= W ? W / 2 : min(max(focus.x, hw), W - hw)
                 focus.y = 2 * hh >= H ? H / 2 : min(max(focus.y, hh), H - hh)
@@ -259,8 +312,8 @@ enum StudioPlan {
 enum Studio {
     static let failure = { (s: String) in NSError(domain: "Studio", code: 1, userInfo: [NSLocalizedDescriptionKey: s]) }
 
-    static func render(project dir: URL, to out: URL, style: StudioStyle = StudioStyle(), progress: @escaping @Sendable (Double) -> Void) async throws {
-        let job = try await StudioJob(project: dir, out: out, style: style, progress: progress)
+    static func render(project dir: URL, to out: URL, style: StudioStyle = StudioStyle(), edits: StudioProject? = nil, progress: @escaping @Sendable (Double) -> Void) async throws {
+        let job = try await StudioJob(project: dir, out: out, style: style, project: edits, progress: progress)
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 do { try job.run(); c.resume() } catch { c.resume(throwing: error) }
@@ -289,34 +342,22 @@ enum Studio {
     }
 }
 
-final class StudioJob: @unchecked Sendable {
-    private let asset: AVURLAsset
-    private let videoTrack: AVAssetTrack
-    private let audioTracks: [AVAssetTrack]
-    private let out: URL
-    private let track: Track
-    private let lay: StudioLayout
-    private let st: StudioStyle
-    private let plan: [FramePlan]
+// ---- 一帧怎么画：导出和剪辑窗口的预览共用这一套，所以预览和成片一样 ----
+final class StudioRenderer: @unchecked Sendable {
+    let track: Track
+    let lay: StudioLayout
+    let st: StudioStyle
+    let ctx: CIContext
     private let clicks: [(t: Double, x: Double, y: Double)]
-    private let progress: @Sendable (Double) -> Void
-    private let ctx: CIContext
     private var cursorArt: [Int: (img: CIImage, ppp: Double, hotX: Double, hotY: Double)] = [:]
     private let arrow: (img: CIImage, ppp: Double, hotX: Double, hotY: Double)
     private let ring: CIImage
     private var background: CIImage!
     private var mask: CIImage!
 
-    init(project dir: URL, out: URL, style: StudioStyle, progress: @escaping @Sendable (Double) -> Void) async throws {
-        track = try JSONDecoder().decode(Track.self, from: Data(contentsOf: dir.appendingPathComponent("track.json")))
-        asset = AVURLAsset(url: dir.appendingPathComponent("raw.mp4"))
-        guard let vt = try await asset.loadTracks(withMediaType: .video).first else { throw Studio.failure(L("素材里没有画面", "No video in the recording")) }
-        videoTrack = vt
-        audioTracks = try await asset.loadTracks(withMediaType: .audio)
-        let duration = try await asset.load(.duration).seconds
-        self.out = out; st = style; self.progress = progress
+    init(project dir: URL, track: Track, style: StudioStyle) {
+        self.track = track; st = style
         lay = StudioLayout(track: track, style: style)
-        plan = StudioPlan.make(track, lay, style, frames: max(1, Int(duration * Double(style.fps))), duration: duration)
         let h = Double(track.height)
         clicks = track.clicks.map { ($0[0], $0[1], h - $0[2]) }
         // 不做色彩管理：原画面的数值原样搬过去，颜色和原录屏一致
@@ -329,6 +370,10 @@ final class StudioJob: @unchecked Sendable {
             }
         }
         prepareBackground()
+    }
+
+    func plan(_ project: StudioProject, duration: Double) -> [FramePlan] {
+        StudioPlan.make(track, lay, st, segments: project.segments, frames: max(1, Int(duration * Double(st.fps))), duration: duration)
     }
 
     // 透明背景 + 卡片阴影：每帧都一样，先画好存成一张图
@@ -345,8 +390,122 @@ final class StudioJob: @unchecked Sendable {
         CIFilter(name: "CIRoundedRectangleGenerator", parameters: ["inputExtent": CIVector(cgRect: r), "inputRadius": radius, "inputColor": color])!.outputImage!
     }
 
+    // 合成第 i 帧（plan 从 0 秒算起）：背景 → 圆角画面 → 点击波纹 → 鼠标，整幅按镜头推拉
+    func frame(_ i: Int, plan: [FramePlan], source: CIImage) -> CIImage {
+        let f = plan[i], W = lay.W, H = lay.H
+        var src = source
+        let bh = src.extent.height   // 高度是奇数时底下补过 1 像素，切掉
+        src = src.cropped(to: CGRect(x: 0, y: bh - H, width: W, height: H)).transformed(by: CGAffineTransform(translationX: 0, y: -(bh - H)))
+        var scene = src.transformed(by: lay.toScene).applyingFilter("CIBlendWithAlphaMask", parameters: [
+            kCIInputBackgroundImageKey: background!, kCIInputMaskImageKey: mask!,
+        ])
+        let t = Double(i) / Double(st.fps), ppp = track.pixelsPerPoint
+        // 点击波纹：0.5 秒内从 6 点扩到 28 点、渐渐淡掉
+        for c in clicks where t >= c.t && t < c.t + 0.5 {
+            let u = (t - c.t) / 0.5, e = 1 - pow(1 - u, 3)
+            let r = (6 + 22 * e) * ppp * st.cursorScale / 1.5, k = r / 52
+            let img = ring.applyingFilter("CIColorMatrix", parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1 - u)])
+                .transformed(by: CGAffineTransform(translationX: -64, y: -64).concatenating(CGAffineTransform(scaleX: k, y: k))
+                    .concatenating(CGAffineTransform(translationX: c.x, y: c.y)).concatenating(lay.toScene))
+            scene = img.composited(over: scene)
+        }
+        if f.shape >= 0 {
+            let art = track.cursors.indices.contains(f.shape) && !track.cursors[f.shape].arrow ? cursorArt[f.shape] ?? arrow : arrow
+            let k = ppp * st.cursorScale * f.press / art.ppp
+            let hx = art.hotX * art.ppp, hy = art.img.extent.height - art.hotY * art.ppp
+            let img = art.img.transformed(by: CGAffineTransform(translationX: -hx, y: -hy).concatenating(CGAffineTransform(scaleX: k, y: k))
+                .concatenating(CGAffineTransform(translationX: f.mx, y: f.my)).concatenating(lay.toScene))
+            scene = img.composited(over: scene)
+        }
+        let cam = CGAffineTransform(a: f.z, b: 0, c: 0, d: f.z, tx: lay.cw / 2 - f.sx * f.z, ty: lay.ch / 2 - f.sy * f.z)
+        var img = scene.transformed(by: cam).cropped(to: lay.canvas)
+        if st.motionBlur, i > 0 {
+            let p = plan[i - 1]
+            let dx = (f.sx - p.sx) * f.z, dy = (f.sy - p.sy) * f.z, d = hypot(dx, dy), dz = abs(log(f.z / p.z))
+            if d > 3 {
+                img = img.clampedToExtent().applyingFilter("CIMotionBlur", parameters: [kCIInputRadiusKey: min(d * 0.15, 10), kCIInputAngleKey: atan2(dy, dx)]).cropped(to: lay.canvas)
+            }
+            if dz > 0.003 {
+                img = img.clampedToExtent().applyingFilter("CIZoomBlur", parameters: [
+                    kCIInputCenterKey: CIVector(x: lay.cw / 2, y: lay.ch / 2), kCIInputAmountKey: min(dz * lay.cw * 0.04, 6),
+                ]).cropped(to: lay.canvas)
+            }
+        }
+        return img
+    }
+
+    // 画布上一点（左下为原点）→ 原画面里的比例（左上为原点）：在预览上点一下设固定位置用
+    func sourcePoint(canvas p: CGPoint, frame f: FramePlan) -> CGPoint {
+        let sx = (p.x - (lay.cw / 2 - f.sx * f.z)) / f.z, sy = (p.y - (lay.ch / 2 - f.sy * f.z)) / f.z
+        let rx = (sx - lay.card.minX) / lay.s, ry = (sy - lay.card.minY) / lay.s
+        return CGPoint(x: min(max(rx / lay.W, 0), 1), y: min(max(1 - ry / lay.H, 0), 1))
+    }
+
+    // 矢量画的 macOS 箭头（8 倍精度），放大推近也清楚
+    private static func drawArrow() -> (img: CIImage, ppp: Double, hotX: Double, hotY: Double) {
+        let k = 8.0, pad = 4.0, w = 12.0 + pad * 2, h = 19.0 + pad * 2
+        let c = CGContext(data: nil, width: Int(w * k), height: Int(h * k), bitsPerComponent: 8, bytesPerRow: 0,
+                          space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        c.scaleBy(x: k, y: k)
+        c.translateBy(x: pad, y: h - pad); c.scaleBy(x: 1, y: -1)   // 下面按「尖在 (0,0)、y 朝下」画
+        let path = CGMutablePath()
+        // 形状照系统箭头量的（尖到尾约 15 点）
+        path.addLines(between: [CGPoint(x: 0, y: 0), CGPoint(x: 0, y: 12.8), CGPoint(x: 3.0, y: 10.0), CGPoint(x: 5.2, y: 15.2),
+                                CGPoint(x: 7.6, y: 14.2), CGPoint(x: 5.5, y: 9.3), CGPoint(x: 9.3, y: 9.3)])
+        path.closeSubpath()
+        c.setShadow(offset: CGSize(width: 0, height: -1.0 * k), blur: 2.5 * k, color: CGColor(gray: 0, alpha: 0.35))
+        c.addPath(path); c.setLineWidth(2.2); c.setLineJoin(.round)
+        c.setStrokeColor(CGColor(gray: 1, alpha: 1)); c.setFillColor(CGColor(gray: 1, alpha: 1))
+        c.drawPath(using: .fillStroke)
+        c.setShadow(offset: .zero, blur: 0, color: nil)
+        c.addPath(path); c.setFillColor(CGColor(gray: 0, alpha: 1)); c.fillPath()
+        return (CIImage(cgImage: c.makeImage()!), k, pad, pad)
+    }
+
+    // 点击波纹：白圈 + 一圈淡淡的深色描边，深浅背景上都看得见（128 像素，圆心 64、半径 52）
+    private static func drawRing() -> CIImage {
+        let c = CGContext(data: nil, width: 128, height: 128, bitsPerComponent: 8, bytesPerRow: 0,
+                          space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        let r = CGRect(x: 12, y: 12, width: 104, height: 104)
+        c.setFillColor(CGColor(gray: 1, alpha: 0.18)); c.fillEllipse(in: r)
+        c.setStrokeColor(CGColor(gray: 0, alpha: 0.25)); c.setLineWidth(10); c.strokeEllipse(in: r)
+        c.setStrokeColor(CGColor(gray: 1, alpha: 0.95)); c.setLineWidth(6); c.strokeEllipse(in: r)
+        return CIImage(cgImage: c.makeImage()!)
+    }
+}
+
+// ---- 导出成片：按工程的推近段和修剪逐帧合成，写透明背景 HEVC .mov ----
+final class StudioJob: @unchecked Sendable {
+    private let asset: AVURLAsset
+    private let videoTrack: AVAssetTrack
+    private let audioTracks: [AVAssetTrack]
+    private let out: URL
+    private let r: StudioRenderer
+    private let plan: [FramePlan]
+    private let first: Int, last: Int          // 导出第 first..<last 帧
+    private let progress: @Sendable (Double) -> Void
+
+    init(project dir: URL, out: URL, style: StudioStyle, project: StudioProject? = nil, progress: @escaping @Sendable (Double) -> Void) async throws {
+        let track = try JSONDecoder().decode(Track.self, from: Data(contentsOf: dir.appendingPathComponent("track.json")))
+        asset = AVURLAsset(url: dir.appendingPathComponent("raw.mp4"))
+        guard let vt = try await asset.loadTracks(withMediaType: .video).first else { throw Studio.failure(L("素材里没有画面", "No video in the recording")) }
+        videoTrack = vt
+        audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        let duration = try await asset.load(.duration).seconds
+        self.out = out; self.progress = progress
+        r = StudioRenderer(project: dir, track: track, style: style)
+        let p = project ?? StudioProject.load(dir, track: track, duration: duration, zoom: style.zoom)
+        plan = r.plan(p, duration: duration)
+        let fps = Double(style.fps)
+        first = min(max(0, Int((p.trimStart * fps).rounded())), plan.count - 1)
+        last = max(first + 1, min(plan.count, Int((p.trimEnd * fps).rounded())))
+    }
+
     func run() throws {
+        let st = r.st, lay = r.lay, fps = CMTimeScale(st.fps)
+        let range = CMTimeRange(start: CMTime(value: CMTimeValue(first), timescale: fps), end: CMTime(value: CMTimeValue(last), timescale: fps))
         let reader = try AVAssetReader(asset: asset)
+        reader.timeRange = range
         let vOut = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
             kCVPixelBufferMetalCompatibilityKey as String: true,
@@ -394,30 +553,29 @@ final class StudioJob: @unchecked Sendable {
         // 原画面是「有变化才有新帧」，成片固定每秒 60 帧：每帧用当时最新的那张原画面
         guard var cur = vOut.copyNextSampleBuffer() else { throw Studio.failure(L("素材里没有画面", "No video in the recording")) }
         var next = vOut.copyNextSampleBuffer()
-        let t0 = cur.presentationTimeStamp
-        writer.startSession(atSourceTime: t0)
+        writer.startSession(atSourceTime: range.start)
 
         let group = DispatchGroup()
         var failure: Error?
-        var i = 0
-        let total = plan.count
+        var i = first
+        let total = last - first
         group.enter()
         var videoDone = false
         vIn.requestMediaDataWhenReady(on: DispatchQueue(label: "studio.video")) { [self] in
             while vIn.isReadyForMoreMediaData && !videoDone {
-                if i >= total || failure != nil { videoDone = true; vIn.markAsFinished(); group.leave(); return }
-                let pts = CMTimeAdd(t0, CMTime(value: CMTimeValue(i), timescale: CMTimeScale(st.fps)))
+                if i >= last || failure != nil { videoDone = true; vIn.markAsFinished(); group.leave(); return }
+                let pts = CMTime(value: CMTimeValue(i), timescale: fps)
                 while let nx = next, nx.presentationTimeStamp <= pts { cur = nx; next = vOut.copyNextSampleBuffer() }
                 autoreleasepool {
                     guard let src = CMSampleBufferGetImageBuffer(cur), let pool = adaptor.pixelBufferPool else { failure = Studio.failure("frame"); return }
                     var pb: CVPixelBuffer?
                     CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
                     guard let pb else { failure = Studio.failure("pool"); return }
-                    ctx.render(frame(i, src), to: pb, bounds: lay.canvas, colorSpace: nil)
+                    r.ctx.render(r.frame(i, plan: plan, source: CIImage(cvPixelBuffer: src)), to: pb, bounds: lay.canvas, colorSpace: nil)
                     if !adaptor.append(pb, withPresentationTime: pts) { failure = writer.error ?? Studio.failure("append") }
                 }
                 i += 1
-                if i % 30 == 0 { progress(Double(i) / Double(total)) }
+                if (i - first) % 30 == 0 { progress(Double(i - first) / Double(total)) }
             }
         }
         if let aOut, let aIn {
@@ -434,85 +592,10 @@ final class StudioJob: @unchecked Sendable {
         if let failure { reader.cancelReading(); writer.cancelWriting(); throw failure }
         if reader.status == .failed { writer.cancelWriting(); throw reader.error ?? Studio.failure("reader") }
         let sem = DispatchSemaphore(value: 0)
+        writer.endSession(atSourceTime: CMTime(value: CMTimeValue(last), timescale: fps))
         writer.finishWriting { sem.signal() }
         sem.wait()
         guard writer.status == .completed else { throw writer.error ?? Studio.failure("finish") }
         progress(1)
-    }
-
-    // 合成一帧：背景 → 圆角画面 → 点击波纹 → 鼠标，整幅按镜头推拉，镜头动得快时加一点运动模糊
-    private func frame(_ i: Int, _ px: CVPixelBuffer) -> CIImage {
-        let f = plan[i], W = lay.W, H = lay.H
-        var src = CIImage(cvPixelBuffer: px)
-        let bh = src.extent.height   // 高度是奇数时底下补过 1 像素，切掉
-        src = src.cropped(to: CGRect(x: 0, y: bh - H, width: W, height: H)).transformed(by: CGAffineTransform(translationX: 0, y: -(bh - H)))
-        var scene = src.transformed(by: lay.toScene).applyingFilter("CIBlendWithAlphaMask", parameters: [
-            kCIInputBackgroundImageKey: background!, kCIInputMaskImageKey: mask!,
-        ])
-        let t = Double(i) / Double(st.fps), ppp = track.pixelsPerPoint
-        // 点击波纹：0.5 秒内从 6 点扩到 28 点、渐渐淡掉
-        for c in clicks where t >= c.t && t < c.t + 0.5 {
-            let u = (t - c.t) / 0.5, e = 1 - pow(1 - u, 3)
-            let r = (6 + 22 * e) * ppp * st.cursorScale / 1.5, k = r / 52
-            let img = ring.applyingFilter("CIColorMatrix", parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1 - u)])
-                .transformed(by: CGAffineTransform(translationX: -64, y: -64).concatenating(CGAffineTransform(scaleX: k, y: k))
-                    .concatenating(CGAffineTransform(translationX: c.x, y: c.y)).concatenating(lay.toScene))
-            scene = img.composited(over: scene)
-        }
-        if f.shape >= 0 {
-            let art = track.cursors.indices.contains(f.shape) && !track.cursors[f.shape].arrow ? cursorArt[f.shape] ?? arrow : arrow
-            let k = ppp * st.cursorScale * f.press / art.ppp
-            let hx = art.hotX * art.ppp, hy = art.img.extent.height - art.hotY * art.ppp
-            let img = art.img.transformed(by: CGAffineTransform(translationX: -hx, y: -hy).concatenating(CGAffineTransform(scaleX: k, y: k))
-                .concatenating(CGAffineTransform(translationX: f.mx, y: f.my)).concatenating(lay.toScene))
-            scene = img.composited(over: scene)
-        }
-        let cam = CGAffineTransform(a: f.z, b: 0, c: 0, d: f.z, tx: lay.cw / 2 - f.sx * f.z, ty: lay.ch / 2 - f.sy * f.z)
-        var img = scene.transformed(by: cam).cropped(to: lay.canvas)
-        if st.motionBlur, i > 0 {
-            let p = plan[i - 1]
-            let dx = (f.sx - p.sx) * f.z, dy = (f.sy - p.sy) * f.z, d = hypot(dx, dy), dz = abs(log(f.z / p.z))
-            if d > 3 {
-                img = img.clampedToExtent().applyingFilter("CIMotionBlur", parameters: [kCIInputRadiusKey: min(d * 0.15, 10), kCIInputAngleKey: atan2(dy, dx)]).cropped(to: lay.canvas)
-            }
-            if dz > 0.003 {
-                img = img.clampedToExtent().applyingFilter("CIZoomBlur", parameters: [
-                    kCIInputCenterKey: CIVector(x: lay.cw / 2, y: lay.ch / 2), kCIInputAmountKey: min(dz * lay.cw * 0.04, 6),
-                ]).cropped(to: lay.canvas)
-            }
-        }
-        return img
-    }
-
-    // 矢量画的 macOS 箭头（8 倍精度），放大推近也清楚
-    private static func drawArrow() -> (img: CIImage, ppp: Double, hotX: Double, hotY: Double) {
-        let k = 8.0, pad = 4.0, w = 12.0 + pad * 2, h = 19.0 + pad * 2
-        let c = CGContext(data: nil, width: Int(w * k), height: Int(h * k), bitsPerComponent: 8, bytesPerRow: 0,
-                          space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        c.scaleBy(x: k, y: k)
-        c.translateBy(x: pad, y: h - pad); c.scaleBy(x: 1, y: -1)   // 下面按「尖在 (0,0)、y 朝下」画
-        let path = CGMutablePath()
-        // 形状照系统箭头量的（尖到尾约 15 点）
-        path.addLines(between: [CGPoint(x: 0, y: 0), CGPoint(x: 0, y: 12.8), CGPoint(x: 3.0, y: 10.0), CGPoint(x: 5.2, y: 15.2),
-                                CGPoint(x: 7.6, y: 14.2), CGPoint(x: 5.5, y: 9.3), CGPoint(x: 9.3, y: 9.3)])
-        path.closeSubpath()
-        c.setShadow(offset: CGSize(width: 0, height: -1.0 * k), blur: 2.5 * k, color: CGColor(gray: 0, alpha: 0.35))
-        c.addPath(path); c.setLineWidth(2.2); c.setLineJoin(.round)
-        c.setStrokeColor(CGColor(gray: 1, alpha: 1)); c.setFillColor(CGColor(gray: 1, alpha: 1))
-        c.drawPath(using: .fillStroke)
-        c.setShadow(offset: .zero, blur: 0, color: nil)
-        c.addPath(path); c.setFillColor(CGColor(gray: 0, alpha: 1)); c.fillPath()
-        return (CIImage(cgImage: c.makeImage()!), k, pad, pad)
-    }
-
-    // 点击波纹：白圈 + 一圈淡淡的深色描边，深浅背景上都看得见（128 像素，圆心 64、半径 52）
-    private static func drawRing() -> CIImage {
-        let c = CGContext(data: nil, width: 128, height: 128, bitsPerComponent: 8, bytesPerRow: 0,
-                          space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        let r = CGRect(x: 12, y: 12, width: 104, height: 104)
-        c.setFillColor(CGColor(gray: 1, alpha: 0.18)); c.fillEllipse(in: r)
-        c.setStrokeColor(CGColor(gray: 0, alpha: 0.25)); c.setLineWidth(10); c.strokeEllipse(in: r)
-        c.setStrokeColor(CGColor(gray: 1, alpha: 0.95)); c.setLineWidth(6); c.strokeEllipse(in: r)
-        return CIImage(cgImage: c.makeImage()!)
     }
 }

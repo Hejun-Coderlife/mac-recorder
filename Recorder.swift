@@ -323,8 +323,15 @@ final class Recorder: NSObject, ObservableObject {
         NSSound(named: "Pop")?.play()
         guard let w else { return }
         do { try await w.finish() } catch { finished(error); return }
-        // Studio 模式：存轨迹，按轨迹生成成片（声音在生成时混成一条，不用再合成）
+        // Studio 模式：存轨迹，打开剪辑窗口（自动生成推近段，调好再导出；声音在导出时混成一条）
         if let tr, let dir, let out = lastFile {
+            if ProcessInfo.processInfo.environment["AUTOTEST"] == nil {
+                do { try tr.save(to: dir, start: w.startSeconds) }
+                catch { say(L("保存 Studio 素材失败：", "Couldn't save Studio footage: ") + error.localizedDescription, error: true); return }
+                say(L("已打开 Studio 剪辑窗口，调好后点「导出」", "Opened the Studio editor — adjust, then click Export"))
+                await StudioEditor.open(dir)
+                return
+            }
             say(L("正在生成 Studio 版…", "Rendering Studio version…"))
             do {
                 try tr.save(to: dir, start: w.startSeconds)
@@ -711,6 +718,7 @@ struct ContentView: View {
                     .font(.callout).foregroundStyle(rec.isError ? .red : .secondary)
                     .lineLimit(2)
                 Spacer()
+                Button(L("打开 Studio 素材…", "Open Studio Footage…")) { openStudioFootage() }
                 Button(L("打开文件夹", "Open Folder")) { NSWorkspace.shared.open(Recorder.folder) }
             }
             if !rec.recording && !rec.busy { UpdateBar(updater: updater) }
@@ -719,6 +727,21 @@ struct ContentView: View {
         .frame(minWidth: 560, minHeight: 440)
         .task { await rec.refresh() }
     }
+}
+
+// 选一份以前的 Studio 素材，重新打开剪辑窗口
+@MainActor func openStudioFootage() {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
+    panel.directoryURL = Recorder.studioFolder
+    panel.message = L("选一个 Studio 素材文件夹", "Choose a Studio footage folder")
+    guard panel.runModal() == .OK, let dir = panel.url else { return }
+    guard FileManager.default.fileExists(atPath: dir.appendingPathComponent("track.json").path) else {
+        let a = NSAlert(); a.messageText = L("这个文件夹不是 Studio 素材", "This folder isn't Studio footage")
+        a.informativeText = L("Studio 素材在「影片 / 录屏 / Studio 素材」里，每次录制一个文件夹。", "Studio footage lives in Movies / 录屏 / Studio 素材, one folder per recording.")
+        a.runModal(); return
+    }
+    Task { await StudioEditor.open(dir) }
 }
 
 // 窗口底部一行：后台下好了新版 / 刚更新过 / 手动检查的结果
@@ -752,7 +775,7 @@ struct RecorderApp: App {
             ContentView(rec: rec)
                 .onAppear {
                     HotKey.action = { [weak rec] in rec?.toggle() }
-                    if Studio.selfTest() || Updater.selfTest() { return }
+                    if Studio.selfTest() || Updater.selfTest() || StudioTests.planTest() || StudioTests.editorShot() { return }
                     if ProcessInfo.processInfo.environment["AUTOTEST"] == nil {
                         Updater.shared.isBusy = { [weak rec] in rec.map { $0.recording || $0.busy } ?? false }
                         Updater.shared.start()

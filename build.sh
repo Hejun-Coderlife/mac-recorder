@@ -7,7 +7,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -parse-as-library -swift-version 5 -target arm64-apple-macos15.0 \
   -framework ScreenCaptureKit -framework AVFoundation -framework Carbon -framework CoreImage -framework VideoToolbox -framework Metal \
-  Recorder.swift Studio.swift Updater.swift -o "$APP/Contents/MacOS/Recorder"
+  Recorder.swift Studio.swift StudioEditor.swift Updater.swift -o "$APP/Contents/MacOS/Recorder"
 cp AppIcon.icns "$APP/Contents/Resources/"   # 图标原稿是 tools/icon.svg（1024 画布）
 # App 名字和系统菜单（退出、窗口…）跟随系统语言：中文叫「录屏」，其他语言叫 Screen Recorder
 mkdir -p "$APP/Contents/Resources/zh-Hans.lproj" "$APP/Contents/Resources/en.lproj"
