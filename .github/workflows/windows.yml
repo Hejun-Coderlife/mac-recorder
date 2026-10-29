@@ -178,7 +178,8 @@ jobs:
           if ($running.Count -lt 1) { throw "app did not reopen after applying the staged update" }
           # 「已更新到」只提示一次
           $settings = Join-Path $env:APPDATA "录屏\settings.txt"
-          Add-Content $settings "updatedTo=1.4"
+          $lines = @(Get-Content $settings -ErrorAction SilentlyContinue | Where-Object { $_ -notlike "updatedTo=*" }) + "updatedTo=1.4"
+          Set-Content $settings $lines
           $env:UPDATESTATE_TEST = "1"
           Start-Process -FilePath "$dir\录屏.exe" -Wait
           $first = Get-Content "$env:TEMP\update_state.txt" -Raw
