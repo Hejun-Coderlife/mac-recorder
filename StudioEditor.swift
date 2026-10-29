@@ -54,6 +54,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     @Published var timelineScale = 1.0         // 时间轴横向放大（1 = 整段刚好铺满）
     private var undoStack: [StudioProject] = [], redoStack: [StudioProject] = []
     private var dragBase: StudioProject?
+    private var scrubber = Scrubber()          // 拖动时的 seek 排队：同时只有一个在路上，只留最新目标；拖动中不让播放器回调改播放头
 
     var canUndo: Bool { !undoStack.isEmpty }
     var canRedo: Bool { !redoStack.isEmpty }
@@ -103,7 +104,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 30), queue: .main) { [weak self] t in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                self.time = t.seconds
+                if self.scrubber.observed(t.seconds) { self.time = t.seconds }
                 let rate = self.player.rate
                 if self.playing && rate == 0 { self.playing = false }
             }
@@ -148,6 +149,8 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
                 }
                 selected = project.segments.first?.id
                 await renderStill(at: project.segments.first.map { ($0.start + $0.end) / 2 } ?? 1)
+                // EDITOR_AT_TRIM=1：把结尾修剪到 80% 处、播放头压在修剪点上，看两者重叠时分不分得清
+                if ProcessInfo.processInfo.environment["EDITOR_AT_TRIM"] != nil { project.trimEnd = duration * 0.8; time = project.trimEnd }
                 try? await Task.sleep(for: .seconds(0.6))
                 if let v = w.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) {
                     v.cacheDisplay(in: v.bounds, to: rep)
@@ -242,8 +245,20 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     func seek(_ t: Double) {
         let t = min(max(t, 0), duration)
         time = t
-        player.seek(to: CMTime(seconds: t, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        if let go = scrubber.request(t) { startSeek(go) }
     }
+    // 上一个 seek 做完才发下一个（中间的目标丢掉，只追最新的），不然请求堆积，画面和播放头一会儿跳回旧位置
+    private func startSeek(_ t: Double) {
+        player.seek(to: CMTime(seconds: t, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if let next = self.scrubber.seekDone() { self.startSeek(next) }
+            }
+        }
+    }
+    // 拖播放头 / 修剪把手 / 推近段期间：播放器的时间回调不许改播放头
+    func scrubBegin() { scrubber.begin(); if playing { player.pause(); playing = false } }
+    func scrubEnd() { scrubber.end() }
     func togglePlay() {
         if playing { player.pause(); playing = false; return }
         let now = player.currentTime().seconds   // 播到头时 time 可能没跟上，按播放器实际位置判断
@@ -265,7 +280,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         project = p
     }
     // 拖动：开始时记下原样，拖的过程中实时改，松手才算一步撤销
-    func dragBegin() { if dragBase == nil { dragBase = project } }
+    func dragBegin() { if dragBase == nil { dragBase = project; scrubBegin() } }
     func dragUpdate(_ change: (inout StudioProject) -> Void) {
         guard let base = dragBase else { return }
         var p = base
@@ -276,6 +291,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     func dragEnd() {
         if let base = dragBase, base != project { undoStack.append(base); redoStack.removeAll() }
         dragBase = nil
+        scrubEnd()
     }
     // 按自动规则重新排推近段（能撤销）；排完算「没手动改过」
     func regenerate() {
@@ -588,7 +604,9 @@ struct TimelineStrip: View {
                         .exclusively(before: SpatialTapGesture().onEnded { ed.selected = nil; ed.picking = false; ed.seek(tAt($0.location.x)) }))
                 ruler(w: w, d: d, x: x)
                     .contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 0).onChanged { ed.player.pause(); ed.playing = false; ed.seek(tAt($0.location.x)) })
+                    .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.space))
+                        .onChanged { ed.scrubBegin(); ed.seek(tAt($0.location.x)) }
+                        .onEnded { _ in ed.scrubEnd() })
                 // 点击、打字的时刻
                 ForEach(Array(ed.events.enumerated()), id: \.offset) { _, t in
                     Circle().fill(Color.secondary.opacity(0.55)).frame(width: 4, height: 4).position(x: x(t), y: rulerH + 9)
@@ -601,15 +619,16 @@ struct TimelineStrip: View {
                 Rectangle().fill(Color.black.opacity(0.28)).frame(width: max(0, x(ed.project.trimStart)), height: g.size.height).allowsHitTesting(false)
                 Rectangle().fill(Color.black.opacity(0.28)).frame(width: max(0, w - x(ed.project.trimEnd)), height: g.size.height)
                     .offset(x: x(ed.project.trimEnd)).allowsHitTesting(false)
-                trimHandle(isStart: true, w: w, d: d, h: g.size.height).offset(x: x(ed.project.trimStart) - 5)
-                trimHandle(isStart: false, w: w, d: d, h: g.size.height).offset(x: x(ed.project.trimEnd) - 5)
-                // 播放头
-                Rectangle().fill(Color.red).frame(width: 2, height: g.size.height).offset(x: x(ed.time) - 1).allowsHitTesting(false)
-                Path { p in let px = x(ed.time); p.move(to: CGPoint(x: px - 6, y: 0)); p.addLine(to: CGPoint(x: px + 6, y: 0)); p.addLine(to: CGPoint(x: px, y: 8)); p.closeSubpath() }
-                    .fill(Color.red).allowsHitTesting(false)
+                trimHandle(isStart: true, w: w, d: d, h: g.size.height).offset(x: x(ed.project.trimStart) - (Self.handleW - Self.bar))
+                trimHandle(isStart: false, w: w, d: d, h: g.size.height).offset(x: x(ed.project.trimEnd) - Self.bar)
+                // 播放头：细线 + 顶上小把手，压在最上面；深色模式白、浅色模式深灰，带一圈淡阴影，和黄色括号重叠也分得清
+                Playhead(height: g.size.height).offset(x: x(ed.time) - Playhead.knobW / 2).allowsHitTesting(false)
             }
+            .coordinateSpace(name: Self.space)
         }
     }
+    static let space = "timeline"
+    static let handleW = 16.0, bar = 4.0   // 修剪把手：可点的宽度、黄色竖杠的粗细
 
     private func ruler(w: Double, d: Double, x: @escaping (Double) -> Double) -> some View {
         let step: Double = d > 120 ? 10 : d > 40 ? 5 : d > 12 ? 2 : 1
@@ -626,22 +645,88 @@ struct TimelineStrip: View {
         }.frame(width: w, height: rulerH, alignment: .topLeading)
     }
 
+    // 修剪把手画成括号「[ 」「 ]」：竖杠贴着修剪点，上下两个小横杠朝成片那一侧
     private func trimHandle(isStart: Bool, w: Double, d: Double, h: Double) -> some View {
-        RoundedRectangle(cornerRadius: 3).fill(Color.yellow).frame(width: 10, height: h)
-            .overlay(Capsule().fill(Color.black.opacity(0.45)).frame(width: 2, height: 18))
+        TrimBracket(isStart: isStart, height: h).frame(width: Self.handleW, height: h)
             .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .local)
+            .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
+            .onTapGesture { }   // 单击把手什么都不做（别漏到底下的时间轴，把播放头叫过来）
+            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named(Self.space))
                 .onChanged { v in
                     ed.dragBegin()
-                    let dt = v.translation.width / w * d
                     ed.dragUpdate { p in
-                        if isStart { p.trimStart = min(max(0, p.trimStart + dt), p.trimEnd - 0.5) }
-                        else { p.trimEnd = max(min(ed.duration, p.trimEnd + dt), p.trimStart + 0.5) }
+                        // p 是按下那一刻的工程：起点值 + 拖了多远，不会越拖越歪
+                        let t = TimelineMath.trim(start: isStart, base: (p.trimStart, p.trimEnd), dx: v.translation.width, width: w, duration: d)
+                        if isStart { p.trimStart = t } else { p.trimEnd = t }
                     }
                     ed.seek(isStart ? ed.project.trimStart : ed.project.trimEnd)
                 }
                 .onEnded { _ in ed.dragEnd() })
-            .help(isStart ? L("拖动修剪开头", "Drag to trim the start") : L("拖动修剪结尾", "Drag to trim the end"))
+            .help(isStart ? L("拖动剪掉开头", "Drag to cut the start") : L("拖动剪掉结尾", "Drag to cut the end"))
+    }
+}
+
+struct TrimBracket: View {
+    let isStart: Bool, height: Double
+    var body: some View {
+        let bw = TimelineStrip.bar, w = TimelineStrip.handleW, arm = 9.0, armH = 3.0
+        // 竖杠贴着修剪点（开头的在右边缘、结尾的在左边缘），上下横杠朝成片那一侧伸出去：「[」「]」
+        let barX = isStart ? w - bw : 0
+        let armX = isStart ? w - bw : bw - arm
+        ZStack(alignment: .topLeading) {
+            Color.clear
+            RoundedRectangle(cornerRadius: 1.5).fill(Color.yellow).frame(width: bw, height: height).offset(x: barX)
+            RoundedRectangle(cornerRadius: 1.5).fill(Color.yellow).frame(width: arm, height: armH).offset(x: isStart ? armX : armX, y: 0)
+            RoundedRectangle(cornerRadius: 1.5).fill(Color.yellow).frame(width: arm, height: armH).offset(x: armX, y: height - armH)
+        }
+        .frame(width: w, height: height, alignment: .topLeading)
+    }
+}
+
+struct Playhead: View {
+    let height: Double
+    static let knobW = 11.0
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        let c = scheme == .dark ? Color.white : Color(white: 0.2)
+        VStack(spacing: 0) {
+            UnevenRoundedRectangle(topLeadingRadius: 3, bottomLeadingRadius: 5.5, bottomTrailingRadius: 5.5, topTrailingRadius: 3)
+                .fill(c).frame(width: Self.knobW, height: 13)
+            Rectangle().fill(c).frame(width: 1.5, height: max(0, height - 13))
+        }
+        .shadow(color: .black.opacity(scheme == .dark ? 0.7 : 0.35), radius: 1.2)
+        .frame(width: Self.knobW, height: height, alignment: .top)
+    }
+}
+
+// 拖动期间的 seek 排队（纯逻辑，好单独测）：同时只有一个 seek 在路上，新的目标只记最新一个；
+// 拖动中或 seek 还没做完时，播放器的时间回调（还是旧位置）一律不采用，播放头就不会被拉回去抖
+struct Scrubber {
+    private(set) var active = false, inFlight = false
+    private(set) var pending: Double?
+    mutating func begin() { active = true }
+    mutating func end() { active = false }
+    // 返回现在就该发出的 seek；nil = 有一个在路上，已记下等它做完
+    mutating func request(_ t: Double) -> Double? {
+        if inFlight { pending = t; return nil }
+        inFlight = true; return t
+    }
+    // 一个 seek 做完：有更新的目标就接着发它
+    mutating func seekDone() -> Double? {
+        if let p = pending { pending = nil; return p }
+        inFlight = false; return nil
+    }
+    // 播放器报来的时间能不能拿来更新播放头
+    func observed(_ t: Double) -> Bool { !active && !inFlight }
+}
+
+// 时间轴坐标换算（纯函数）
+enum TimelineMath {
+    static func time(atX px: Double, width w: Double, duration d: Double) -> Double { min(max(px / w * d, 0), d) }
+    // 拖修剪把手：起点值 + 拖动距离换成的时间，夹在合法范围里
+    static func trim(start isStart: Bool, base: (s: Double, e: Double), dx: Double, width w: Double, duration d: Double) -> Double {
+        let dt = dx / w * d
+        return isStart ? min(max(0, base.s + dt), base.e - 0.5) : max(min(d, base.e + dt), base.s + 0.5)
     }
 }
 
@@ -670,7 +755,7 @@ struct SegmentBlock: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { ed.selected = seg.id; ed.picking = false }
-        .gesture(DragGesture(minimumDistance: 2)
+        .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .named(TimelineStrip.space))
             .onChanged { v in
                 ed.selected = seg.id
                 ed.dragBegin()
@@ -690,7 +775,8 @@ struct SegmentBlock: View {
             .overlay(Capsule().fill(Color.white.opacity(0.85)).frame(width: 3, height: 16))
             .contentShape(Rectangle())
             .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
-            .gesture(DragGesture(minimumDistance: 1)
+            .onTapGesture { ed.selected = seg.id; ed.picking = false }
+            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named(TimelineStrip.space))
                 .onChanged { v in
                     ed.selected = seg.id
                     ed.dragBegin()
@@ -911,6 +997,49 @@ struct WallpaperThumb: View {
 
 // ---- 自测 ----
 enum StudioTests {
+    // SCRUBTEST=1 → 拖动逻辑（不碰界面）：修剪把手按「起点值 + 拖动距离」算、拖动中播放头不被播放器的旧时间拉回、seek 不堆积只追最新
+    @MainActor static func scrubTest() -> Bool {
+        guard ProcessInfo.processInfo.environment["SCRUBTEST"] != nil else { return false }
+        var ok = true
+        func check(_ n: String, _ c: Bool, _ info: String = "") { print(c ? "PASS" : "FAIL", n, info); ok = ok && c }
+        let w = 1200.0, d = 25.0
+        // 1) 往左拖结尾把手：一串越来越大的拖动距离 → 修剪点单调往前，不回跳；拖过头被夹住
+        let drags = stride(from: 0.0, through: -900, by: -7.5).map { $0 }
+        let ends = drags.map { TimelineMath.trim(start: false, base: (0, 25), dx: $0, width: w, duration: d) }
+        check("trimEnd monotonic", zip(ends, ends.dropFirst()).allSatisfy { $1 <= $0 }, "\(ends.first!) → \(ends.last!)")
+        check("trimEnd clamped", ends.last! >= 0.5 && abs(ends.last! - (25 - 900 / w * d)) < 1e-9)
+        let starts = stride(from: 0.0, through: 2000, by: 13).map { TimelineMath.trim(start: true, base: (0, 25), dx: $0, width: w, duration: d) }
+        check("trimStart monotonic + clamp", zip(starts, starts.dropFirst()).allSatisfy { $1 >= $0 } && abs(starts.last! - 24.5) < 1e-9)
+        // 来回拖：同一个拖动距离永远得到同一个值（跟拖动过程无关）
+        let a = TimelineMath.trim(start: false, base: (0, 25), dx: -300, width: w, duration: d)
+        let b = TimelineMath.trim(start: false, base: (0, 25), dx: -300, width: w, duration: d)
+        check("same dx same value", a == b && abs(a - 18.75) < 1e-9)
+        // 2) seek 排队 + 播放头：模拟拖动时界面要的位置 + 播放器慢吞吞地报旧时间
+        var sc = Scrubber(); var shown = 16.0; var player = 16.0; var sent: [Double] = []; var jumpsBack = 0
+        sc.begin()
+        var inFlight: Double?
+        for (k, dx) in drags.prefix(40).enumerated() {
+            let t = TimelineMath.trim(start: false, base: (0, 16), dx: dx, width: w, duration: d)
+            let prev = shown; shown = t
+            if let go = sc.request(t) { sent.append(go); inFlight = go }
+            if shown > prev + 1e-9 { jumpsBack += 1 }
+            // 播放器每隔几步才做完一个 seek，期间不停报旧位置
+            if sc.observed(player) { shown = player }
+            if k % 4 == 3, let f = inFlight { player = f; inFlight = nil; if let next = sc.seekDone() { sent.append(next); inFlight = next } }
+        }
+        check("playhead never pulled back while dragging", jumpsBack == 0)
+        check("stale player time ignored while dragging", !sc.observed(10))
+        check("seeks coalesced", sent.count < 40 / 2, "\(sent.count) seeks for 40 drag steps")
+        // 收尾：最后一个目标一定会发出去
+        let last = TimelineMath.trim(start: false, base: (0, 16), dx: drags[39], width: w, duration: d)
+        while let f = inFlight { player = f; inFlight = nil; if let n = sc.seekDone() { sent.append(n); inFlight = n } }
+        check("final seek lands on last target", abs(player - last) < 1e-9, "\(player) vs \(last)")
+        sc.end()
+        check("player time accepted after drag", sc.observed(player))
+        print(ok ? "SCRUBTEST OK" : "SCRUBTEST FAIL")
+        exit(ok ? 0 : 1)
+    }
+
     // PLANTEST=素材夹 → 给一份改过的工程，看镜头计划对不对（段内放大倍数、段外拉远、固定位置、修剪帧数），打印 PASS/FAIL 后退出
     @MainActor static func planTest() -> Bool {
         guard let path = ProcessInfo.processInfo.environment["PLANTEST"] else { return false }
