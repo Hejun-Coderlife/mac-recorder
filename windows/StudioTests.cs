@@ -138,6 +138,10 @@ namespace ScreenRecorder
             r.Check("look color is {r,g,b}", ((Dictionary<string, object>)lo["color"]).Keys.OrderBy(k => k).SequenceEqual(new[] { "b", "g", "r" }));
             r.Check("look keys", new[] { "aspect", "background", "color", "gradient0", "gradient1", "gradientAngle", "wallpaper", "imagePath", "padding", "cornerRadius", "shadow", "shadowBlur", "cursorScale", "smoothing", "hideIdleCursor", "hideAfter", "clickSound", "clickStyle", "ripple", "blur" }.All(lo.ContainsKey));
             r.Check("windows roundtrip", StudioProject.FromJson(json).Same(p));
+            // 剪辑窗口每次改动都会比较推近段有没有变
+            var q = p.Clone(); r.Check("same segments", q.SameSegments(p));
+            q.Segments[0].End += 0.5; r.Check("changed segments detected", !q.SameSegments(p));
+            q = p.Clone(); q.Look.Padding = 0.1; r.Check("look-only change keeps segments", q.SameSegments(p) && !q.Same(p));
             r.Check("path with quotes/backslashes survives", StudioProject.FromJson(json).Look.ImagePath == p.Look.ImagePath);
             r.Note("windows project.json:\n" + json);
             return r.Done("PROJTEST");

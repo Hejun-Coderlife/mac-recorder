@@ -163,7 +163,7 @@ namespace ScreenRecorder
         public StudioProject Clone() => FromJson(ToJson());
         public bool Same(StudioProject o) => o != null && ToJson() == o.ToJson();
         public bool SameSegments(StudioProject o) => SegJson() == o.SegJson();
-        string SegJson() { var w = new JsonW(); w.BeginArray("s"); foreach (var s in Segments) WriteSeg(w, s); w.EndArray(); return w.ToString(); }
+        string SegJson() { var w = new JsonW(); w.Begin(); w.BeginArray("s"); foreach (var s in Segments) WriteSeg(w, s); w.EndArray(); w.End(); return w.ToString(); }
 
         public static string PathIn(string dir) => System.IO.Path.Combine(dir, "project.json");
 
