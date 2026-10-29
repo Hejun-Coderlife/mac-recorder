@@ -30,7 +30,11 @@ jobs:
             Copy-Item "C:\Windows\System32\$d" pkg/
           }
           # Studio 效果读写视频用的 ffmpeg（BtbN 的 Windows 64 位 GPL 版，带 libx264）
-          Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-gpl-7.1.zip" -OutFile ff.zip
+          # 取最新的正式分支版（文件名形如 ffmpeg-n8.1-latest-win64-gpl-8.1.zip，版本号会变，所以按规则挑）
+          $rel = Invoke-RestMethod "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/latest" -Headers @{ Authorization = "Bearer ${{ github.token }}" }
+          $asset = $rel.assets | Where-Object { $_.name -match '^ffmpeg-n[\d.]+-latest-win64-gpl-[\d.]+\.zip$' } | Sort-Object { [version]($_.name -replace '^ffmpeg-n([\d.]+)-.*$', '$1') } | Select-Object -Last 1
+          Write-Host "ffmpeg: $($asset.name)"
+          Invoke-WebRequest $asset.browser_download_url -OutFile ff.zip
           Expand-Archive ff.zip -DestinationPath ff
           $ffdir = Get-ChildItem ff -Directory | Select-Object -First 1
           Copy-Item "$($ffdir.FullName)/bin/ffmpeg.exe" pkg/
