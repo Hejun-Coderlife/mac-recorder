@@ -24,6 +24,10 @@ final class PlanBox: @unchecked Sendable {
     private var cam: CameraLayer?
     var camera: CameraLayer? { lock.lock(); defer { lock.unlock() }; return cam }
     func setCamera(_ c: CameraLayer?) { lock.lock(); cam = c; lock.unlock() }
+    // 遮挡、标注（素材时间查）
+    private var ov: OverlayLayer?
+    var overlay: OverlayLayer? { lock.lock(); defer { lock.unlock() }; return ov }
+    func setOverlay(_ o: OverlayLayer?) { lock.lock(); ov = o; lock.unlock() }
 }
 
 @MainActor
@@ -87,6 +91,8 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     @Published var captionJob: CaptionJob?     // 正在识别：说明 + 进度（nil = 还不知道多少）
     @Published var captionError: String?
     @Published var editingCaption: UUID?       // 双击字幕：弹出改字
+    @Published var drawing: OverlayTool?       // 正在等用户在预览上拖出遮挡 / 标注
+    @Published var editingNote: UUID?          // 双击文字标注：弹出改字
     private var captionTask: Task<Void, Never>?
     // 降噪：改了强度先在后台处理声音（有缓存很快），好了换预览
     @Published var denoiseJob: Double?
@@ -150,6 +156,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         box.set(box.renderer.plan(project, duration: duration), renderer: box.renderer)
         box.setCaptions(captionLayer(box.renderer))
         box.setCamera(cameraLayer(box.renderer))
+        box.setOverlay(OverlayLayer(project))
         let item = AVPlayerItem(asset: asset)
         item.videoComposition = makeComposition()
         item.audioMix = PreviewAudio.mix(tracks: aTracks, gains: gains)
@@ -229,6 +236,20 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
                     selected = project.voiceovers[0].id
                     loadPeaks("voice/demo.m4a")
                 }
+                // EDITOR_OVERLAYDEMO=blur|mosaic|arrow|text：在截图那一刻放一块遮挡、一个框、一个箭头、一段文字，选中指定的那个
+                if let which = ProcessInfo.processInfo.environment["EDITOR_OVERLAYDEMO"] {
+                    let t = project.segments.first.map { ($0.start + $0.end) / 2 } ?? 1, d = duration
+                    var r = Redaction(start: max(0, t - 2), end: min(d, t + 2), x: 0.08, y: 0.22, w: 0.30, h: 0.18, style: which == "mosaic" ? .mosaic : .blur)
+                    r.strength = 0.7
+                    project.redactions = [r, Redaction(start: d * 0.7, end: d * 0.85, x: 0.5, y: 0.5, w: 0.2, h: 0.1, style: .solid)]
+                    project.annotations = [
+                        Annotation(start: max(0, t - 1.5), end: min(d, t + 2), kind: .rect, x: 0.55, y: 0.18, w: 0.30, h: 0.22),
+                        Annotation(start: max(0, t - 1), end: min(d, t + 2), kind: .arrow, x: 0.40, y: 0.70, w: 0.14, h: -0.18, color: RGB(0.04, 0.52, 1)),
+                        Annotation(start: max(0, t - 1), end: min(d, t + 1.5), kind: .text, x: 0.58, y: 0.62, w: 0, h: 0, text: L("点这里新建任务", "Click here"), fontSize: 24),
+                        Annotation(start: d * 0.6, end: d * 0.7, kind: .highlight, x: 0.2, y: 0.2, w: 0.3, h: 0.08, color: RGB(1.0, 0.84, 0.04)),
+                    ]
+                    selected = which == "arrow" ? project.annotations[1].id : which == "text" ? project.annotations[2].id : project.redactions[0].id
+                }
                 // EDITOR_VOICEREC=1：假装正在录讲解（不开麦克风），看录音中的按钮、提示条和实时长出的那块
                 if ProcessInfo.processInfo.environment["EDITOR_VOICEREC"] != nil {
                     voiceRec = VoiceRec(start: duration * 0.35, file: "voice/x.m4a", offset: 0.05, elapsed: 3.4, level: 0.62)
@@ -283,7 +304,8 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         case 124 where !cmd: step(1); return true
         case 51, 117: deleteSelected(); return true
         case 6 where cmd: shift ? redo() : undo(); return true
-        case 53: if picking { picking = false; return true }; return false
+        case 2 where cmd: duplicateOverlay(); return true
+        case 53: if picking { picking = false; return true }; if drawing != nil { drawing = nil; return true }; return false
         default: return false
         }
     }
@@ -355,7 +377,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
             guard !plan.isEmpty else { req.finish(with: req.sourceImage, context: nil); return }
             let i = min(max(Int((req.compositionTime.seconds * fps).rounded()), 0), plan.count - 1)
             let kk = min(1, 1600 / max(r.lay.cw, r.lay.ch))   // 样式刚改、合成还没换时按新画布缩放
-            var img = r.frame(i, plan: plan, source: req.sourceImage)
+            var img = r.frame(i, plan: plan, source: req.sourceImage, overlay: box.overlay, srcTime: req.compositionTime.seconds)
             if let cam = box.camera { img = cam.compose(img, srcTime: req.compositionTime.seconds) }
             if let c = box.captions?.image(atSource: req.compositionTime.seconds) { img = c.composited(over: img) }
             img = img.transformed(by: CGAffineTransform(scaleX: kk, y: kk))
@@ -380,6 +402,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
                 self.box.set(r.plan(self.project, duration: self.duration), renderer: r)
                 self.box.setCaptions(self.captionLayer(r))
                 self.box.setCamera(self.cameraLayer(r))
+                self.box.setOverlay(OverlayLayer(self.project))
                 self.player.currentItem?.videoComposition = self.makeComposition()
                 self.refreshDenoise()
                 self.updateGains()
@@ -397,7 +420,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         guard let (cg, _) = try? await g.image(at: CMTime(seconds: t, preferredTimescale: 600)) else { return }
         let (r, plan) = box.both, i = min(max(Int((t * fps).rounded()), 0), plan.count - 1)
         let lay = r.lay
-        var fr = r.frame(i, plan: plan, source: CIImage(cgImage: cg))
+        var fr = r.frame(i, plan: plan, source: CIImage(cgImage: cg), overlay: box.overlay, srcTime: t)
         if let cam = box.camera { fr = cam.compose(fr, srcTime: t) }
         if let c = box.captions?.image(atSource: t) { fr = c.composited(over: fr) }
         let img = fr.composited(over: CIImage(color: CIColor(red: 0.86, green: 0.86, blue: 0.88)).cropped(to: lay.canvas))
@@ -661,6 +684,8 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         selected = seg.id
     }
     func deleteSelected() {
+        if let i = redactionIndex(selected) { edit { $0.redactions.remove(at: i) }; selected = nil; return }
+        if let i = annotationIndex(selected) { edit { $0.annotations.remove(at: i) }; selected = nil; return }
         if let i = captionIndex(selected) { edit { $0.captions.remove(at: i) }; selected = nil; return }
         if let i = cutIndex(selected) { edit { $0.cuts.remove(at: i) }; selected = nil; return }
         if let i = layoutIndex(selected) { edit { $0.layouts.remove(at: i) }; selected = nil; return }
@@ -844,6 +869,13 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         Binding(get: { self.project.captionStyle[keyPath: kp] }, set: { v in self.dragBegin(); self.dragUpdate { $0.captionStyle[keyPath: kp] = v } })
     }
 
+    // 预览上画遮挡 / 标注用：播放头这一刻的镜头，原画面比例 ↔ 画布坐标
+    func overlayMapping() -> OverlayMapping {
+        let (r, plan) = box.both
+        let f = plan.isEmpty ? FramePlan() : plan[min(max(Int((time * fps).rounded()), 0), plan.count - 1)]
+        return OverlayMapping(lay: r.lay, f: plan.isEmpty ? nil : f, ppp: track.pixelsPerPoint)
+    }
+
     // 在预览上点一下：设成选中那段的固定位置。p = 预览画面里的比例（左上为原点）
     func pick(_ p: CGPoint) {
         guard picking, let i = index(selected) else { return }
@@ -955,14 +987,16 @@ struct EditorView: View {
                     controlBar.padding(.horizontal, 14).padding(.vertical, 8)
                     Divider()
                     VStack(alignment: .leading, spacing: 10) {
-                        if ed.captionIndex(ed.selected) != nil { captionInspector.frame(height: 30) }   // 选中字幕
+                        if ed.redactionIndex(ed.selected) != nil { RedactionInspector(ed: ed).frame(height: 30) }   // 选中遮挡
+                        else if ed.annotationIndex(ed.selected) != nil { AnnotationInspector(ed: ed).frame(height: 30) }   // 选中标注
+                        else if ed.captionIndex(ed.selected) != nil { captionInspector.frame(height: 30) }   // 选中字幕
                         else if ed.cutIndex(ed.selected) != nil { cutInspector.frame(height: 30) }   // 选中剪辑段
                         else if ed.layoutIndex(ed.selected) != nil { layoutInspector.frame(height: 30) }   // 选中布局段
                         else if ed.voiceIndex(ed.selected) != nil { voiceInspector.frame(height: 30) }   // 选中讲解
                         else if ed.selected != nil { inspector.frame(height: 30) }   // 选中推近段才出现
-                        timeline.frame(height: ed.hasCamera ? 204 : 176)
-                            .help(L("从上到下：剪掉 / 快放、推近、讲解、字幕；点选来调整，空白处双击新加推近（字幕那条双击新加字幕），两端黄条修剪",
-                                   "Top to bottom: cut / speed-up, zooms, voiceovers, captions. Click to edit, double-click empty space to add a zoom (a caption on the caption lane), drag the yellow bars to trim"))
+                        timeline.frame(height: ed.hasCamera ? 252 : 226)
+                            .help(L("从上到下：剪掉 / 快放、推近、讲解、字幕、遮挡、标注；点选来调整，空白处双击新加推近（字幕那条双击新加字幕），两端黄条修剪",
+                                   "Top to bottom: cut / speed-up, zooms, voiceovers, captions, redactions, annotations. Click to edit, double-click empty space to add a zoom (a caption on the caption lane), drag the yellow bars to trim"))
                     }
                     .padding(14)
                 }
@@ -978,8 +1012,15 @@ struct EditorView: View {
             Button(L("取消", "Cancel"), role: .cancel) { ed.editingCaption = nil }
         } message: { Text(L("一次只显示一行，太长会自动缩小字", "Shown on one line; long text is scaled down to fit")) }
         .onChange(of: ed.editingCaption) { _, id in captionText = id.flatMap { i in ed.project.captions.first { $0.id == i }?.text } ?? "" }
+        .alert(L("文字标注", "Text"), isPresented: Binding(get: { ed.editingNote != nil }, set: { if !$0 { ed.editingNote = nil } })) {
+            TextField(L("要写的字", "Text"), text: $noteText)
+            Button(L("好", "OK")) { if let id = ed.editingNote { ed.setNoteText(id, noteText) }; ed.editingNote = nil }
+            Button(L("取消", "Cancel"), role: .cancel) { ed.editingNote = nil }
+        }
+        .onChange(of: ed.editingNote) { _, id in noteText = id.flatMap { i in ed.project.annotations.first { $0.id == i }?.text } ?? "" }
     }
     @State private var captionText = ""
+    @State private var noteText = ""
 
     // 顶部只留文件名和「导出」
     private var toolbar: some View {
@@ -1012,11 +1053,14 @@ struct EditorView: View {
                     .help(L("在播放头处放一段「剪掉」（红色），拖两头盖住不要的部分；选中后也能改成「加速」快放", "Mark a part to cut out at the playhead (red); drag its ends over what you don't want. Select it to switch to speed-up instead"))
                 voiceButton
                 captionButton
-                Button { ed.regenerate() } label: { Label(L("重新自动生成", "Auto-Generate"), systemImage: "wand.and.stars") }
-                    .help(L("按录制时的点击和打字重新排推近段（会替换现在的段，可以撤销 ⌘Z）", "Rebuild zooms from your clicks and typing (replaces the current zooms; undo with ⌘Z)"))
+                OverlayButtons(ed: ed)
+                Spacer()
+                // 右半边：自动生成、撤销重做（只放图标，鼠标停上去有说明），再是时间轴缩放
+                Button { ed.regenerate() } label: { Image(systemName: "wand.and.stars") }
+                    .help(L("重新自动生成：按录制时的点击和打字重新排推近段（会替换现在的段，可以撤销 ⌘Z）", "Auto-generate: rebuild zooms from your clicks and typing (replaces the current zooms; undo with ⌘Z)"))
                 Button { ed.undo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!ed.canUndo).help(L("撤销上一步（⌘Z）", "Undo the last change (⌘Z)"))
                 Button { ed.redo() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!ed.canRedo).help(L("重做刚撤销的那步（⌘⇧Z）", "Redo what you just undid (⌘⇧Z)"))
-                Spacer()
+                Divider().frame(height: 16)
                 Group {
                     Button { ed.setTimelineScale(ed.timelineScale / 1.5) } label: { Image(systemName: "minus.magnifyingglass") }
                         .disabled(ed.timelineScale <= 1)
@@ -1078,6 +1122,15 @@ struct EditorView: View {
             } else {
                 PlayerPane(player: ed.player, picking: ed.picking, camRect: ed.cameraPipRect, onPick: { ed.pick($0) },
                            onCamMove: { d, ph in ed.moveCamera(by: d, phase: ph) })
+            }
+            // 遮挡、标注：选中的那个出编辑框，「遮挡 / 标注」按下后在画面上拖出来
+            OverlayCanvas(ed: ed)
+            if let d = ed.drawing {
+                VStack {
+                    Text(d.hint).font(.callout).padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(.regularMaterial, in: Capsule())
+                    Spacer()
+                }.padding(10).allowsHitTesting(false)
             }
             if ed.picking {
                 VStack {
@@ -1381,7 +1434,8 @@ struct TimelineGestures: NSViewRepresentable {
 
 struct TimelineStrip: View {
     @ObservedObject var ed: StudioEditor
-    private let rulerH = 22.0, cutY = 38.0, cutH = 20.0, segY = 64.0, segH = 40.0, voiceY = 112.0, voiceH = 26.0, capY = 144.0, capH = 26.0, layY = 176.0, layH = 22.0
+    private let rulerH = 22.0, cutY = 38.0, cutH = 20.0, segY = 64.0, segH = 40.0, voiceY = 112.0, voiceH = 26.0, capY = 144.0, capH = 26.0
+    private let redY = 176.0, redH = 20.0, annY = 200.0, annH = 20.0, layY = 226.0, layH = 22.0
     private let accent = Color(red: 0.42, green: 0.36, blue: 0.95)
 
     var body: some View {
@@ -1441,6 +1495,23 @@ struct TimelineStrip: View {
                 ForEach(ed.project.captions) { c in
                     CaptionBlock(ed: ed, cap: c, w: w, d: d).frame(width: max(6, x(c.end) - x(c.start)), height: capH)
                         .offset(x: x(c.start), y: capY)
+                }
+                // 遮挡轨、标注轨：每个一块，可以叠在一起
+                RoundedRectangle(cornerRadius: 5).fill(Color.secondary.opacity(0.07)).frame(width: w - 4, height: redH)
+                    .offset(x: 2, y: redY).allowsHitTesting(false)
+                let rp = OverlayBlock.pack(ed.project.redactions.map { ($0.id, $0.start, $0.end) })
+                ForEach(ed.project.redactions) { r in
+                    let (row, rows) = rp[r.id] ?? (0, 1), rh = redH / Double(rows)
+                    OverlayBlock(ed: ed, id: r.id, lane: .redaction, w: w, d: d, compact: rows > 1).frame(width: max(6, x(r.end) - x(r.start)), height: rh - (rows > 1 ? 1 : 0))
+                        .offset(x: x(r.start), y: redY + Double(row) * rh)
+                }
+                RoundedRectangle(cornerRadius: 5).fill(Color.secondary.opacity(0.07)).frame(width: w - 4, height: annH)
+                    .offset(x: 2, y: annY).allowsHitTesting(false)
+                let ap = OverlayBlock.pack(ed.project.annotations.map { ($0.id, $0.start, $0.end) })
+                ForEach(ed.project.annotations) { a in
+                    let (row, rows) = ap[a.id] ?? (0, 1), ah = annH / Double(rows)
+                    OverlayBlock(ed: ed, id: a.id, lane: .annotation, w: w, d: d, compact: rows > 1).frame(width: max(6, x(a.end) - x(a.start)), height: ah - (rows > 1 ? 1 : 0))
+                        .offset(x: x(a.start), y: annY + Double(row) * ah)
                 }
                 // 布局轨（有摄像头才有）：每段一块；空白处双击新加一段
                 if ed.hasCamera {

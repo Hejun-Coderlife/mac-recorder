@@ -477,11 +477,13 @@ struct StudioProject: Codable, Equatable {
     var captionStyle = CaptionStyle()
     var camera: CameraSettings?         // 摄像头样式；素材里有摄像头、工程里还没有时按录制时的小窗位置生成（Windows 版还没有）
     var layouts: [CameraLayoutSeg] = []  // 布局轨：不在任何一段里 = 小窗
+    var redactions: [Redaction] = []    // 遮挡（模糊 / 马赛克 / 色块；原画面位置、素材时间；Windows 版还没有）
+    var annotations: [Annotation] = []  // 标注（箭头 / 框 / 圈 / 高亮 / 文字；Windows 版还没有）
 
     init(segments: [ZoomSegment] = [], trimStart: Double = 0, trimEnd: Double = 0, look: StudioLook = StudioLook()) {
         self.segments = segments; self.trimStart = trimStart; self.trimEnd = trimEnd; self.look = look
     }
-    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look, segmentsEdited, cuts, audio, voiceovers, captions, captionStyle, camera, layouts }
+    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look, segmentsEdited, cuts, audio, voiceovers, captions, captionStyle, camera, layouts, redactions, annotations }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         segments = try c.decodeIfPresent([ZoomSegment].self, forKey: .segments) ?? []
@@ -496,6 +498,8 @@ struct StudioProject: Codable, Equatable {
         captionStyle = (try? c.decodeIfPresent(CaptionStyle.self, forKey: .captionStyle)) ?? CaptionStyle()
         camera = try? c.decodeIfPresent(CameraSettings.self, forKey: .camera)
         layouts = (try? c.decodeIfPresent([CameraLayoutSeg].self, forKey: .layouts)) ?? []
+        redactions = (try? c.decodeIfPresent([Redaction].self, forKey: .redactions)) ?? []
+        annotations = (try? c.decodeIfPresent([Annotation].self, forKey: .annotations)) ?? []
     }
 
     static func url(_ dir: URL) -> URL { dir.appendingPathComponent("project.json") }
@@ -891,11 +895,16 @@ final class StudioRenderer: @unchecked Sendable {
     }
 
     // 合成第 i 帧（plan 从 0 秒算起）：背景 → 圆角画面 → 点击波纹 → 鼠标，整幅按镜头推拉
-    func frame(_ i: Int, plan: [FramePlan], source: CIImage) -> CIImage {
+    // overlay = 遮挡和标注（按素材时间 srcTime 查；没给就当素材时间 = 成片时间）
+    func frame(_ i: Int, plan: [FramePlan], source: CIImage, overlay: OverlayLayer? = nil, srcTime: Double? = nil) -> CIImage {
         let f = plan[i], W = lay.W, H = lay.H
         var src = source
         let bh = src.extent.height   // 高度是奇数时底下补过 1 像素，切掉
         src = src.cropped(to: CGRect(x: 0, y: bh - H, width: W, height: H)).transformed(by: CGAffineTransform(translationX: 0, y: -(bh - H)))
+        // 遮挡、标注画在原画面上（推近时跟着一起放大；这样整幅只缩放一次，加了遮挡字也不变软）；鼠标和波纹在它们上面
+        if let overlay, !overlay.isEmpty {
+            src = overlay.apply(src, t: srcTime ?? Double(i) / Double(st.fps), lay: lay, ppp: track.pixelsPerPoint, scale: lay.s * f.z)
+        }
         // 成片里原画面缩得比较小（全景 + 导出分辨率小）：先用 Lanczos 缩好再贴，字不发虚、不闪；1:1 附近不碰，结果和原来一样
         var toScene = lay.toScene
         let eff = lay.s * f.z
@@ -1018,6 +1027,7 @@ final class StudioJob: @unchecked Sendable {
     private let voice: VoiceMix?               // 后来录的讲解（GIF 不要声音）
     private let captions: CaptionLayer         // 字幕：烧进画面（成片时间）
     private let camLayer: CameraLayer?         // 摄像头画中画（素材时间查布局和画面）
+    private let overlay: OverlayLayer          // 遮挡、标注（素材时间）
     private let progress: @Sendable (Double) -> Void
 
     init(project dir: URL, out: URL, style: StudioStyle, project: StudioProject? = nil, progress: @escaping @Sendable (Double) -> Void) async throws {
@@ -1058,10 +1068,13 @@ final class StudioJob: @unchecked Sendable {
         trackVolumes = vols
         voice = style.gif ? nil : try await VoiceMix.load(dir: dir, project: p, map: map)
         camLayer = CameraLayer(dir: dir, track: track, project: p, canvas: CGSize(width: r.lay.cw, height: r.lay.ch), background: r.background)
+        overlay = OverlayLayer(p)
         captions = CaptionLayer(captions: p.captions, style: p.captionStyle, map: map, trim: (p.trimStart, p.trimEnd), canvas: CGSize(width: r.lay.cw, height: r.lay.ch))
         captions.keys = KeyLayer(strokes: track.shortcuts, look: p.look, map: map, trim: (p.trimStart, p.trimEnd),
                                  canvas: CGSize(width: r.lay.cw, height: r.lay.ch), captionsShown: !captions.isEmpty)
     }
+    // 第 i 帧（成片时间）对应素材哪个时刻
+    private func srcAt(_ i: Int) -> Double { let o = Double(i) / Double(r.st.fps); return map.isIdentity ? o : map.src(o) }
     // 第 i 帧（成片时间）叠上摄像头、字幕
     private func withCaption(_ img: CIImage, _ i: Int) -> CIImage {
         let o = Double(i) / Double(r.st.fps)
@@ -1177,7 +1190,7 @@ final class StudioJob: @unchecked Sendable {
                     CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
                     guard let pb else { fail(Studio.failure("pool")); return false }
                     t0 = CACurrentMediaTime()
-                    let img = withCaption(r.frame(i, plan: plan, source: CIImage(cvPixelBuffer: src)), i)
+                    let img = withCaption(r.frame(i, plan: plan, source: CIImage(cvPixelBuffer: src), overlay: overlay, srcTime: srcAt(i)), i)
                     let dest = CIRenderDestination(pixelBuffer: pb)
                     dest.colorSpace = nil
                     let task: CIRenderTask
@@ -1289,7 +1302,7 @@ final class StudioJob: @unchecked Sendable {
             while let nx = next, nx.presentationTimeStamp <= pts { cur = nx; next = vOut.copyNextSampleBuffer() }
             try autoreleasepool {
                 guard let src = CMSampleBufferGetImageBuffer(cur) else { throw Studio.failure("frame") }
-                let img = withCaption(r.frame(i, plan: plan, source: CIImage(cvPixelBuffer: src)), i).composited(over: white)
+                let img = withCaption(r.frame(i, plan: plan, source: CIImage(cvPixelBuffer: src), overlay: overlay, srcTime: srcAt(i)), i).composited(over: white)
                 guard let cg = r.ctx.createCGImage(img, from: lay.canvas, format: .RGBA8, colorSpace: srgb) else { throw Studio.failure("gif frame") }
                 CGImageDestinationAddImage(dst, cg, frameProps)
             }
