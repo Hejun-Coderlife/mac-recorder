@@ -26,7 +26,7 @@ namespace ScreenRecorder
         Source region;
         string selectedId;
         Session session;
-        StudioProject project;      // 开着 Studio 效果录的这一次
+        StudioSession project;      // 开着 Studio 效果录的这一次
         DateTime startedAt;
         bool busy;
 
@@ -331,10 +331,10 @@ namespace ScreenRecorder
                 return;
             }
             bool studioOn = studio.Checked;
-            if (studioOn && !StudioProject.Available) { Say(L("找不到 ffmpeg，Studio 效果用不了（请重新下载 录屏.exe）", "ffmpeg is missing, Studio effects can't run (please download the app again)"), true); return; }
+            if (studioOn && !StudioSession.Available) { Say(L("找不到 ffmpeg，Studio 效果用不了（请重新下载 录屏.exe）", "ffmpeg is missing, Studio effects can't run (please download the app again)"), true); return; }
             string name = NewName(), outPath = Unique(Path.Combine(Desktop, name + ".mp4"));
             // Studio 模式：原始画面写进素材文件夹，成片录完再生成到 outPath
-            StudioProject proj = studioOn ? StudioProject.Create(name, outPath, src) : null;
+            StudioSession proj = studioOn ? StudioSession.Create(name, outPath, src) : null;
             Session s;
             try
             {
@@ -411,7 +411,7 @@ namespace ScreenRecorder
         }
 
         // 存轨迹，按轨迹生成 Studio 版（后台线程；进度显示在状态栏）
-        void RenderStudio(StudioProject proj, double firstFrameAt)
+        void RenderStudio(StudioSession proj, double firstFrameAt)
         {
             busy = true; UpdateUi();
             Say(L("正在生成 Studio 版…", "Rendering Studio version…"));

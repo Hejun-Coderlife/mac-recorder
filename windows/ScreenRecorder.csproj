@@ -15,7 +15,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Product>录屏 Screen Recorder</Product>
     <AssemblyTitle>录屏 Screen Recorder</AssemblyTitle>
-    <Version>1.4.0</Version>
+    <Version>1.5.0</Version>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>

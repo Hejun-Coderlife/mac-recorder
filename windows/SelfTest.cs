@@ -50,7 +50,7 @@ namespace ScreenRecorder
 
                 string path = env("AUTOOUT") ?? App.NewFilePath();
                 bool studioOn = env("AUTOSTUDIO") == "1";
-                var proj = studioOn ? StudioProject.Create(Path.GetFileNameWithoutExtension(path), path, src) : null;
+                var proj = studioOn ? StudioSession.Create(Path.GetFileNameWithoutExtension(path), path, src) : null;
                 var s2 = new Session(src, env("AUTOAUDIO") == "1", env("AUTOMIC") == "1", !studioOn, proj?.Raw ?? path);
                 string done = null, error = null;
                 var finished = new ManualResetEventSlim();

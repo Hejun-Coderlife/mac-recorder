@@ -62,7 +62,7 @@ float3 SrcAt(float2 uv)
     return srcT.Sample(lin, uv).rgb;
 }
 
-// 白底阴影 → 圆角画面（同 CPU 版 Compositor.Compose）
+// 背景阴影 → 圆角画面（同 CPU 版 Compositor.Compose）
 float4 PSMain(float4 pos : SV_Position) : SV_Target
 {
     float px = (pos.x - canvas.x * 0.5) / z + sx;
@@ -85,6 +85,12 @@ float4 PSOverlay(float4 pos : SV_Position) : SV_Target
     float4 c = spT.Sample(linB, float2(u / ovs.x, v / ovs.y)) * ov.w;
     if (c.a <= 0.001) discard;
     return c;
+}
+
+// 运动模糊：把这一张按权重（p0）加进累加贴图
+float4 PSAcc(float4 pos : SV_Position) : SV_Target
+{
+    return compT.Load(int3(int2(pos.xy), 0)) * p0;
 }
 
 // 转 NV12（BT.709、16-235），和 CPU 版交给 ffmpeg 转的口径一样
@@ -126,13 +132,13 @@ float2 PSUV(float4 pos : SV_Position) : SV_Target
         readonly ID3D11Device dev;
         readonly ID3D11DeviceContext ctx;
         readonly ID3D11VertexShader vsFull, vsQuad;
-        readonly ID3D11PixelShader psMain, psOverlay, psY, psUV;
+        readonly ID3D11PixelShader psMain, psOverlay, psY, psUV, psAcc;
         readonly ID3D11SamplerState sLin, sBorder;
-        readonly ID3D11BlendState opaque, premul;
+        readonly ID3D11BlendState opaque, premul, additive;
         readonly ID3D11Buffer cb;
-        readonly ID3D11Texture2D bgTex, srcTex, yTex, uvTex, compTex, yOut, uvOut, yStage, uvStage;
-        readonly ID3D11ShaderResourceView bgSrv, srcSrv, ySrv, uvSrv, compSrv;
-        readonly ID3D11RenderTargetView compRtv, yRtv, uvRtv;
+        readonly ID3D11Texture2D bgTex, srcTex, yTex, uvTex, compTex, accTex, yOut, uvOut, yStage, uvStage;
+        readonly ID3D11ShaderResourceView bgSrv, srcSrv, ySrv, uvSrv, compSrv, accSrv;
+        readonly ID3D11RenderTargetView compRtv, accRtv, yRtv, uvRtv;
         readonly Dictionary<Sprite, (ID3D11Texture2D tex, ID3D11ShaderResourceView srv)> sprites = new Dictionary<Sprite, (ID3D11Texture2D, ID3D11ShaderResourceView)>();
         Consts c;
 
@@ -181,6 +187,7 @@ float2 PSUV(float4 pos : SV_Position) : SV_Target
             psOverlay = dev.CreatePixelShader(Compile("PSOverlay", "ps_4_0"));
             psY = dev.CreatePixelShader(Compile("PSY", "ps_4_0"));
             psUV = dev.CreatePixelShader(Compile("PSUV", "ps_4_0"));
+            psAcc = dev.CreatePixelShader(Compile("PSAcc", "ps_4_0"));
 
             sLin = dev.CreateSamplerState(new SamplerDescription(Filter.MinMagMipLinear, TextureAddressMode.Clamp, TextureAddressMode.Clamp, TextureAddressMode.Clamp, 0, 1, ComparisonFunction.Never, 0, 0));
             var transparent = new Color4(0, 0, 0, 0);
@@ -192,9 +199,15 @@ float2 PSUV(float4 pos : SV_Position) : SV_Target
             bd.RenderTarget[0].SourceBlendAlpha = Blend.One; bd.RenderTarget[0].DestinationBlendAlpha = Blend.InverseSourceAlpha; bd.RenderTarget[0].BlendOperationAlpha = BlendOperation.Add;
             bd.RenderTarget[0].RenderTargetWriteMask = ColorWriteEnable.All;
             premul = dev.CreateBlendState(bd);
+            var ad = BlendDescription.Opaque;
+            ad.RenderTarget[0].BlendEnable = true;
+            ad.RenderTarget[0].SourceBlend = Blend.One; ad.RenderTarget[0].DestinationBlend = Blend.One; ad.RenderTarget[0].BlendOperation = BlendOperation.Add;
+            ad.RenderTarget[0].SourceBlendAlpha = Blend.One; ad.RenderTarget[0].DestinationBlendAlpha = Blend.One; ad.RenderTarget[0].BlendOperationAlpha = BlendOperation.Add;
+            ad.RenderTarget[0].RenderTargetWriteMask = ColorWriteEnable.All;
+            additive = dev.CreateBlendState(ad);
             cb = dev.CreateBuffer(new BufferDescription(Marshal.SizeOf<Consts>(), BindFlags.ConstantBuffer, ResourceUsage.Default, CpuAccessFlags.None, ResourceOptionFlags.None, 0));
 
-            // 白底阴影：直接用 CPU 版算好的那张（BGRA 字节）
+            // 背景阴影：直接用 CPU 版算好的那张（BGRA 字节）
             bgTex = Tex(Format.B8G8R8A8_UNorm, CW, CH, BindFlags.ShaderResource);
             Upload(bgTex, cpu.Background, 0, CW * 4);
             bgSrv = dev.CreateShaderResourceView(bgTex, null);
@@ -206,6 +219,9 @@ float2 PSUV(float4 pos : SV_Position) : SV_Target
             else { srcTex = Tex(Format.B8G8R8A8_UNorm, W, H, BindFlags.ShaderResource); srcSrv = dev.CreateShaderResourceView(srcTex, null); }
             compTex = Tex(Format.R8G8B8A8_UNorm, CW, CH, BindFlags.ShaderResource | BindFlags.RenderTarget);
             compSrv = dev.CreateShaderResourceView(compTex, null); compRtv = dev.CreateRenderTargetView(compTex, null);
+            // 运动模糊的累加贴图（半精度浮点，几张平均不掉精度）
+            accTex = Tex(Format.R16G16B16A16_Float, CW, CH, BindFlags.ShaderResource | BindFlags.RenderTarget);
+            accSrv = dev.CreateShaderResourceView(accTex, null); accRtv = dev.CreateRenderTargetView(accTex, null);
             yOut = Tex(Format.R8_UNorm, CW, CH, BindFlags.RenderTarget); yRtv = dev.CreateRenderTargetView(yOut, null);
             uvOut = Tex(Format.R8G8_UNorm, CW / 2, CH / 2, BindFlags.RenderTarget); uvRtv = dev.CreateRenderTargetView(uvOut, null);
             yStage = dev.CreateTexture2D(new Texture2DDescription(Format.R8_UNorm, CW, CH, 1, 1, BindFlags.None, ResourceUsage.Staging, CpuAccessFlags.Read, 1, 0, ResourceOptionFlags.None));
@@ -266,12 +282,44 @@ float2 PSUV(float4 pos : SV_Position) : SV_Target
 
         void SetConsts() => ctx.UpdateSubresource(ref c, cb, 0, 0, 0, null);
 
-        public unsafe void Compose(byte[] src, FramePlan f, List<Compositor.Overlay> overlays, byte[] dst)
+        public void Compose(byte[] src, FramePlan f, List<Compositor.Overlay> overlays, byte[] dst)
+        {
+            UploadSource(src);
+            DrawScene(f, overlays);
+            Finish(compSrv, dst);
+        }
+
+        // 运动模糊：每个镜头位置画一张，按 1/n 加进累加贴图，再转 NV12
+        public void ComposeShutter(byte[] src, FramePlan[] subs, List<Compositor.Overlay> overlays, byte[] dst)
+        {
+            UploadSource(src);
+            ctx.ClearRenderTargetView(accRtv, new Color4(0, 0, 0, 0));
+            foreach (var f in subs)
+            {
+                DrawScene(f, overlays);
+                c.p0 = 1f / subs.Length; SetConsts();
+                ctx.OMSetRenderTargets(accRtv, null);
+                ctx.RSSetViewport(0, 0, CW, CH, 0, 1);
+                ctx.OMSetBlendState(additive);
+                ctx.VSSetShader(vsFull); ctx.PSSetShader(psAcc);
+                ctx.PSSetShaderResource(5, compSrv);
+                ctx.Draw(3, 0);
+                ctx.PSSetShaderResource(5, null);
+            }
+            c.p0 = 0;
+            Finish(accSrv, dst);
+        }
+
+        void UploadSource(byte[] src)
         {
             // 原画面传上去
             if (Nv12In) { Upload(yTex, src, 0, W); Upload(uvTex, src, W * H, W); }
             else Upload(srcTex, src, 0, W * 4);
+        }
 
+        // 背景 + 圆角画面 + 波纹、鼠标 → compTex
+        void DrawScene(FramePlan f, List<Compositor.Overlay> overlays)
+        {
             c.z = (float)f.z; c.sx = (float)f.sx; c.sy = (float)(L.ch - f.sy);
             SetConsts();
             ctx.OMSetRenderTargets(compRtv, null);
@@ -300,12 +348,16 @@ float2 PSUV(float4 pos : SV_Position) : SV_Target
                     ctx.Draw(4, 0);
                 }
             }
+        }
 
-            // 转 NV12
+        // 画好的那张（compTex 或累加贴图）转 NV12、读回
+        void Finish(ID3D11ShaderResourceView from, byte[] dst)
+        {
             ctx.OMSetBlendState(opaque);
             ctx.VSSetShader(vsFull);
             ctx.OMSetRenderTargets(yRtv, null);
-            ctx.PSSetShaderResource(5, compSrv);
+            ctx.RSSetViewport(0, 0, CW, CH, 0, 1);
+            ctx.PSSetShaderResource(5, from);
             ctx.PSSetShader(psY);
             ctx.Draw(3, 0);
             ctx.OMSetRenderTargets(uvRtv, null);
@@ -337,8 +389,8 @@ float2 PSUV(float4 pos : SV_Position) : SV_Target
         public void Dispose()
         {
             foreach (var e in sprites.Values) { e.srv.Dispose(); e.tex.Dispose(); }
-            foreach (var d in new IDisposable[] { bgSrv, srcSrv, ySrv, uvSrv, compSrv, compRtv, yRtv, uvRtv, bgTex, srcTex, yTex, uvTex, compTex, yOut, uvOut, yStage, uvStage,
-                                                  cb, opaque, premul, sLin, sBorder, vsFull, vsQuad, psMain, psOverlay, psY, psUV, ctx, dev })
+            foreach (var d in new IDisposable[] { bgSrv, srcSrv, ySrv, uvSrv, compSrv, accSrv, compRtv, accRtv, yRtv, uvRtv, bgTex, srcTex, yTex, uvTex, compTex, accTex, yOut, uvOut, yStage, uvStage,
+                                                  cb, opaque, premul, additive, sLin, sBorder, vsFull, vsQuad, psMain, psOverlay, psY, psUV, psAcc, ctx, dev })
                 d?.Dispose();
         }
     }
