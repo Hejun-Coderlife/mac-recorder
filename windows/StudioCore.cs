@@ -1059,8 +1059,8 @@ namespace ScreenRecorder
             var clickTimes = proj.Look.ClickSound && proj.Audio.Clicks > 0.001 ? wtrack.Clicks.Select(c => c[0] - t0).Where(t => t >= 0 && t < len).ToList() : new List<double>();
             var aud = AudioGraph(raw, info, proj, map, clickTimes, len, 1);
             string lenS = len.ToString("0.######", CultureInfo.InvariantCulture);
-            if (aud != null) log?.Invoke("audio graph: " + File.ReadAllText(aud.Script).Replace("\n", " "));
-            string audio = aud == null ? "-map 0:v" : $"{aud.Inputs} -filter_complex_script \"{aud.Script}\" -map 0:v -map \"[aout]\" -c:a aac -b:a 192k";
+            if (aud != null) log?.Invoke("audio graph: " + aud.Graph);
+            string audio = aud == null ? "-map 0:v" : $"{aud.Inputs} -filter_complex \"{aud.Graph}\" -map 0:v -map \"[aout]\" -c:a aac -b:a 192k";
             bool x264 = encoder == "libx264";
             string input = comp.Nv12Out
                 ? $"-f rawvideo -pix_fmt nv12 -s {CW}x{CH} -r {st.Fps} -color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709 -i pipe:0"
@@ -1204,7 +1204,7 @@ namespace ScreenRecorder
         // 原声每条音轨：按修剪 / 剪掉 / 快放切块（快放用 atempo，音调不变）→ 接起来 → 乘音量；再混上点击音效 → 软限幅（0.8 以上柔和压到 0.95 以内，同 Mac 版）
         public sealed class AudioPlan
         {
-            public string Inputs, Script; readonly List<string> temp = new List<string>();
+            public string Inputs, Graph; readonly List<string> temp = new List<string>();   // Graph：直接放命令行（新版 ffmpeg 去掉了 -filter_complex_script）
             public void Temp(string f) => temp.Add(f);
             public void Cleanup() { foreach (var f in temp) try { File.Delete(f); } catch { } }
         }
@@ -1258,10 +1258,7 @@ namespace ScreenRecorder
             string soft = $"aeval=exprs={lim(0)}|{lim(1)}:channel_layout=stereo,{fmt}";
             if (mix.Count == 1) g.Append(mix[0]).Append(soft).Append("[aout]");
             else g.Append(string.Concat(mix)).Append($"amix=inputs={mix.Count}:duration=longest:normalize=0,{soft}[aout]");
-            var script = Path.Combine(Path.GetTempPath(), "studio-audio-" + Guid.NewGuid().ToString("N") + ".txt");
-            File.WriteAllText(script, g.ToString(), new UTF8Encoding(false));
-            plan.Temp(script);
-            plan.Inputs = inputs; plan.Script = script;
+            plan.Inputs = inputs; plan.Graph = g.ToString().Replace("\n", "");
             return plan;
 
             string Piece((double start, double end, double rate) sp, string pre)
@@ -1288,7 +1285,7 @@ namespace ScreenRecorder
             {
                 string args = aud == null
                     ? $"-v error -y -f lavfi -i anullsrc=r=48000:cl=stereo -t {len.ToString("0.###", CultureInfo.InvariantCulture)} -c:a pcm_s16le \"{wav}\""
-                    : $"-v error -y {aud.Inputs} -filter_complex_script \"{aud.Script}\" -map \"[aout]\" -t {len.ToString("0.######", CultureInfo.InvariantCulture)} -ac 2 -ar 48000 -c:a pcm_s16le \"{wav}\"";
+                    : $"-v error -y {aud.Inputs} -filter_complex \"{aud.Graph}\" -map \"[aout]\" -t {len.ToString("0.######", CultureInfo.InvariantCulture)} -ac 2 -ar 48000 -c:a pcm_s16le \"{wav}\"";
                 return RunQuiet(args, 180000) && File.Exists(wav);
             }
             finally { aud?.Cleanup(); }
