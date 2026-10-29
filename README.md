@@ -19,6 +19,20 @@ A tiny macOS screen recorder: record a whole screen, a single window or a select
 
 > First launch is blocked by Gatekeeper because the app isn't notarized: open it once, then go to System Settings → Privacy & Security and click "Open Anyway". Requires an Apple silicon Mac with macOS 15+.
 
+## Windows 版 Windows
+
+Windows 10 / 11（64 位）可用：下载 `ScreenRecorder-Windows-x64.zip`，解压后双击「录屏.exe」（整个文件夹放一起，不用另装运行库）。第一次打开如果出现「Windows 已保护你的电脑」，点「更多信息 → 仍要运行」。
+
+- 录整个屏幕、单个窗口，或框选一块区域（遮罩上拖八个点调大小，点「录制」直接开录，Esc 取消）
+- 同时录电脑声音和麦克风（混成一条音轨），可选是否显示鼠标
+- 全局快捷键 **Ctrl+Alt+R** 开始 / 停止；录屏窗口本身不会被录进画面
+- 文件保存在「视频 \ 录屏」，录完用默认播放器打开
+- **Windows 版暂不支持 Studio 效果**
+
+> **Windows:** unzip `ScreenRecorder-Windows-x64.zip` and run `录屏.exe` (Windows 10/11 x64; no extra runtime needed). Records a screen, a window or a selected area with system audio and/or microphone mixed into one track; **Ctrl+Alt+R** starts / stops; saved to Videos\录屏. Studio effects are not available on Windows yet. If SmartScreen warns on first launch, click "More info → Run anyway".
+>
+> 源码在 `windows/`（C# WinForms，.NET Framework 4.8 + [ScreenRecorderLib](https://github.com/sskodje/ScreenRecorderLib)），GitHub Actions 自动编译打包并真录几秒自测。Source in `windows/`, built and self-tested by GitHub Actions.
+
 ## 功能 Features
 
 - 录整个屏幕、单个窗口，或者像系统截图（⌘⇧5）那样框选一块区域，拖八个点调大小

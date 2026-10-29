@@ -24,7 +24,7 @@ namespace ScreenRecorder
 
     static class Sources
     {
-        public static List<Source> List(Source region)
+        public static List<Source> List(Source region, bool includeSelf = false)
         {
             var list = new List<Source>();
             if (region != null) list.Add(region);
@@ -46,7 +46,7 @@ namespace ScreenRecorder
                 {
                     if (!w.IsValidWindow() || w.IsMinmimized() || string.IsNullOrWhiteSpace(w.Title)) continue;
                     GetWindowThreadProcessId(w.Handle, out uint pid);
-                    if (pid == self) continue;
+                    if (pid == self && !includeSelf) continue;
                     string app = "";
                     try { app = System.Diagnostics.Process.GetProcessById((int)pid).ProcessName; } catch { }
                     GetWindowRect(w.Handle, out RECT r);

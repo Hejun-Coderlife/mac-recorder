@@ -1,0 +1,89 @@
+# Windows 版：编译 → 打包 zip（exe + 录制引擎 + 同目录 VC++ 运行库）→ 在 runner 上真录几秒自测
+name: Windows
+
+on:
+  push:
+    paths: ["windows/**", ".github/workflows/windows.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: dotnet build windows/ScreenRecorder.csproj -c Release -p:Platform=x64
+
+      - name: Package
+        run: |
+          $out = "windows/bin/x64/Release/net48"
+          New-Item -ItemType Directory -Force pkg | Out-Null
+          Copy-Item "$out/ScreenRecorder.exe" "pkg/录屏.exe"
+          Copy-Item "$out/ScreenRecorder.exe.config" "pkg/录屏.exe.config"
+          Copy-Item "$out/ScreenRecorderLib.dll" pkg/
+          # ScreenRecorderLib 是 C++/CLI，要 VC++ 2015-2022 运行库；放在 exe 同目录（app-local），用户不用另装 vc_redist
+          foreach ($d in "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll") {
+            Copy-Item "C:\Windows\System32\$d" pkg/
+          }
+          Copy-Item windows/README.txt pkg/
+          Compress-Archive -Path pkg/* -DestinationPath ScreenRecorder-Windows-x64.zip
+          Get-ChildItem pkg, ScreenRecorder-Windows-x64.zip | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScreenRecorder-Windows-x64
+          path: ScreenRecorder-Windows-x64.zip
+
+      - name: Install ffmpeg
+        run: choco install ffmpeg -y --no-progress | Out-Null
+
+      - name: Self-test (screen / region / window, no audio)
+        run: |
+          function Rec($name, $vars) {
+            $out = Join-Path $env:RUNNER_TEMP "$name.mp4"
+            Remove-Item "$env:TEMP\recorder_test.txt" -ErrorAction SilentlyContinue
+            $env:AUTOTEST = "3"; $env:AUTOOUT = $out
+            foreach ($k in "AUTOREGION", "AUTOWINDOW", "AUTOAUDIO") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+            foreach ($k in $vars.Keys) { Set-Item "env:$k" $vars[$k] }
+            $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+            $res = Get-Content "$env:TEMP\recorder_test.txt" -Raw
+            Write-Host "[$name] exit=$($p.ExitCode) $res"
+            if ($p.ExitCode -ne 0 -or -not $res.StartsWith("OK")) { throw "$name failed" }
+            $info = ffprobe -v error -show_entries "stream=codec_type,codec_name,width,height:format=duration" -of json $out | ConvertFrom-Json
+            $v = $info.streams | Where-Object codec_type -eq video
+            $dur = [double]$info.format.duration
+            Write-Host "[$name] $($v.codec_name) $($v.width)x$($v.height) duration=$dur audio=$(@($info.streams | Where-Object codec_type -eq audio).Count)"
+            if ($v.codec_name -ne "h264") { throw "$name: no h264 video" }
+            if ($dur -lt 2 -or $dur -gt 5) { throw "$name: duration $dur not ~3s" }
+            # 画面确实在动：抽两帧比较
+            ffmpeg -v error -y -ss 0.5 -i $out -frames:v 1 "$env:RUNNER_TEMP\$name-a.png"
+            ffmpeg -v error -y -ss 2.5 -i $out -frames:v 1 "$env:RUNNER_TEMP\$name-b.png"
+            $ha = (Get-FileHash "$env:RUNNER_TEMP\$name-a.png").Hash; $hb = (Get-FileHash "$env:RUNNER_TEMP\$name-b.png").Hash
+            if ($ha -eq $hb) { throw "$name: frames identical, picture not moving" }
+            return $v
+          }
+          Rec "screen" @{} | Out-Null
+          $v = Rec "region" @{ AUTOREGION = "20,20,640,360" }
+          if ($v.width -ne 640 -or $v.height -ne 360) { throw "region size $($v.width)x$($v.height), expected 640x360" }
+          Rec "window" @{ AUTOWINDOW = "autotest" } | Out-Null
+
+      - name: Self-test (system audio)
+        continue-on-error: true
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "audio.mp4"
+          $env:AUTOTEST = "3"; $env:AUTOOUT = $out; $env:AUTOAUDIO = "1"
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          Write-Host (Get-Content "$env:TEMP\recorder_test.txt" -Raw)
+          if ($p.ExitCode -ne 0) { throw "audio recording failed (runner may have no audio device)" }
+          ffprobe -v error -show_entries "stream=codec_type,codec_name,channels,sample_rate:format=duration" -of compact $out
+          if (-not (ffprobe -v error -select_streams a -show_entries stream=codec_name -of csv=p=0 $out)) { throw "no audio track" }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selftest-recordings
+          path: ${{ runner.temp }}/*.mp4
