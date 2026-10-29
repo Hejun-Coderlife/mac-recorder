@@ -214,9 +214,37 @@ struct StudioLook: Codable, Equatable {
 }
 
 // 预设：把一套样式存起来，下拉切换；「默认」用在新录的工程上
-struct StudioPreset: Codable, Equatable, Identifiable { var name: String; var look: StudioLook; var id: String { name } }
+struct StudioPreset: Codable, Equatable, Identifiable {
+    var name: String; var look: StudioLook
+    var id: String { name }
+    // 内置预设的 name 以「@」开头（固定、不随语言变，存默认时用它），显示用 title
+    var builtIn: Bool { name.hasPrefix("@") }
+    var title: String { Self.titles[name] ?? name }
+    static let titles: [String: String] = [
+        "@transparent": L("透明背景", "Transparent"), "@douyin": L("抖音竖屏", "Vertical (TikTok)"),
+        "@tutorial": L("教程横屏", "Tutorial (16:9)"), "@square": L("方形", "Square"),
+    ]
+    // 内置预设：只读，不写进 presets.json
+    static let builtIns: [StudioPreset] = {
+        let g = StudioLook.gradients
+        var tall = StudioLook(); tall.aspect = .tall; tall.background = .gradient
+        tall.gradient0 = g[2].a; tall.gradient1 = g[2].b; tall.gradientAngle = 160; tall.cursorScale = 1.8; tall.padding = 0.05
+        var wide = StudioLook(); wide.aspect = .wide; wide.background = .gradient
+        wide.gradient0 = g[1].a; wide.gradient1 = g[1].b; wide.gradientAngle = 135
+        var square = StudioLook(); square.aspect = .square; square.background = .gradient
+        square.gradient0 = g[3].a; square.gradient1 = g[3].b; square.gradientAngle = 135
+        return [StudioPreset(name: "@transparent", look: StudioLook()), StudioPreset(name: "@douyin", look: tall),
+                StudioPreset(name: "@tutorial", look: wide), StudioPreset(name: "@square", look: square)]
+    }()
+}
 enum PresetStore {
-    struct File: Codable { var presets: [StudioPreset] = []; var defaultName: String? }
+    struct File: Codable {
+        var presets: [StudioPreset] = []; var defaultName: String?
+        var all: [StudioPreset] { StudioPreset.builtIns + presets }
+        func find(_ name: String) -> StudioPreset? { all.first { $0.name == name } }
+        // 新录的工程用哪个：没设过 = 透明背景
+        var defaultKey: String { defaultName.flatMap { find($0) != nil ? $0 : nil } ?? "@transparent" }
+    }
     static var url: URL {
         let d = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent(Bundle.main.bundleIdentifier ?? "Recorder")
@@ -224,8 +252,11 @@ enum PresetStore {
         return d.appendingPathComponent("presets.json")
     }
     static func load() -> File { (try? JSONDecoder().decode(File.self, from: Data(contentsOf: url))) ?? File() }
-    static func save(_ f: File) { let e = JSONEncoder(); e.outputFormatting = [.prettyPrinted, .sortedKeys]; try? e.encode(f).write(to: url, options: .atomic) }
-    static var defaultLook: StudioLook { let f = load(); return f.presets.first { $0.name == f.defaultName }?.look ?? StudioLook() }
+    static func save(_ f: File) {
+        var f = f; f.presets.removeAll { $0.builtIn }   // 内置的不写进文件
+        let e = JSONEncoder(); e.outputFormatting = [.prettyPrinted, .sortedKeys]; try? e.encode(f).write(to: url, options: .atomic)
+    }
+    static var defaultLook: StudioLook { let f = load(); return f.find(f.defaultKey)?.look ?? StudioLook() }
 }
 
 // 画布和画面在画布上的位置（Core Image 坐标：左下角为原点、y 朝上）

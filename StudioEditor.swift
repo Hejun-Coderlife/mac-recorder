@@ -386,23 +386,25 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
 
     // ---- 预设：存在 ~/Library/Application Support/<bundle id>/presets.json ----
     func applyPreset(_ name: String) {
-        guard let pr = presets.presets.first(where: { $0.name == name }) else { return }
+        guard let pr = presets.find(name) else { return }
         edit { $0.look = pr.look }
     }
     func savePreset(_ name: String) {
         let n = name.trimmingCharacters(in: .whitespaces)
-        guard !n.isEmpty else { return }
+        guard !n.isEmpty, !n.hasPrefix("@") else { return }
         if let i = presets.presets.firstIndex(where: { $0.name == n }) { presets.presets[i].look = project.look }
         else { presets.presets.append(StudioPreset(name: n, look: project.look)) }
         PresetStore.save(presets)
     }
     func deletePreset(_ name: String) {
+        guard !name.hasPrefix("@") else { return }   // 内置的删不掉
         presets.presets.removeAll { $0.name == name }
         if presets.defaultName == name { presets.defaultName = nil }
         PresetStore.save(presets)
     }
     func setDefaultPreset(_ name: String?) { presets.defaultName = name; PresetStore.save(presets) }
-    var currentPresetName: String? { presets.presets.first { $0.look == project.look }?.name }
+    // 当前样式对得上哪个预设：自己存的优先
+    var currentPresetName: String? { (presets.presets + StudioPreset.builtIns).first { $0.look == project.look }?.name }
 
     // ---- 存盘、导出 ----
     private func scheduleSave() {
@@ -941,24 +943,38 @@ struct StylePanel: View {
     }
 
     private var presetsBox: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Picker("", selection: Binding(get: { ed.currentPresetName ?? "" }, set: { if !$0.isEmpty { ed.applyPreset($0) } })) {
-                Text(L("（未保存的样式）", "(Unsaved style)")).tag("")
-                ForEach(ed.presets.presets) { p in
-                    Text(p.name + (ed.presets.defaultName == p.name ? L("（默认）", " (Default)") : "")).tag(p.name)
+        let cur = ed.currentPresetName, def = ed.presets.defaultKey
+        func label(_ p: StudioPreset) -> String { p.title + (def == p.name ? L("（新录制默认）", " (default)") : "") }
+        return VStack(alignment: .leading, spacing: 8) {
+            Picker("", selection: Binding(get: { cur ?? "" }, set: { if !$0.isEmpty && $0 != "#hint" { ed.applyPreset($0) } })) {
+                if cur == nil { Text(L("自定义（未保存）", "Custom (unsaved)")).tag("") }
+                Section(L("内置", "Built-in")) {
+                    ForEach(StudioPreset.builtIns) { p in Text(label(p)).tag(p.name) }
+                }
+                Section(L("我的预设", "My Presets")) {
+                    if ed.presets.presets.isEmpty {
+                        Text(L("调好样式后点「存成预设…」就能存下来", "Adjust the style, then click “Save as Preset…”")).foregroundStyle(.secondary).tag("#hint")
+                    }
+                    ForEach(ed.presets.presets) { p in Text(label(p)).tag(p.name) }
                 }
             }.labelsHidden().fixedSize()
             HStack(spacing: 8) {
-                Button(L("存成预设…", "Save…")) { newName = ed.currentPresetName ?? ""; naming = true }
-                if let n = ed.currentPresetName {
-                    Button(ed.presets.defaultName == n ? L("取消默认", "Unset Default") : L("设为默认", "Make Default")) {
-                        ed.setDefaultPreset(ed.presets.defaultName == n ? nil : n)
-                    }
+                Button(L("存成预设…", "Save as Preset…")) { newName = cur.flatMap { $0.hasPrefix("@") ? nil : $0 } ?? ""; naming = true }
+                if let n = cur, !n.hasPrefix("@") {
                     Button(role: .destructive) { ed.deletePreset(n) } label: { Image(systemName: "trash") }.help(L("删除这个预设", "Delete this preset"))
                 }
             }.controlSize(.small)
-            Text(L("「默认」预设会用在以后新录的 Studio 素材上", "The default preset is used for new Studio recordings"))
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            // 新录制用哪套：显眼地写出来，当前选中的不是默认就给个按钮
+            HStack(spacing: 6) {
+                Image(systemName: "star.fill").foregroundStyle(.yellow).font(.caption)
+                Text(L("新录制默认：", "New recordings use: ") + (ed.presets.find(def)?.title ?? "")).font(.caption)
+                Spacer(minLength: 0)
+                if let n = cur, n != def {
+                    Button(L("设为默认", "Make Default")) { ed.setDefaultPreset(n == "@transparent" ? nil : n) }
+                        .controlSize(.small)
+                        .help(L("以后新录的 Studio 素材都用这套样式", "Use this style for new Studio recordings"))
+                }
+            }
         }
     }
 
@@ -1326,6 +1342,17 @@ enum StudioTests {
             } catch { check("load \(error)", false) }
             f.presets = []; f.defaultName = nil; PresetStore.save(f)
             check("deleted", PresetStore.load().presets.isEmpty && PresetStore.defaultLook == StudioLook())
+            // 内置预设：4 个、抖音竖屏是 9:16 + 1.8 倍鼠标；能设为默认；不会写进文件
+            let b = StudioPreset.builtIns
+            check("built-ins", b.count == 4 && b[0].look == StudioLook() && b[1].look.aspect == .tall && b[1].look.cursorScale == 1.8
+                  && b[2].look.aspect == .wide && b[3].look.aspect == .square && b.allSatisfy { $0.builtIn && $0.title != $0.name })
+            f.presets = b + [StudioPreset(name: "我的", look: look)]; f.defaultName = "@douyin"; PresetStore.save(f)
+            let saved = (try? String(contentsOf: PresetStore.url, encoding: .utf8)) ?? ""
+            check("built-ins not written to presets.json", !saved.contains("@transparent") && !saved.contains("@square") && PresetStore.load().presets.map(\.name) == ["我的"])
+            check("built-in as default", PresetStore.defaultLook == b[1].look && PresetStore.load().defaultKey == "@douyin")
+            check("all = built-ins + mine", PresetStore.load().all.map(\.name) == ["@transparent", "@douyin", "@tutorial", "@square", "我的"])
+            f.presets = []; f.defaultName = "已删掉的"; PresetStore.save(f)
+            check("missing default falls back to transparent", PresetStore.load().defaultKey == "@transparent" && PresetStore.defaultLook == StudioLook())
             restore()   // exit 不会跑 defer，所以在这里恢复
             print(ok ? "PRESETTEST OK" : "PRESETTEST FAIL")
             exit(ok ? 0 : 1)
