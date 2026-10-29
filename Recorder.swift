@@ -721,20 +721,21 @@ struct ContentView: View {
     }
 }
 
-// 有新版时窗口底部的一行：「有新版本 v1.2 · 更新」；手动检查的结果也显示在这里
+// 窗口底部一行：后台下好了新版 / 刚更新过 / 手动检查的结果
 struct UpdateBar: View {
     @ObservedObject var updater: Updater
     var body: some View {
         switch updater.state {
         case .idle: EmptyView()
-        case .available(let v):
+        case .ready(let v):
             HStack(spacing: 8) {
                 Image(systemName: "arrow.down.circle.fill").foregroundStyle(Color.accentColor)
-                Text(L("有新版本 v\(v)（现在是 v\(updater.current)）", "Version \(v) is available (you have \(updater.current))"))
+                Text(L("新版本 v\(v) 已下载，退出后自动换上", "Version \(v) is downloaded and will be installed when you quit"))
                 Spacer()
                 Button(L("更新说明", "What's New")) { NSWorkspace.shared.open(updater.releasePage) }
-                Button(L("更新", "Update")) { Task { await updater.install() } }.buttonStyle(.borderedProminent)
+                Button(L("现在重启", "Restart Now")) { updater.restartNow() }
             }.font(.callout)
+        case .updated(let v): Text(L("已更新到 v\(v)", "Updated to \(v)")).font(.callout).foregroundStyle(.secondary)
         case .working(let t): HStack(spacing: 8) { ProgressView().controlSize(.small); Text(t).font(.callout).foregroundStyle(.secondary) }
         case .upToDate: Text(L("已是最新版本 v\(updater.current)", "You're up to date (\(updater.current))")).font(.callout).foregroundStyle(.secondary)
         case .failed(let t): Text(t).font(.callout).foregroundStyle(.red).lineLimit(2)
@@ -752,7 +753,10 @@ struct RecorderApp: App {
                 .onAppear {
                     HotKey.action = { [weak rec] in rec?.toggle() }
                     if Studio.selfTest() || Updater.selfTest() { return }
-                    if ProcessInfo.processInfo.environment["AUTOTEST"] == nil { Updater.shared.checkOnLaunch() }
+                    if ProcessInfo.processInfo.environment["AUTOTEST"] == nil {
+                        Updater.shared.isBusy = { [weak rec] in rec.map { $0.recording || $0.busy } ?? false }
+                        Updater.shared.start()
+                    }
                     // 自测：MIXTEST=视频路径 → 把这个文件的两条音轨合成一条（会改动文件，先复制一份再测），然后退出
                     if let path = ProcessInfo.processInfo.environment["MIXTEST"] {
                         Task { @MainActor in

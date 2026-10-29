@@ -195,11 +195,11 @@ enum StudioPlan {
         for m in tr.moves where m[4] == 1 && m[0] - lastDrag >= 0.3 { ev.append((m[0], m[1], H - m[2])); lastDrag = m[0] }
         ev = ev.filter { $0.t >= 0 && $0.t <= duration - 1 }.sorted { $0.t < $1.t }
 
-        // 2) 合成放大段：事件前 0.6 秒开始推近，最后一个事件后停 2.2 秒；两段之间不到 1.5 秒就连成一段（别刚拉远又推近）
+        // 2) 合成放大段：事件前 0.6 秒开始推近，最后一个事件后停 3.5 秒；两段之间不到 1.5 秒就连成一段（别刚拉远又推近）
         struct Seg { var start: Double; var end: Double; var ev: [Event] }
         var segs: [Seg] = []
         for e in ev {
-            let s = max(0, e.t - 0.6), end = e.t + 2.2
+            let s = max(0, e.t - 0.6), end = e.t + 3.5
             if var last = segs.last, s <= last.end + 1.5 { last.end = max(last.end, end); last.ev.append(e); segs[segs.count - 1] = last }
             else { segs.append(Seg(start: s, end: end, ev: [e])) }
         }
@@ -232,8 +232,8 @@ enum StudioPlan {
                 if let e = seg.ev.first(where: { $0.t >= t && $0.t <= t + 0.5 }), abs(e.x - focus.x) > hw * 0.5 || abs(e.y - focus.y) > hh * 0.5 {
                     focus = (e.x, e.y)
                 } else if let m, t >= seg.ev[0].t {
-                    // 鼠标快出镜头（超过中间 70%）才跟过去，平时镜头不动
-                    let rx = hw * 0.7, ry = hh * 0.7
+                    // 推近时镜头跟着鼠标走（像 Screen Studio）：鼠标离开中间一小块（25%）就跟，弹簧让它走得顺
+                    let rx = hw * 0.25, ry = hh * 0.25
                     if m.x > focus.x + rx { focus.x = m.x - rx } else if m.x < focus.x - rx { focus.x = m.x + rx }
                     if m.y > focus.y + ry { focus.y = m.y - ry } else if m.y < focus.y - ry { focus.y = m.y + ry }
                 }
