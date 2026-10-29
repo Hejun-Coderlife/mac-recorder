@@ -258,6 +258,9 @@ namespace ScreenRecorder
                 if (r != null) { r.X = x0; r.Y = y0; r.W = w; r.H = h; }
                 if (a != null) { a.X = x0; a.Y = y0; if (a.Kind != "text" || mode != "move") { a.W = w; a.H = h; } }
             });
+            // 每一步都从拖之前的工程重做：新建的那个要带着拖到的大小，松手时补默认大小那步才不会把它打回原形
+            if (ovNew is Redaction nr && Project.Redactions.FirstOrDefault(x => x.Id == id) is Redaction cr) ovNew = cr.Clone();
+            if (ovNew is Annotation na && Project.Annotations.FirstOrDefault(x => x.Id == id) is Annotation ca) ovNew = ca.Clone();
         }
 
         public void OverlayUp()
