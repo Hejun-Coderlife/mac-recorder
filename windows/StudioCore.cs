@@ -701,11 +701,16 @@ namespace ScreenRecorder
             var lay = new StudioLayout(track, st);
             int n = Math.Max(1, (int)(info.Duration * st.Fps));
             var plan = StudioPlan.Make(track, lay, st, n, info.Duration);
-            // 自测：STUDIO_PLANDUMP=文件 → 每帧写「秒,放大倍数,鼠标离画面中心多远（横、竖，按半个画面算）」
+            // 自测：STUDIO_PLANDUMP=文件 → 每帧写「秒,放大倍数,鼠标离画面中心多远（横、竖，按半个画面算）,镜头横 / 竖是否顶到画布边（1/0）」
             var dump = Environment.GetEnvironmentVariable("STUDIO_PLANDUMP");
             if (dump != null)
-                File.WriteAllLines(dump, plan.Select((f, i) => string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:F3},{1:F3},{2:F3},{3:F3}",
-                    i / (double)st.Fps, f.z, (lay.card.X + f.mx * lay.s - f.sx) * f.z / (lay.cw / 2), (lay.card.Y + f.my * lay.s - f.sy) * f.z / (lay.ch / 2))));
+                File.WriteAllLines(dump, plan.Select((f, i) =>
+                {
+                    double ex = lay.cw / (2 * f.z), ey = lay.ch / (2 * f.z);
+                    bool edgeX = f.sx - ex < 2 || lay.cw - ex - f.sx < 2, edgeY = f.sy - ey < 2 || lay.ch - ey - f.sy < 2;
+                    return string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:F3},{1:F3},{2:F3},{3:F3},{4},{5}",
+                        i / (double)st.Fps, f.z, (lay.card.X + f.mx * lay.s - f.sx) * f.z / (lay.cw / 2), (lay.card.Y + f.my * lay.s - f.sy) * f.z / (lay.ch / 2), edgeX ? 1 : 0, edgeY ? 1 : 0);
+                }));
             var cpu = new Compositor(lay);
             var arrow = Sprites.Arrow(); var ring = Sprites.Ring();
             var art = new Dictionary<int, Sprite>();

@@ -312,11 +312,14 @@ jobs:
           $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
           foreach ($k in "STUDIO", "STUDIO_OUT", "STUDIO_PLANDUMP") { Remove-Item "env:$k" }
           if ($p.ExitCode -ne 0) { throw "re-render for follow check failed" }
-          $zoomed = @(Get-Content (Join-Path $dir "plan.csv") | ForEach-Object { $c = $_ -split ','; [pscustomobject]@{ z = [double]$c[1]; d = [Math]::Max([Math]::Abs([double]$c[2]), [Math]::Abs([double]$c[3])) } } | Where-Object { $_.z -gt 1.8 })
-          if ($zoomed.Count -lt 30) { throw "too few zoomed frames ($($zoomed.Count))" }
-          $sorted = $zoomed.d | Sort-Object
+          # 镜头顶到画布边的那个方向不算（点在屏幕边上时本来就没法让鼠标居中）
+          $zoomed = @(Get-Content (Join-Path $dir "plan.csv") | ForEach-Object { $c = $_ -split ','; if ([double]$c[1] -gt 1.8) {
+              if ($c[4] -eq '0') { [Math]::Abs([double]$c[2]) }
+              if ($c[5] -eq '0') { [Math]::Abs([double]$c[3]) } } })
+          if ($zoomed.Count -lt 30) { throw "too few zoomed samples ($($zoomed.Count))" }
+          $sorted = $zoomed | Sort-Object
           $median = $sorted[[int]($sorted.Count / 2)]; $p90 = $sorted[[int]($sorted.Count * 0.9)]
-          Write-Host "zoomed frames: $($zoomed.Count)  cursor offset from center (1 = edge): median=$median p90=$p90"
+          Write-Host "zoomed samples (not at canvas edge): $($zoomed.Count)  cursor offset from center (1 = edge): median=$median p90=$p90"
           if ($median -gt 0.3 -or $p90 -gt 0.6) { throw "camera does not follow the cursor closely enough" }
 
       - name: Studio GPU vs CPU compositor give the same picture; encoder fallback
