@@ -54,7 +54,8 @@ jobs:
           $names | ForEach-Object { Write-Host "  $_" }
           $top = $names | ForEach-Object { ($_ -split '/')[0] } | Sort-Object -Unique
           Write-Host "top level: $($top -join ', ')"
-          if (($top -join '|') -ne (@('README.txt', '运行库', '录屏.exe') | Sort-Object) -join '|') { throw "unexpected top level: $($top -join ', ')" }
+          $want = (@('README.txt', '运行库', '录屏.exe') | Sort-Object) -join '|'
+          if (($top -join '|') -ne $want) { throw "unexpected top level: $($top -join ', ')" }
           foreach ($f in "ScreenRecorderLib.dll", "ffmpeg.exe", "vcruntime140.dll", "msvcp140.dll") { if ($names -notcontains "运行库/$f") { throw "missing 运行库/$f" } }
           if ($names -match '\.config$') { throw "config file should not be shipped" }
 
