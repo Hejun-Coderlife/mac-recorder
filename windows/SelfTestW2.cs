@@ -121,8 +121,8 @@ namespace ScreenRecorder
                     Shot("captions");
                     // 改字：属性条里改，回车
                     ed.EditCaptionText(); Pump(0.2);
-                    SendKeys.SendWait("改过的字幕{ENTER}"); Pump(0.5);
-                    Check("edit caption text in the inspector", ed.Project.Captions.Any(c => c.Text == "改过的字幕"), string.Join("|", ed.Project.Captions.Select(c => c.Text)));
+                    SendKeys.SendWait("edited caption{ENTER}"); Pump(0.5);
+                    Check("edit caption text in the inspector", ed.Project.Captions.Any(c => c.Text == "edited caption"), string.Join("|", ed.Project.Captions.Select(c => c.Text)));
                     ed.Undo(); Pump(0.3);
                     // 导出成片（带讲解、字幕），抽一帧
                     var outF = Path.Combine(Path.GetTempPath(), "voiceui-export.mp4");

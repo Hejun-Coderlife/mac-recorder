@@ -37,6 +37,18 @@ jobs:
           Expand-Archive whisper.zip -DestinationPath whisper
           $wcli = Get-ChildItem whisper -Recurse -Filter whisper-cli.exe | Select-Object -First 1
           if (-not $wcli) { throw "whisper-cli.exe not in the zip" }
+          # whisper-cli 按系统代码页收命令行参数，中文提示词会变成 ??：给它换一份 activeCodePage=UTF-8 的清单（Win10 1903 起生效）
+          $mt = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter mt.exe | Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $mt) { throw "mt.exe not found" }
+          @'
+          <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+          <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+            <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3"><security><requestedPrivileges><requestedExecutionLevel level="asInvoker" uiAccess="false"/></requestedPrivileges></security></trustInfo>
+            <application xmlns="urn:schemas-microsoft-com:asm.v3"><windowsSettings><activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage></windowsSettings></application>
+          </assembly>
+          '@ | Set-Content whisper-utf8.manifest -Encoding utf8
+          & $mt.FullName -nologo -manifest whisper-utf8.manifest "-outputresource:$($wcli.FullName);#1"
+          if ($LASTEXITCODE -ne 0) { throw "mt.exe failed" }
           Get-ChildItem $wcli.DirectoryName | Format-Table Name, Length
           # 录制引擎 + VC++ 运行库（ScreenRecorderLib 是 C++/CLI）+ ffmpeg 和它的许可证，各压成 .gz（7-Zip 最高压缩）嵌进 exe
           $files = @{
@@ -51,6 +63,8 @@ jobs:
           # whisper-cli.exe 和它旁边的 dll（whisper.dll、ggml*.dll…）+ 许可证
           $files["whisper-cli.exe"] = $wcli.FullName
           foreach ($d in Get-ChildItem "$($wcli.DirectoryName)/*.dll") { $files[$d.Name] = $d.FullName }
+          # whisper 的 CPU 版用 OpenMP（vcomp140.dll）：用户电脑不一定装了 VC++ 运行库，也随包带上
+          if (Test-Path "C:\Windows\System32\vcomp140.dll") { $files["vcomp140.dll"] = "C:\Windows\System32\vcomp140.dll" }
           $files["whisper.cpp-LICENSE.txt"] = "windows/licenses/whisper.cpp-LICENSE.txt"
           # Studio 显卡合成（Vortice D3D11）和它依赖的托管 dll，也嵌进去
           foreach ($d in Get-ChildItem "$out/*.dll") { if ($d.Name -ne "ScreenRecorderLib.dll") { $files[$d.Name] = $d.FullName } }
