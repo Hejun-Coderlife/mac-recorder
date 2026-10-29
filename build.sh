@@ -7,7 +7,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -parse-as-library -swift-version 5 -target arm64-apple-macos15.0 \
   -framework ScreenCaptureKit -framework AVFoundation -framework Carbon -framework CoreImage -framework VideoToolbox -framework Metal \
-  Recorder.swift Studio.swift -o "$APP/Contents/MacOS/Recorder"
+  Recorder.swift Studio.swift Updater.swift -o "$APP/Contents/MacOS/Recorder"
 cp AppIcon.icns "$APP/Contents/Resources/"   # 图标原稿是 tools/icon.svg（1024 画布）
 # App 名字和系统菜单（退出、窗口…）跟随系统语言：中文叫「录屏」，其他语言叫 Screen Recorder
 mkdir -p "$APP/Contents/Resources/zh-Hans.lproj" "$APP/Contents/Resources/en.lproj"
@@ -26,8 +26,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleExecutable</key><string>Recorder</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>1.2</string>
+  <key>CFBundleVersion</key><string>3</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSMicrophoneUsageDescription</key><string>Records your voice along with the screen (only when turned on)</string>

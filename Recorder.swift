@@ -658,6 +658,7 @@ final class RegionView: NSView {
 
 struct ContentView: View {
     @ObservedObject var rec: Recorder
+    @ObservedObject var updater = Updater.shared
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -712,10 +713,32 @@ struct ContentView: View {
                 Spacer()
                 Button(L("打开文件夹", "Open Folder")) { NSWorkspace.shared.open(Recorder.folder) }
             }
+            if !rec.recording && !rec.busy { UpdateBar(updater: updater) }
         }
         .padding(18)
         .frame(minWidth: 560, minHeight: 440)
         .task { await rec.refresh() }
+    }
+}
+
+// 有新版时窗口底部的一行：「有新版本 v1.2 · 更新」；手动检查的结果也显示在这里
+struct UpdateBar: View {
+    @ObservedObject var updater: Updater
+    var body: some View {
+        switch updater.state {
+        case .idle: EmptyView()
+        case .available(let v):
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.down.circle.fill").foregroundStyle(Color.accentColor)
+                Text(L("有新版本 v\(v)（现在是 v\(updater.current)）", "Version \(v) is available (you have \(updater.current))"))
+                Spacer()
+                Button(L("更新说明", "What's New")) { NSWorkspace.shared.open(updater.releasePage) }
+                Button(L("更新", "Update")) { Task { await updater.install() } }.buttonStyle(.borderedProminent)
+            }.font(.callout)
+        case .working(let t): HStack(spacing: 8) { ProgressView().controlSize(.small); Text(t).font(.callout).foregroundStyle(.secondary) }
+        case .upToDate: Text(L("已是最新版本 v\(updater.current)", "You're up to date (\(updater.current))")).font(.callout).foregroundStyle(.secondary)
+        case .failed(let t): Text(t).font(.callout).foregroundStyle(.red).lineLimit(2)
+        }
     }
 }
 
@@ -728,7 +751,8 @@ struct RecorderApp: App {
             ContentView(rec: rec)
                 .onAppear {
                     HotKey.action = { [weak rec] in rec?.toggle() }
-                    if Studio.selfTest() { return }
+                    if Studio.selfTest() || Updater.selfTest() { return }
+                    if ProcessInfo.processInfo.environment["AUTOTEST"] == nil { Updater.shared.checkOnLaunch() }
                     // 自测：MIXTEST=视频路径 → 把这个文件的两条音轨合成一条（会改动文件，先复制一份再测），然后退出
                     if let path = ProcessInfo.processInfo.environment["MIXTEST"] {
                         Task { @MainActor in
@@ -775,5 +799,10 @@ struct RecorderApp: App {
                 }
         }
         .windowResizability(.contentSize)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button(L("检查更新…", "Check for Updates…")) { Task { await Updater.shared.check(manual: true) } }
+            }
+        }
     }
 }
