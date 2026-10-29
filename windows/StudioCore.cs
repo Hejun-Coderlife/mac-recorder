@@ -1,7 +1,8 @@
 // Studio 效果（仿 Screen Studio）的合成部分：照 Mac 版 Studio.swift 移植，只用纯 C#（不碰 WinForms / GDI+），
 // 所以也能在 Mac 上用 .NET 8 跑（tools/StudioHarness）对着真素材调。
 // 和 Mac 版的区别：背景是纯白色（Mac 版透明）；出 H.264 mp4；读写视频交给同目录的 ffmpeg.exe（管道传 BGRA 原始帧）；
-// 每帧合成自己用多线程逐像素算（双线性取样），不走显卡。
+// 合成默认走显卡（Windows 程序里的 StudioGpu.cs，D3D11），没有显卡时用这里的多线程逐像素算（双线性取样）；
+// 编码优先用显卡编码器（N 卡 / Intel / AMD / Windows 自带），都不行用 libx264。
 // 轨迹文件 track.json 格式和 Mac 版一样，Mac 录的素材也能拿来生成。
 using System;
 using System.Collections.Concurrent;
@@ -459,13 +460,30 @@ namespace ScreenRecorder
         }
     }
 
-    // 逐帧合成：白底 → 阴影 → 圆角画面 → 点击波纹 → 鼠标，整幅按镜头推拉（都在 y 朝下的坐标里算）
-    sealed class Compositor
+    // 合成器：CPU 版（Compositor）在这个文件；显卡版在 Windows 程序的 StudioGpu.cs（Studio.GpuFactory 指过去）
+    interface IComposer : IDisposable
     {
+        string Name { get; }                 // 写进日志：「CPU」/「显卡 NVIDIA …」
+        bool Gpu { get; }
+        bool Nv12In { get; }                 // 要 NV12 原画面（否则 BGRA）
+        bool Nv12Out { get; }                // 出 NV12 画布（否则 BGRA）
+        void Compose(byte[] src, FramePlan f, List<Compositor.Overlay> overlays, byte[] dst);
+    }
+
+    // 逐帧合成：白底 → 阴影 → 圆角画面 → 点击波纹 → 鼠标，整幅按镜头推拉（都在 y 朝下的坐标里算）
+    sealed class Compositor : IComposer
+    {
+        public string Name => "CPU";
+        public bool Gpu => false;
+        public bool Nv12In => false;
+        public bool Nv12Out => false;
+        public void Dispose() { }
+        public byte[] Background => bg;      // 白底 + 阴影（显卡版直接拿去当贴图，两边一模一样）
+
         readonly StudioLayout L;
         readonly int W, H, CW, CH;
         readonly byte[] bg;                  // 白底 + 卡片阴影，每帧一样
-        readonly double cardL, cardT, cardW, cardH, ccx, ccy, r;
+        public readonly double cardL, cardT, cardW, cardH, ccx, ccy, r;
         readonly int[] ui; readonly float[] fu, qxs; readonly int[] bxs;   // 每列预算好的取样位置
 
         public Compositor(StudioLayout lay)
@@ -611,6 +629,18 @@ namespace ScreenRecorder
     // ---- 导出：ffmpeg 解码 → 合成 → ffmpeg 编码 ----
     sealed class VideoInfo { public int Width, Height; public double Duration; public bool HasAudio; public string Matrix = "bt709"; }
 
+    // 一次生成的用时（写进素材文件夹的 render.log、状态栏显示「用时 N 秒（显卡）」）
+    sealed class RenderStats
+    {
+        public string Composer = "CPU", Encoder = "libx264";
+        public bool Gpu, HwDecode;
+        public int Frames, Width, Height;
+        public double Duration, TotalSeconds, RenderSeconds, ProbeSeconds, WaitDecode, Compose, WaitEncode, PipeRead, PipeWrite;
+        public override string ToString() => string.Format(CultureInfo.InvariantCulture,
+            "compose={0} encoder={1} hwdecode={2} canvas={3}x{4} frames={5} duration={6:0.00}s total={7:0.00}s render={8:0.00}s ({9:0.00}x realtime) probe={10:0.00}s wait-decode={11:0.00}s compose-time={12:0.00}s wait-encode={13:0.00}s pipe-read={14:0.00}s pipe-write={15:0.00}s",
+            Composer, Encoder, HwDecode, Width, Height, Frames, Duration, TotalSeconds, RenderSeconds, Duration > 0 ? TotalSeconds / Duration : 0, ProbeSeconds, WaitDecode, Compose, WaitEncode, PipeRead, PipeWrite);
+    }
+
     static class Studio
     {
         // 没嵌运行库时：ffmpeg 在旁边的「运行库」文件夹或和 exe 放一起
@@ -648,8 +678,15 @@ namespace ScreenRecorder
         }
 
         // dir 里有 raw.mp4、track.json、cursor-N.png；loadCursor 读指针图（null = 一律画矢量箭头）
-        public static void Render(string dir, string outPath, StudioStyle st, Action<double> progress, Func<string, CursorShape, double, Sprite> loadCursor = null, Action<string> log = null)
+        // 显卡合成：Windows 程序启动时设好（StudioGpu.cs）；没设（Mac 上的测试工具）或建不起来就用 CPU
+        public static Func<StudioLayout, Compositor, VideoInfo, IComposer> GpuFactory;
+
+        // dir 里有 raw.mp4、track.json、cursor-N.png；loadCursor 读指针图（null = 一律画矢量箭头）
+        // 环境变量（自测用）：STUDIO_COMPOSE=cpu|gpu（gpu = 必须用显卡，失败就报错）；STUDIO_ENCODER=libx264|h264_nvenc|…；STUDIO_HWDEC=0
+        public static RenderStats Render(string dir, string outPath, StudioStyle st, Action<double> progress, Func<string, CursorShape, double, Sprite> loadCursor = null, Action<string> log = null)
         {
+            var total = Stopwatch.StartNew();
+            var stats = new RenderStats();
             string raw = Path.Combine(dir, "raw.mp4");
             var info = Probe(raw);
             var track = Track.FromJson(File.ReadAllText(Path.Combine(dir, "track.json")));
@@ -664,7 +701,7 @@ namespace ScreenRecorder
             var lay = new StudioLayout(track, st);
             int n = Math.Max(1, (int)(info.Duration * st.Fps));
             var plan = StudioPlan.Make(track, lay, st, n, info.Duration);
-            var comp = new Compositor(lay);
+            var cpu = new Compositor(lay);
             var arrow = Sprites.Arrow(); var ring = Sprites.Ring();
             var art = new Dictionary<int, Sprite>();
             for (int i = 0; i < track.Cursors.Count; i++)
@@ -676,24 +713,52 @@ namespace ScreenRecorder
             int W = info.Width, H = info.Height, CW = (int)lay.cw, CH = (int)lay.ch;
             log?.Invoke($"source {W}x{H} {info.Duration:0.00}s audio={info.HasAudio} matrix={info.Matrix} → canvas {CW}x{CH} frames {n} clicks {track.Clicks.Count} keys {track.Keys.Count}");
 
+            // 合成用显卡还是 CPU
+            string want = (Environment.GetEnvironmentVariable("STUDIO_COMPOSE") ?? "").ToLowerInvariant();
+            IComposer comp = cpu;
+            if (want != "cpu" && GpuFactory != null)
+            {
+                try { comp = GpuFactory(lay, cpu, info) ?? cpu; }
+                catch (Exception e) { if (want == "gpu") throw new Exception("GPU compositor failed: " + e.Message, e); log?.Invoke("gpu compositor unavailable: " + e.Message); }
+            }
+            else if (want == "gpu") throw new Exception("GPU compositor not available");
+            stats.Composer = comp.Name; stats.Gpu = comp.Gpu;
+
+            // 编码器：先挑能用的显卡编码器（N 卡 / Intel / AMD / Windows 自带），都不行用 libx264
+            var sw0 = Stopwatch.StartNew();
+            string encoder = PickEncoder(log);
+            bool hwdec = Environment.GetEnvironmentVariable("STUDIO_HWDEC") != "0" && HwDecodeWorks(raw);
+            stats.ProbeSeconds = sw0.Elapsed.TotalSeconds;
+            stats.Encoder = encoder; stats.HwDecode = hwdec;
+            log?.Invoke($"compose={comp.Name} encoder={encoder} hwdecode={hwdec} (probe {stats.ProbeSeconds:0.00}s)");
+
             string mat = info.Matrix;
-            var dec = Start($"-v error -i \"{raw}\" -an -sn -vf \"setpts=PTS-STARTPTS,fps={st.Fps},scale=in_color_matrix={mat}:in_range=tv:out_range=pc,format=bgra\" -f rawvideo -pix_fmt bgra pipe:1", false);
+            string hw = hwdec ? "-hwaccel auto " : "";
+            var dec = comp.Nv12In
+                ? Start($"-v error {hw}-i \"{raw}\" -an -sn -vf \"setpts=PTS-STARTPTS,fps={st.Fps}\" -f rawvideo -pix_fmt nv12 pipe:1", false)
+                : Start($"-v error {hw}-i \"{raw}\" -an -sn -vf \"setpts=PTS-STARTPTS,fps={st.Fps},scale=in_color_matrix={mat}:in_range=tv:out_range=pc,format=bgra\" -f rawvideo -pix_fmt bgra pipe:1", false);
             long rate = Math.Max(10_000_000, (long)(CW * (double)CH * st.Fps * st.BitsPerPixel));
             string audio = info.HasAudio ? $"-i \"{raw}\" -map 0:v -map 1:a:0 -c:a aac -b:a 192k" : "-map 0:v";
-            var enc = Start($"-v error -y -f rawvideo -pix_fmt bgra -s {CW}x{CH} -r {st.Fps} -i pipe:0 {audio} " +
-                            $"-vf \"scale=in_range=pc:out_range=tv:out_color_matrix=bt709,format=yuv420p\" -c:v libx264 -preset veryfast -b:v {rate} -maxrate {rate * 3 / 2} -bufsize {rate * 2} -g {st.Fps * 2} " +
+            bool x264 = encoder == "libx264";
+            string input = comp.Nv12Out
+                ? $"-f rawvideo -pix_fmt nv12 -s {CW}x{CH} -r {st.Fps} -color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709 -i pipe:0"
+                : $"-f rawvideo -pix_fmt bgra -s {CW}x{CH} -r {st.Fps} -i pipe:0";
+            string vf = comp.Nv12Out ? (x264 ? "-vf format=yuv420p " : "")
+                                     : $"-vf \"scale=in_range=pc:out_range=tv:out_color_matrix=bt709,format={(x264 ? "yuv420p" : "nv12")}\" ";
+            var enc = Start($"-v error -y {input} {audio} {vf}{EncoderArgs(encoder, rate, st.Fps, comp.Gpu)} " +
                             $"-colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv -movflags +faststart \"{outPath}\"", true);
             var decErr = new StringBuilder(); var encErr = new StringBuilder();
             dec.ErrorDataReceived += (s, e) => { if (e.Data != null) lock (decErr) decErr.AppendLine(e.Data); }; dec.BeginErrorReadLine();
             enc.ErrorDataReceived += (s, e) => { if (e.Data != null) lock (encErr) encErr.AppendLine(e.Data); }; enc.BeginErrorReadLine();
 
-            int frameBytes = W * H * 4, outBytes = CW * CH * 4;
+            int frameBytes = comp.Nv12In ? W * H * 3 / 2 : W * H * 4, outBytes = comp.Nv12Out ? CW * CH * 3 / 2 : CW * CH * 4;
             var srcFree = new BlockingCollection<byte[]>(); var srcFull = new BlockingCollection<byte[]>(4);
             var dstFree = new BlockingCollection<byte[]>(); var dstFull = new BlockingCollection<byte[]>(3);
             for (int i = 0; i < 5; i++) srcFree.Add(new byte[frameBytes]);
             for (int i = 0; i < 4; i++) dstFree.Add(new byte[outBytes]);
             Exception failure = null;
             var cts = new CancellationTokenSource();
+            var swRead = new Stopwatch(); var swWrite = new Stopwatch();
 
             // 读线程：解码出来的 60fps 原画面
             var reader = new Thread(() =>
@@ -705,7 +770,9 @@ namespace ScreenRecorder
                     {
                         var buf = srcFree.Take(cts.Token);
                         int got = 0;
+                        swRead.Start();
                         while (got < frameBytes) { int k = stream.Read(buf, got, frameBytes - got); if (k <= 0) break; got += k; }
+                        swRead.Stop();
                         if (got < frameBytes) { srcFree.Add(buf); break; }
                         srcFull.Add(buf, cts.Token);
                     }
@@ -720,7 +787,7 @@ namespace ScreenRecorder
                 try
                 {
                     var stream = enc.StandardInput.BaseStream;
-                    foreach (var buf in dstFull.GetConsumingEnumerable()) { stream.Write(buf, 0, outBytes); dstFree.Add(buf); }
+                    foreach (var buf in dstFull.GetConsumingEnumerable()) { swWrite.Start(); stream.Write(buf, 0, outBytes); swWrite.Stop(); dstFree.Add(buf); }
                     stream.Flush(); stream.Close();
                 }
                 catch (Exception e) { failure = failure ?? e; cts.Cancel(); }
@@ -731,13 +798,16 @@ namespace ScreenRecorder
             double ppp = track.PixelsPerPoint;
             byte[] cur = null;
             var sw = Stopwatch.StartNew();
+            var swIn = new Stopwatch(); var swComp = new Stopwatch(); var swOut = new Stopwatch();
             try
             {
                 for (int i = 0; i < n; i++)
                 {
                     if (failure != null) throw failure;
                     // 原画面不够就沿用最后一帧（录到最后画面没变化时，原始文件里最后一帧会早于结尾）
+                    swIn.Start();
                     if (srcFull.TryTake(out var next, Timeout.Infinite, cts.Token)) { if (cur != null) srcFree.Add(cur); cur = next; }
+                    swIn.Stop();
                     if (cur == null) throw new Exception("no frames decoded: " + decErr.ToString().Trim());
                     var f = plan[i];
                     double t = i / (double)st.Fps;
@@ -755,15 +825,15 @@ namespace ScreenRecorder
                         var sp = art.TryGetValue(f.shape, out var a) ? a : arrow;
                         ov.Add(new Compositor.Overlay { S = sp, X = f.mx, Y = H - f.my, K = ppp * st.CursorScale * f.press / sp.Ppp, Alpha = 1 });
                     }
-                    var dst = dstFree.Take(cts.Token);
-                    comp.Compose(cur, f, ov, dst);
-                    dstFull.Add(dst, cts.Token);
+                    swOut.Start(); var dst = dstFree.Take(cts.Token); swOut.Stop();
+                    swComp.Start(); comp.Compose(cur, f, ov, dst); swComp.Stop();
+                    swOut.Start(); dstFull.Add(dst, cts.Token); swOut.Stop();
                     if (i % 30 == 0) progress?.Invoke(i / (double)n);
                 }
                 dstFull.CompleteAdding();
-                writer.Join();
+                swOut.Start(); writer.Join(); swOut.Stop();
                 if (failure != null) throw failure;
-                enc.WaitForExit();
+                swOut.Start(); enc.WaitForExit(); swOut.Stop();
                 cts.Cancel();
                 try { if (!dec.HasExited) dec.Kill(); } catch { }
                 if (enc.ExitCode != 0) throw new Exception("encoder failed: " + encErr.ToString().Trim());
@@ -778,8 +848,79 @@ namespace ScreenRecorder
                 if (failure != null && !(failure is OperationCanceledException)) throw new Exception(failure.Message + " " + encErr.ToString().Trim(), failure);
                 throw;
             }
+            finally { if (comp != cpu) comp.Dispose(); }
+            stats.Frames = n; stats.Width = CW; stats.Height = CH; stats.Duration = info.Duration;
+            stats.RenderSeconds = sw.Elapsed.TotalSeconds; stats.TotalSeconds = total.Elapsed.TotalSeconds;
+            stats.WaitDecode = swIn.Elapsed.TotalSeconds; stats.Compose = swComp.Elapsed.TotalSeconds; stats.WaitEncode = swOut.Elapsed.TotalSeconds;
+            stats.PipeRead = swRead.Elapsed.TotalSeconds; stats.PipeWrite = swWrite.Elapsed.TotalSeconds;
+            log?.Invoke(stats.ToString());
             log?.Invoke($"rendered {n} frames in {sw.Elapsed.TotalSeconds:0.0}s ({n / sw.Elapsed.TotalSeconds:0.0} fps, {sw.Elapsed.TotalSeconds / info.Duration:0.00}× realtime)");
+            try { File.AppendAllText(Path.Combine(dir, "render.log"), DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") + stats + Environment.NewLine); } catch { }
             progress?.Invoke(1);
+            return stats;
+        }
+
+        // ---- 编码器 ----
+        static readonly string[] HwEncoders = { "h264_nvenc", "h264_qsv", "h264_amf", "h264_mf" };
+        static string pickedEncoder;
+
+        // 按顺序真编一小段，能编的第一个就用（同一次运行里记住结果）
+        public static string PickEncoder(Action<string> log = null)
+        {
+            var forced = Environment.GetEnvironmentVariable("STUDIO_ENCODER");
+            if (!string.IsNullOrEmpty(forced)) return forced;
+            if (pickedEncoder != null) return pickedEncoder;
+            foreach (var e in HwEncoders)
+            {
+                var sw = Stopwatch.StartNew();
+                bool ok = EncoderWorks(e);
+                log?.Invoke($"probe {e}: {(ok ? "ok" : "no")} ({sw.Elapsed.TotalSeconds:0.00}s)");
+                if (ok) return pickedEncoder = e;
+            }
+            return pickedEncoder = "libx264";
+        }
+
+        public static bool EncoderWorks(string encoder)
+        {
+            try
+            {
+                return RunQuiet($"-v error -f lavfi -i color=c=gray:s=640x360:r=60:d=0.5 -vf format=nv12 {EncoderArgs(encoder, 2_000_000, 60, true)} -f null -", 20000);
+            }
+            catch { return false; }
+        }
+
+        // 各编码器的参数：码率和原来一样（每像素每帧 0.12 比特，最少 10 Mbps），速度优先、字要清楚
+        public static string EncoderArgs(string encoder, long rate, int fps, bool cpuIsFree)
+        {
+            string rc = $"-b:v {rate} -maxrate {rate * 3 / 2} -bufsize {rate * 2} -g {fps * 2}";
+            switch (encoder)
+            {
+                case "h264_nvenc": return $"-c:v h264_nvenc -preset p4 -rc vbr {rc}";
+                case "h264_qsv": return $"-c:v h264_qsv -preset faster {rc}";
+                case "h264_amf": return $"-c:v h264_amf -usage transcoding -quality balanced -rc vbr_peak {rc}";
+                case "h264_mf": return $"-c:v h264_mf -hw_encoding 1 -rate_control pc_vbr -b:v {rate} -g {fps * 2}";
+                // CPU 编码：合成在显卡上时 CPU 空着，用 veryfast；合成也在 CPU 上就用 superfast，别和合成抢
+                default: return $"-c:v libx264 -preset {(cpuIsFree ? "veryfast" : "superfast")} {rc}";
+            }
+        }
+
+        // 显卡解码能不能用：解前几帧试试（失败 ffmpeg 会退回软解，这里只防它直接报错退出）
+        static bool HwDecodeWorks(string raw)
+        {
+            try { return RunQuiet($"-v error -hwaccel auto -i \"{raw}\" -an -frames:v 5 -f null -", 15000); }
+            catch { return false; }
+        }
+
+        static bool RunQuiet(string args, int timeoutMs)
+        {
+            var psi = new ProcessStartInfo(FfmpegPath, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
+            using (var p = Process.Start(psi))
+            {
+                p.ErrorDataReceived += (s, e) => { }; p.BeginErrorReadLine();
+                p.OutputDataReceived += (s, e) => { }; p.BeginOutputReadLine();
+                if (!p.WaitForExit(timeoutMs)) { try { p.Kill(); } catch { } return false; }
+                return p.ExitCode == 0;
+            }
         }
 
         static Process Start(string args, bool stdin)

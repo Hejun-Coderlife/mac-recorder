@@ -407,9 +407,10 @@ namespace ScreenRecorder
             System.Threading.Tasks.Task.Run(() =>
             {
                 string err = null;
+                RenderStats stats = null;
                 try
                 {
-                    proj.Finish(firstFrameAt, p => BeginInvoke((Action)(() => Say(L($"正在生成 Studio 版… {(int)(p * 100)}%", $"Rendering Studio version… {(int)(p * 100)}%")))));
+                    stats = proj.Finish(firstFrameAt, p => BeginInvoke((Action)(() => Say(L($"正在生成 Studio 版… {(int)(p * 100)}%", $"Rendering Studio version… {(int)(p * 100)}%")))));
                 }
                 catch (Exception e) { err = e.Message; }
                 BeginInvoke((Action)(() =>
@@ -421,6 +422,12 @@ namespace ScreenRecorder
                         return;
                     }
                     Saved(proj.Out);
+                    // 生成用了多久、用的显卡还是 CPU（详细的在素材文件夹的 render.log）
+                    if (stats != null)
+                    {
+                        string how = stats.Gpu || stats.Encoder != "libx264" ? L("显卡", "GPU") : "CPU";
+                        Say(L($"Studio 版已存到桌面，生成用时 {stats.TotalSeconds:0} 秒（{how}）：", $"Studio version saved to Desktop, rendered in {stats.TotalSeconds:0} s ({how}): ") + Path.GetFileName(proj.Out));
+                    }
                 }));
             });
         }

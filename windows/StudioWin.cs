@@ -267,12 +267,12 @@ namespace ScreenRecorder
         }
 
         // 录完：存轨迹（时间对齐到原始画面第一帧），生成成片
-        public void Finish(double firstFrameAt, Action<double> progress, Action<string> log = null)
+        public RenderStats Finish(double firstFrameAt, Action<double> progress, Action<string> log = null)
         {
             Tracker.Stop();
             var info = Studio.Probe(Raw);
             Tracker.Save(Dir, firstFrameAt, info.Width, info.Height);
-            Studio.Render(Dir, Out, new StudioStyle(), progress, CursorTracker.LoadCursor, log);
+            return Studio.Render(Dir, Out, new StudioStyle(), progress, CursorTracker.LoadCursor, log);
         }
 
         public static bool Available => File.Exists(Studio.FfmpegPath);

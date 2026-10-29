@@ -38,6 +38,8 @@ jobs:
             "ffmpeg.exe" = "$ffdir/bin/ffmpeg.exe"
             "ffmpeg-LICENSE.txt" = "$ffdir/LICENSE.txt"
           }
+          # Studio 显卡合成（Vortice D3D11）和它依赖的托管 dll，也嵌进去
+          foreach ($d in Get-ChildItem "$out/*.dll") { if ($d.Name -ne "ScreenRecorderLib.dll") { $files[$d.Name] = $d.FullName } }
           New-Item -ItemType Directory -Force windows/embed | Out-Null
           New-Item -ItemType Directory -Force stage | Out-Null
           foreach ($k in $files.Keys) {
@@ -233,7 +235,10 @@ jobs:
           $out = Join-Path $dir "studio.mp4"
           foreach ($k in "AUTOREGION", "AUTOWINDOW") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
           $env:AUTOTEST = "6"; $env:AUTOOUT = $out; $env:AUTOSTUDIO = "1"; $env:AUTOINPUT = "1"; $env:AUTOAUDIO = "1"
+          # 显卡合成：这台机器没有真显卡，强制用软件渲染（WARP）走一遍显卡那条路
+          $env:STUDIO_COMPOSE = "gpu"
           $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          Remove-Item env:STUDIO_COMPOSE
           $res = Get-Content "$env:TEMP\recorder_test.txt" -Raw
           Write-Host "exit=$($p.ExitCode)`n$res"
           if ($p.ExitCode -ne 0 -or -not $res.StartsWith("OK")) { throw "studio recording failed" }
@@ -262,6 +267,46 @@ jobs:
           Write-Host "border white: 0.3s=$($f0.white)  2.6s=$($f1.white)"
           if ($f0.white -lt 0.95) { throw "white background missing at 0.3s ($($f0.white))" }
           if ($f1.white -gt 0.5) { throw "not zoomed in at 2.6s ($($f1.white))" }
+          if ($res -notmatch "compose=GPU") { throw "GPU compositor was not used" }
+
+      - name: Studio GPU vs CPU compositor give the same picture; encoder fallback
+        run: |
+          $proj = Join-Path $env:RUNNER_TEMP "studio/project"
+          foreach ($k in "AUTOTEST", "AUTOSTUDIO", "AUTOINPUT", "AUTOAUDIO", "AUTOOUT") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          function Render($compose, $out) {
+            $env:STUDIO = $proj; $env:STUDIO_OUT = $out; $env:STUDIO_COMPOSE = $compose; $env:STUDIO_ENCODER = "libx264"
+            $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+            $res = Get-Content "$env:TEMP\recorder_test.txt" -Raw
+            Write-Host "[$compose] exit=$($p.ExitCode)`n$res"
+            if ($p.ExitCode -ne 0) { throw "$compose render failed" }
+            return $res
+          }
+          $g = Render "gpu" (Join-Path $env:RUNNER_TEMP "studio/gpu.mp4")
+          $c = Render "cpu" (Join-Path $env:RUNNER_TEMP "studio/cpu.mp4")
+          if ($g -notmatch "compose=GPU") { throw "gpu run did not use the GPU compositor" }
+          if ($c -notmatch "compose=CPU") { throw "cpu run did not use the CPU compositor" }
+          foreach ($t in "0.3", "1.6", "2.6", "4.4") {
+            ffmpeg -v error -y -ss $t -i (Join-Path $env:RUNNER_TEMP "studio/gpu.mp4") -frames:v 1 (Join-Path $env:RUNNER_TEMP "studio/gpu-$t.png")
+            ffmpeg -v error -y -ss $t -i (Join-Path $env:RUNNER_TEMP "studio/cpu.mp4") -frames:v 1 (Join-Path $env:RUNNER_TEMP "studio/cpu-$t.png")
+          }
+          # 整段逐帧比：PSNR（同一个编码器，只差合成方式）
+          $psnr = ffmpeg -hide_banner -i (Join-Path $env:RUNNER_TEMP "studio/gpu.mp4") -i (Join-Path $env:RUNNER_TEMP "studio/cpu.mp4") -lavfi "[0:v][1:v]psnr" -f null - 2>&1 | Select-String "PSNR"
+          Write-Host $psnr
+          $avg = [double](($psnr -replace '.*average:([\d.inf]+).*', '$1') -replace 'inf', '99')
+          Write-Host "PSNR average = $avg dB"
+          if ($avg -lt 38) { throw "GPU and CPU pictures differ too much ($avg dB)" }
+          # 自动挑编码器：这台机器没有显卡编码器，应该挨个试过然后用 libx264；显卡合成在这里没有真显卡，自动模式应该回到 CPU
+          Remove-Item env:STUDIO_ENCODER; Remove-Item env:STUDIO_COMPOSE
+          $env:STUDIO_OUT = Join-Path $env:RUNNER_TEMP "studio/auto.mp4"
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          $res = Get-Content "$env:TEMP\recorder_test.txt" -Raw
+          Write-Host "[auto] exit=$($p.ExitCode)`n$res"
+          if ($p.ExitCode -ne 0) { throw "auto render failed" }
+          foreach ($e in "h264_nvenc", "h264_qsv", "h264_amf", "h264_mf") { if ($res -notmatch "probe ${e}: ") { throw "$e was not probed" } }
+          if ($res -notmatch "encoder=libx264") { throw "did not fall back to libx264" }
+          if ($res -notmatch "compose=CPU") { throw "auto mode should fall back to CPU compositing without a real GPU" }
+          if (-not (Test-Path (Join-Path $proj "render.log"))) { throw "render.log missing" }
+          Get-Content (Join-Path $proj "render.log") | Write-Host
 
       - name: Studio render speed (synthetic 1920x1080, 20 s)
         run: |
@@ -269,11 +314,16 @@ jobs:
           ffmpeg -v error -y -f lavfi -i "testsrc2=s=1920x1080:r=30:d=20" -f lavfi -i "sine=f=440:d=20" -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac (Join-Path $dir "raw.mp4")
           foreach ($k in "AUTOTEST", "AUTOSTUDIO") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
           $env:STUDIO = $dir; $env:STUDIO_OUT = (Join-Path $dir "studio.mp4"); $env:STUDIO_FAKETRACK = "1"
-          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
-          $res = Get-Content "$env:TEMP\recorder_test.txt" -Raw
-          Write-Host "exit=$($p.ExitCode)`n$res"
           Write-Host "cpu: $((Get-CimInstance Win32_Processor).Name) x $([Environment]::ProcessorCount)"
-          if ($p.ExitCode -ne 0) { throw "render failed" }
+          # 两种合成各跑一遍：CPU（这台机器没有真显卡时的实际情况）、显卡路径用软件渲染 WARP（只看正确性，速度不代表真显卡）
+          foreach ($mode in "cpu", "gpu") {
+            $env:STUDIO_COMPOSE = $mode
+            $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+            $res = Get-Content "$env:TEMP\recorder_test.txt" -Raw
+            Write-Host "[$mode] exit=$($p.ExitCode)`n$res"
+            if ($p.ExitCode -ne 0) { throw "$mode render failed" }
+          }
+          Remove-Item env:STUDIO_COMPOSE
           ffmpeg -v error -y -ss 8 -i (Join-Path $dir "studio.mp4") -frames:v 1 (Join-Path $env:RUNNER_TEMP "studio/speed-8s.png")
 
       - uses: actions/upload-artifact@v4

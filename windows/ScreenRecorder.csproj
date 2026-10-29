@@ -15,12 +15,15 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Product>录屏 Screen Recorder</Product>
     <AssemblyTitle>录屏 Screen Recorder</AssemblyTitle>
-    <Version>1.3.0</Version>
+    <Version>1.4.0</Version>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="ScreenRecorderLib" Version="6.6.0" />
+    <!-- Studio 合成用显卡（D3D11），见 StudioGpu.cs；这些 dll 和录制引擎一样嵌进 exe -->
+    <PackageReference Include="Vortice.Direct3D11" Version="2.4.2" />
+    <PackageReference Include="Vortice.D3DCompiler" Version="2.4.2" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
     <EmbeddedResource Include="app.ico" LogicalName="app.ico" />
     <!-- 单个 exe：CI 先编一次拿到 ScreenRecorderLib.dll，把它、VC++ dll、ffmpeg.exe 压成 embed\*.gz 再编一次嵌进来（见 Runtime.cs） -->

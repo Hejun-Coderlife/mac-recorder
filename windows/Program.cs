@@ -85,6 +85,8 @@ namespace ScreenRecorder
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+            // Studio 合成用显卡（StudioGpu.cs）；建不起来自动回到 CPU。STUDIO_COMPOSE=gpu 时没有真显卡也用软件渲染（自测）
+            Studio.GpuFactory = (lay, cpu, info) => GpuComposer.TryCreate(lay, cpu, info, Environment.GetEnvironmentVariable("STUDIO_COMPOSE") == "gpu");
             if (Environment.GetEnvironmentVariable("STUDIO") != null) return SelfTest.RenderOnly();
             if (Environment.GetEnvironmentVariable("AUTOTEST") != null) return SelfTest.Run();
             if (Environment.GetEnvironmentVariable("UPDATE_TEST") != null) return Updater.SelfTest();
