@@ -28,7 +28,7 @@ namespace ScreenRecorder
 
         void InitW4()
         {
-            preview.OverlayDown = OverlayDown; preview.OverlayMove = OverlayMove; preview.OverlayUp = OverlayUp;
+            preview.OverlayDown = OverlayDown; preview.OverlayMove = (x, y) => { try { OverlayMove(x, y); } catch (Exception ex) { OverlayLog += "move error " + ex.GetType().Name + ": " + ex.Message + "; "; } }; preview.OverlayUp = OverlayUp;
             preview.OverlayDouble = OverlayDouble; preview.OverlayCursor = OverlayCursorAt; preview.Decor = DrawDecor;
         }
 
@@ -223,8 +223,10 @@ namespace ScreenRecorder
             ovMode = "create"; ovBase = (nx, ny, 0, 0);
         }
 
+        int ovMoves;
         public void OverlayMove(double vx, double vy)
         {
+            if (ovMoves++ < 3) OverlayLog += $"move v({vx:0.000},{vy:0.000}) mode={ovMode ?? "-"} dragging={IsDragging}; ";
             if (ovMode == null) return;
             var (nx, ny) = FromView(vx, vy);
             double dx = nx - downNx, dy = ny - downNy;
@@ -260,6 +262,7 @@ namespace ScreenRecorder
 
         public void OverlayUp()
         {
+            OverlayLog += $"up after {ovMoves} moves mode={ovMode ?? "-"}; "; ovMoves = 0;
             if (ovMode == "create")
             {
                 // 只点了一下（没拖）：给个默认大小

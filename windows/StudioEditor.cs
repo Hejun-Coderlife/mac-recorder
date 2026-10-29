@@ -913,9 +913,11 @@ namespace ScreenRecorder
             }
         }
 
+        public int MouseMoves;   // 自测诊断
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
+            MouseMoves++;
             if (draggingCam && imgRect.Width > 0) { MoveCamera?.Invoke((e.X - imgRect.X) / imgRect.Width, (e.Y - imgRect.Y) / imgRect.Height); return; }
             if (draggingOv && imgRect.Width > 0) { OverlayMove?.Invoke((e.X - imgRect.X) / imgRect.Width, (e.Y - imgRect.Y) / imgRect.Height); return; }
             var oc = !Picking && imgRect.Width > 0 && OverlayCursor != null ? OverlayCursor((e.X - imgRect.X) / imgRect.Width, (e.Y - imgRect.Y) / imgRect.Height) : null;

@@ -99,7 +99,7 @@ namespace ScreenRecorder
             var (n0x, n0y) = ed.FromView(0.30, 0.30); var (n1x, n1y) = ed.FromView(0.55, 0.50);
             Drag(PV(0.30, 0.30), PV(0.55, 0.50));
             var r = ed.Project.Redactions.FirstOrDefault();
-            Check("diag: overlay log", true, ed.OverlayLog);
+            Check("diag: overlay log", true, ed.OverlayLog + $" preview mouse moves {pv.MouseMoves}");
             Check("drag out a redaction on the preview", r != null && Math.Abs(r.X - n0x) < 0.02 && Math.Abs(r.Y - n0y) < 0.02 && Math.Abs(r.X + r.W - n1x) < 0.02 && Math.Abs(r.Y + r.H - n1y) < 0.02 && ed.SelectedRed == r.Id && ed.Tool == null,
                 r == null ? "none" : $"{r.X:0.000},{r.Y:0.000} {r.W:0.000}x{r.H:0.000} want {n0x:0.000},{n0y:0.000}-{n1x:0.000},{n1y:0.000}");
             Check("redaction starts at the playhead and lasts 3 s", r != null && Math.Abs(r.Start - 1.0) < 0.1 && Math.Abs(r.End - r.Start - 3) < 0.1, r == null ? "" : $"{r.Start:0.00}-{r.End:0.00}");
