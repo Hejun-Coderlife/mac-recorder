@@ -9,5 +9,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../StudioCore.cs" />
+    <Compile Include="../../StudioModel.cs" />
+    <Compile Include="../../StudioTests.cs" />
   </ItemGroup>
 </Project>

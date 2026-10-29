@@ -1,0 +1,762 @@
+// Studio 剪辑窗口（像 Screen Studio，照 Mac 版 StudioEditor.swift）：上面实时预览，中间一条播放栏，下面时间轴，右边样式面板。
+// 推近段、修剪、样式都存在素材夹的 project.json（格式同 Mac 版），改了自动存；「导出」出成片到桌面。
+// 预览用和导出同一套合成（StudioScene），只是按比例缩小（轨迹、像素密度一起缩，构图一样），CPU 算
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using static ScreenRecorder.App;
+
+namespace ScreenRecorder
+{
+    sealed class StudioEditor : Form
+    {
+        // ---- 数据 ----
+        public readonly string Dir, Raw;
+        public readonly VideoInfo Info;
+        public readonly Track Track;          // 原尺寸轨迹（推近段的自动规则、导出用）
+        public double Duration => Info.Duration;
+        public StudioProject Project;
+        public string Selected;               // 选中的推近段 id
+        public bool Picking;                  // 正在「在预览上点一下设固定位置」
+        public double Time;                   // 播放头（秒，素材时间）
+        public bool Playing;
+        public PresetStore Presets = PresetStore.Load();
+        public List<double> Events;           // 点击、打字的时刻（时间轴上的小点）
+        public readonly int Fps = 60;
+        readonly List<string> undo = new List<string>(), redo = new List<string>();
+        StudioProject dragBase;
+        public bool IsDragging => dragBase != null;
+        public event Action Changed;          // 工程、选中、播放头变了：界面重画
+        public void Touch() => Changed?.Invoke();
+
+        // ---- 预览 ----
+        readonly int pw, ph;                  // 预览用的原画面尺寸（缩小后）
+        readonly Track ptrack;
+        StudioScene scene; FramePlan[] plan;
+        readonly object sceneGate = new object();
+        byte[] srcFrame; double srcTime = -1;  // 最近解码到的原画面
+        readonly Scrubber scrub = new Scrubber();
+        Bitmap shown;
+        readonly StudioStyle st = new StudioStyle();
+
+        // ---- 界面 ----
+        readonly PreviewBox preview = new PreviewBox();
+        public readonly TimelineView Timeline;
+        readonly StylePanel style;
+        readonly Panel inspector = new Panel();
+        readonly Label title = new Label(), exportStatus = new Label(), timeLabel = new Label();
+        readonly Button exportBtn = new Button(), openBtn = new Button(), showBtn = new Button(), playBtn = new Button();
+        readonly Button zoomBtn = new Button(), autoBtn = new Button(), undoBtn = new Button(), redoBtn = new Button(), tlMinus = new Button(), tlPlus = new Button();
+        readonly TrackBar tlScale = new TrackBar();
+        readonly ProgressBar exportBar = new ProgressBar();
+        readonly ToolTip tips = new ToolTip { InitialDelay = 400 };
+        readonly System.Windows.Forms.Timer saveTimer = new System.Windows.Forms.Timer { Interval = 500 };
+        string exported;
+        bool exporting;
+        public string OutPath;
+
+        // 打开一个素材夹（Studio 录完、或主窗口「打开 Studio 素材…」）
+        public static StudioEditor Open(string dir, string outPath = null)
+        {
+            foreach (Form f in Application.OpenForms)
+                if (f is StudioEditor e && string.Equals(e.Dir, dir, StringComparison.OrdinalIgnoreCase)) { e.Activate(); return e; }
+            var ed = new StudioEditor(dir, outPath);
+            ed.Show();
+            return ed;
+        }
+
+        public StudioEditor(string dir, string outPath = null)
+        {
+            Dir = dir; Raw = Path.Combine(dir, "raw.mp4");
+            OutPath = outPath ?? Path.Combine(Desktop, Path.GetFileName(dir.TrimEnd('\\', '/')) + ".mp4");
+            Info = Studio.Probe(Raw);
+            Track = Studio.LoadTrack(dir, Info);
+            Project = StudioProject.Load(dir, Track, Duration, st.Zoom, Presets.DefaultLook);
+            // 打开时按最新规则重排了推近段：原来的留进撤销栈（⌘Z 能拿回来）
+            if (File.Exists(StudioProject.PathIn(dir)))
+            {
+                try
+                {
+                    var old = StudioProject.FromJson(File.ReadAllText(StudioProject.PathIn(dir)));
+                    if (old.Segments.Count > 0 && !old.SameSegments(Project)) { old.TrimStart = Project.TrimStart; old.TrimEnd = Project.TrimEnd; old.Look = Project.Look.Clone(); undo.Add(old.ToJson()); }
+                }
+                catch { }
+            }
+            Events = StudioPlan.Events(Track, Duration).Select(e => e.t).ToList();
+            // 预览尺寸：画布最长不超过 1280×800（够看清，CPU 合成也跟得上）
+            var full = new StudioLayout(Track, Project.Look);
+            double k = Math.Min(1, Math.Min(1280 / full.cw, 800 / full.ch));
+            pw = Math.Max(2, (int)Math.Round(Info.Width * k / 2) * 2); ph = Math.Max(2, (int)Math.Round(Info.Height * k / 2) * 2);
+            ptrack = Track.Scaled(pw, ph);
+            Time = Project.TrimStart;
+
+            Text = Name + " · Studio — " + Path.GetFileName(dir.TrimEnd('\\', '/'));
+            Icon = App.Icon;
+            Font = SystemFonts.MessageBoxFont;
+            AutoScaleMode = AutoScaleMode.Dpi; AutoScaleDimensions = new SizeF(96, 96);
+            ClientSize = new Size(1280, 800); MinimumSize = new Size(1000, 640);
+            StartPosition = FormStartPosition.CenterScreen;
+            KeyPreview = true;
+            BackColor = Theme.Window;
+
+            Timeline = new TimelineView(this);
+            style = new StylePanel(this);
+            BuildLayout();
+            Rebuild();
+            saveTimer.Tick += (s, e) => { saveTimer.Stop(); SaveNow(); };
+            Changed += SyncUi;
+            SyncUi();
+            Shown += (s, e) => { RequestFrame(Time); StartAudioPrep(); };
+        }
+
+        // ---- 布局 ----
+        void BuildLayout()
+        {
+            SuspendLayout();
+            // 右边样式面板
+            style.Dock = DockStyle.Right; style.Width = 300;
+            var sep = new Panel { Dock = DockStyle.Right, Width = 1, BackColor = Theme.Line };
+            // 顶部：文件名 + 右上「导出」
+            var top = new Panel { Dock = DockStyle.Top, Height = 48, Padding = new Padding(14, 8, 14, 8), BackColor = Theme.Window };
+            title.Text = Path.GetFileName(Dir.TrimEnd('\\', '/')); title.AutoSize = false; title.Dock = DockStyle.Fill; title.TextAlign = ContentAlignment.MiddleLeft; title.ForeColor = Theme.Secondary;
+            var right = new FlowLayoutPanel { Dock = DockStyle.Right, AutoSize = true, WrapContents = false, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(0), Margin = new Padding(0) };
+            exportBar.Width = 160; exportBar.Height = 14; exportBar.Margin = new Padding(0, 11, 8, 0); exportBar.Visible = false;
+            exportStatus.AutoSize = true; exportStatus.Margin = new Padding(0, 9, 8, 0); exportStatus.ForeColor = Theme.Secondary;
+            Flat(openBtn, L("打开", "Open"), (s, e) => { if (exported != null) Shell(exported); }); openBtn.Visible = false;
+            Flat(showBtn, L("在资源管理器中显示", "Show in Explorer"), (s, e) => { if (exported != null) try { Process.Start("explorer.exe", $"/select,\"{exported}\""); } catch { } }); showBtn.Visible = false;
+            Primary(exportBtn, L("导出", "Export"), (s, e) => Export());
+            right.Controls.AddRange(new Control[] { exportBar, exportStatus, openBtn, showBtn, exportBtn });
+            top.Controls.Add(title); top.Controls.Add(right);
+            var topLine = new Panel { Dock = DockStyle.Top, Height = 1, BackColor = Theme.Line };
+
+            // 左边：预览 / 播放栏 / 属性条 / 时间轴
+            var left = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Window };
+            var tlArea = new Panel { Dock = DockStyle.Bottom, Height = 176, Padding = new Padding(14, 8, 14, 10), BackColor = Theme.Window };
+            Timeline.Dock = DockStyle.Fill;
+            inspector.Dock = DockStyle.Top; inspector.Height = 34; inspector.Visible = false;
+            BuildInspector();
+            tlArea.Controls.Add(Timeline); tlArea.Controls.Add(inspector);
+            var barLine2 = new Panel { Dock = DockStyle.Bottom, Height = 1, BackColor = Theme.Line };
+            var bar = new Panel { Dock = DockStyle.Bottom, Height = 50, Padding = new Padding(14, 7, 14, 7), BackColor = Theme.Window };
+            BuildControlBar(bar);
+            var barLine = new Panel { Dock = DockStyle.Bottom, Height = 1, BackColor = Theme.Line };
+            preview.Dock = DockStyle.Fill; preview.Margin = new Padding(14);
+            var pv = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14), BackColor = Theme.Window };
+            pv.Controls.Add(preview);
+            preview.Pick = (x, y) => PickAt(x, y);
+            left.Controls.Add(pv); left.Controls.Add(barLine); left.Controls.Add(bar); left.Controls.Add(barLine2); left.Controls.Add(tlArea);
+
+            Controls.Add(left); Controls.Add(sep); Controls.Add(style); Controls.Add(topLine); Controls.Add(top);
+            ResumeLayout();
+        }
+
+        void BuildControlBar(Panel bar)
+        {
+            var leftTools = new FlowLayoutPanel { Dock = DockStyle.Left, AutoSize = true, WrapContents = false, Padding = new Padding(0), Margin = new Padding(0) };
+            Flat(zoomBtn, "⊕ " + L("推近", "Zoom"), (s, e) => AddSegment(Time));
+            tips.SetToolTip(zoomBtn, L("在播放头处新加一段推近（镜头放大凑近看）；也可以在时间轴空白处双击", "Add a zoom-in at the playhead; you can also double-click empty space on the timeline"));
+            Flat(autoBtn, "✦ " + L("重新自动生成", "Auto-Generate"), (s, e) => Regenerate());
+            tips.SetToolTip(autoBtn, L("按录制时的点击和打字重新排推近段（会替换现在的段，可以撤销 Ctrl+Z）", "Rebuild zooms from your clicks and typing (replaces the current zooms; undo with Ctrl+Z)"));
+            Flat(undoBtn, "↶", (s, e) => Undo()); tips.SetToolTip(undoBtn, L("撤销上一步（Ctrl+Z）", "Undo the last change (Ctrl+Z)"));
+            Flat(redoBtn, "↷", (s, e) => Redo()); tips.SetToolTip(redoBtn, L("重做刚撤销的那步（Ctrl+Y）", "Redo what you just undid (Ctrl+Y)"));
+            foreach (var b in new[] { undoBtn, redoBtn }) { b.Width = 34; b.Font = new Font(Font.FontFamily, Font.Size + 2); }
+            leftTools.Controls.AddRange(new Control[] { zoomBtn, autoBtn, undoBtn, redoBtn });
+
+            var rightTools = new FlowLayoutPanel { Dock = DockStyle.Right, AutoSize = true, WrapContents = false, Padding = new Padding(0), Margin = new Padding(0) };
+            Flat(tlMinus, "−", (s, e) => SetTimelineScale(Timeline.Scale / 1.5, null)); tlMinus.Width = 30;
+            tlScale.Minimum = 100; tlScale.Maximum = 800; tlScale.TickStyle = TickStyle.None; tlScale.Width = 100; tlScale.AutoSize = false; tlScale.Height = 30; tlScale.Margin = new Padding(0, 3, 0, 0);
+            tlScale.Scroll += (s, e) => SetTimelineScale(tlScale.Value / 100.0, null);
+            Flat(tlPlus, "+", (s, e) => SetTimelineScale(Timeline.Scale * 1.5, null)); tlPlus.Width = 30;
+            var tlTip = L("时间轴缩放（只改时间轴的显示，不影响成片）：也可以在时间轴上按住 Ctrl 滚动滚轮、或触控板双指捏合；放大后滚轮或双指左右滑翻看",
+                          "Timeline zoom (display only): hold Ctrl and scroll on the timeline, or pinch on a touchpad; when zoomed in, scroll or swipe sideways to move along");
+            foreach (Control c in new Control[] { tlMinus, tlScale, tlPlus }) tips.SetToolTip(c, tlTip);
+            rightTools.Controls.AddRange(new Control[] { tlMinus, tlScale, tlPlus });
+
+            // 正中：圆形播放键 + 时间（按整条居中）
+            var center = new Panel { Width = 290, Height = 36, BackColor = Theme.Window };
+            playBtn.FlatStyle = FlatStyle.Flat; playBtn.FlatAppearance.BorderSize = 0; playBtn.Size = new Size(36, 36); playBtn.Location = new Point(145 - 18, 0);
+            playBtn.BackColor = Theme.Window; playBtn.Paint += PaintPlay; playBtn.Click += (s, e) => TogglePlay(); playBtn.TabStop = false;
+            tips.SetToolTip(playBtn, L("播放 / 暂停（空格）", "Play / Pause (Space)"));
+            timeLabel.AutoSize = false; timeLabel.Size = new Size(126, 36); timeLabel.Location = new Point(145 + 26, 0); timeLabel.TextAlign = ContentAlignment.MiddleLeft;
+            timeLabel.Font = new Font("Consolas", Font.Size + 0.5f); timeLabel.ForeColor = Theme.Secondary;
+            center.Controls.Add(playBtn); center.Controls.Add(timeLabel);
+            bar.Controls.Add(center); bar.Controls.Add(leftTools); bar.Controls.Add(rightTools);
+            bar.Resize += (s, e) => center.Location = new Point((bar.ClientSize.Width - center.Width) / 2, (bar.ClientSize.Height - center.Height) / 2);
+        }
+
+        void PaintPlay(object sender, PaintEventArgs e)
+        {
+            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+            var r = new RectangleF(1, 1, playBtn.Width - 3, playBtn.Height - 3);
+            g.Clear(Theme.Window);
+            using (var b = new SolidBrush(Theme.Accent)) g.FillEllipse(b, r);
+            float cx = r.X + r.Width / 2, cy = r.Y + r.Height / 2, u = r.Width / 36f;
+            using (var w = new SolidBrush(Color.White))
+            {
+                if (Playing) { g.FillRectangle(w, cx - 6 * u, cy - 7 * u, 4 * u, 14 * u); g.FillRectangle(w, cx + 2 * u, cy - 7 * u, 4 * u, 14 * u); }
+                else g.FillPolygon(w, new[] { new PointF(cx - 4.5f * u, cy - 8 * u), new PointF(cx - 4.5f * u, cy + 8 * u), new PointF(cx + 8.5f * u, cy) });
+            }
+        }
+
+        // 选中推近段才出现：放大倍数、跟随方式、选位置、删除
+        readonly Label insTitle = new Label(), insTime = new Label(), insZoomValue = new Label();
+        readonly TrackBar insZoom = new TrackBar();
+        readonly Button insFollow = new Button(), insFixed = new Button(), insPick = new Button(), insDelete = new Button();
+        void BuildInspector()
+        {
+            var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Padding = new Padding(0), Margin = new Padding(0) };
+            insTitle.Text = L("推近", "Zoom"); insTitle.AutoSize = true; insTitle.Font = new Font(Font, FontStyle.Bold); insTitle.Margin = new Padding(0, 8, 8, 0);
+            insTime.AutoSize = true; insTime.ForeColor = Theme.Secondary; insTime.Margin = new Padding(0, 8, 14, 0);
+            var scaleL = new Label { Text = L("放大", "Scale"), AutoSize = true, Margin = new Padding(0, 8, 4, 0) };
+            insZoom.Minimum = 12; insZoom.Maximum = 40; insZoom.TickStyle = TickStyle.None; insZoom.AutoSize = false; insZoom.Width = 150; insZoom.Height = 28; insZoom.Margin = new Padding(0, 3, 0, 0);
+            insZoom.Scroll += (s, e) => { var id = Selected; DragBegin(); DragUpdate(p => { var sg = p.Segments.FirstOrDefault(x => x.Id == id); if (sg != null) sg.Zoom = insZoom.Value / 10.0; }); };
+            insZoom.MouseUp += (s, e) => DragEnd();
+            insZoom.KeyUp += (s, e) => DragEnd();
+            insZoomValue.AutoSize = false; insZoomValue.Width = 40; insZoomValue.Margin = new Padding(2, 8, 10, 0);
+            Flat(insFollow, L("跟着鼠标", "Follow cursor"), (s, e) => SetMode(false));
+            Flat(insFixed, L("固定位置", "Fixed position"), (s, e) => SetMode(true));
+            Flat(insPick, L("选位置", "Set Position"), (s, e) => { Picking = !Picking; Changed?.Invoke(); });
+            tips.SetToolTip(insPick, L("点了以后在预览画面上点一下，设成这段推近盯住的位置（Esc 取消）", "Then click the preview to set where this zoom looks (Esc cancels)"));
+            Flat(insDelete, "🗑 " + L("删除", "Delete"), (s, e) => DeleteSelected());
+            flow.Controls.AddRange(new Control[] { insTitle, insTime, scaleL, insZoom, insZoomValue, insFollow, insFixed, insPick });
+            inspector.Controls.Add(flow);
+            insDelete.Dock = DockStyle.Right;
+            inspector.Controls.Add(insDelete);
+        }
+
+        void SetMode(bool fix) { var id = Selected; Edit(p => { var sg = p.Segments.FirstOrDefault(x => x.Id == id); if (sg != null) sg.Fixed = fix; }); if (!fix) Picking = false; Changed?.Invoke(); }
+
+        void Flat(Button b, string text, EventHandler click)
+        {
+            b.Text = text; b.AutoSize = true; b.AutoSizeMode = AutoSizeMode.GrowAndShrink; b.Padding = new Padding(6, 1, 6, 1); b.Margin = new Padding(0, 2, 6, 2);
+            b.FlatStyle = FlatStyle.Flat; b.FlatAppearance.BorderColor = Theme.Line; b.BackColor = Theme.Control; b.ForeColor = Theme.Text; b.Click += click;
+            b.MinimumSize = new Size(0, 30);
+        }
+
+        void Primary(Button b, string text, EventHandler click)
+        {
+            Flat(b, text, click);
+            b.BackColor = Theme.Accent; b.ForeColor = Color.White; b.FlatAppearance.BorderSize = 0; b.Font = new Font(Font, FontStyle.Bold); b.Padding = new Padding(14, 1, 14, 1);
+        }
+
+        void SyncUi()
+        {
+            if (IsDisposed) return;
+            undoBtn.Enabled = undo.Count > 0; redoBtn.Enabled = redo.Count > 0;
+            double len = Project.TrimEnd - Project.TrimStart;
+            timeLabel.Text = Clock(Time - Project.TrimStart) + " / " + Clock(len);
+            playBtn.Invalidate();
+            tlMinus.Enabled = Timeline.Scale > 1.001; tlPlus.Enabled = Timeline.Scale < 7.999;
+            int sv = (int)Math.Round(Timeline.Scale * 100); if (tlScale.Value != sv) tlScale.Value = Math.Min(800, Math.Max(100, sv));
+            var seg = Project.Segments.FirstOrDefault(s => s.Id == Selected);
+            inspector.Visible = seg != null;
+            if (seg != null)
+            {
+                insTime.Text = Clock(seg.Start) + " – " + Clock(seg.End);
+                int zv = (int)Math.Round(seg.Zoom * 10); if (insZoom.Value != Math.Min(40, Math.Max(12, zv))) insZoom.Value = Math.Min(40, Math.Max(12, zv));
+                insZoomValue.Text = seg.Zoom.ToString("0.0") + "×";
+                insFollow.BackColor = !seg.Fixed ? Theme.Accent : Theme.Control; insFollow.ForeColor = !seg.Fixed ? Color.White : Theme.Text;
+                insFixed.BackColor = seg.Fixed ? Theme.Accent : Theme.Control; insFixed.ForeColor = seg.Fixed ? Color.White : Theme.Text;
+                insPick.Visible = seg.Fixed;
+                insPick.Text = Picking ? L("点画面…", "Click the picture…") : L("选位置", "Set Position");
+            }
+            preview.Picking = Picking;
+            preview.Hint = Picking ? L("在画面上点一下，设成这段推近盯住的位置（Esc 取消）", "Click the picture to set where this zoom looks (Esc to cancel)") : null;
+            preview.Invalidate();
+            Timeline.Invalidate();
+            style.Sync();
+        }
+
+        public static string Clock(double t) { t = Math.Max(0, t); return $"{(int)t / 60}:{(int)t % 60:00}.{(int)(t * 10) % 10}"; }
+
+        // ---- 编辑（都能撤销） ----
+        public void Edit(Action<StudioProject> change)
+        {
+            var p = Project.Clone();
+            change(p);
+            if (p.Same(Project)) return;
+            if (!p.SameSegments(Project)) p.SegmentsEdited = true;
+            undo.Add(Project.ToJson()); redo.Clear();
+            SetProject(p);
+        }
+
+        // 拖动：开始时记下原样，拖的过程中实时改，松手才算一步撤销
+        public void DragBegin() { if (dragBase == null) { dragBase = Project.Clone(); ScrubBegin(); } }
+        public void DragUpdate(Action<StudioProject> change)
+        {
+            if (dragBase == null) return;
+            var p = dragBase.Clone();
+            change(p);
+            if (!p.SameSegments(dragBase)) p.SegmentsEdited = true;
+            SetProject(p);
+        }
+        public void DragEnd()
+        {
+            if (dragBase != null && !dragBase.Same(Project)) { undo.Add(dragBase.ToJson()); redo.Clear(); }
+            dragBase = null;
+            ScrubEnd();
+            Changed?.Invoke();
+        }
+
+        public void Undo() { if (undo.Count == 0) return; redo.Add(Project.ToJson()); var p = StudioProject.FromJson(undo.Last()); undo.RemoveAt(undo.Count - 1); if (!p.SameSegments(Project)) p.SegmentsEdited = true; SetProject(p); }   // 撤回来的推近段算手动选的，以后不再自动重排
+        public void Redo() { if (redo.Count == 0) return; undo.Add(Project.ToJson()); var p = StudioProject.FromJson(redo.Last()); redo.RemoveAt(redo.Count - 1); SetProject(p); }
+
+        void SetProject(StudioProject p)
+        {
+            bool lookChanged = !p.Look.Same(Project.Look), segsChanged = !p.SameSegments(Project);
+            Project = p;
+            if (lookChanged) Rebuild(); else if (segsChanged) Replan();
+            saveTimer.Stop(); saveTimer.Start();
+            Recompose();
+            Changed?.Invoke();
+        }
+
+        // 按自动规则重新排推近段（能撤销）；排完算「没手动改过」
+        public void Regenerate()
+        {
+            Edit(p => p.Segments = StudioPlan.AutoSegments(Track, Duration, p.Segments.FirstOrDefault()?.Zoom ?? 2.0));
+            Project.SegmentsEdited = false;
+            Selected = null;
+            saveTimer.Stop(); saveTimer.Start();
+            Changed?.Invoke();
+        }
+
+        // 某一段能占的范围：不压到前后两段、不出修剪范围
+        public (double lo, double hi) Room(string id, StudioProject p)
+        {
+            var segs = p.Segments.OrderBy(s => s.Start).ToList();
+            int i = segs.FindIndex(s => s.Id == id);
+            if (i < 0) return (p.TrimStart, p.TrimEnd);
+            double lo = Math.Max(p.TrimStart, i > 0 ? segs[i - 1].End : 0);
+            double hi = Math.Min(p.TrimEnd, i + 1 < segs.Count ? segs[i + 1].Start : Duration);
+            return (lo, Math.Max(lo, hi));
+        }
+
+        public void AddSegment(double t)
+        {
+            const double len = 2.0;
+            var segs = Project.Segments.OrderBy(s => s.Start).ToList();
+            if (segs.Any(s => t >= s.Start && t < s.End)) { System.Media.SystemSounds.Beep.Play(); return; }
+            double lo = Math.Max(Project.TrimStart, segs.LastOrDefault(s => s.End <= t)?.End ?? 0);
+            double hi = Math.Min(Project.TrimEnd, segs.FirstOrDefault(s => s.Start > t)?.Start ?? Duration);
+            if (hi - lo < 0.3) { System.Media.SystemSounds.Beep.Play(); return; }
+            double s0 = Math.Max(lo, t - len / 2), e0 = Math.Min(hi, s0 + len);
+            s0 = Math.Max(lo, e0 - len); e0 = Math.Min(hi, s0 + len);
+            var m = new StudioPlan.Mouse(Track);
+            double fx = 0.5, fy = 0.5;
+            if (m.At(t, out var mx, out var my, out _)) { fx = mx / Track.Width; fy = 1 - my / Track.Height; }
+            var seg = new ZoomSegment { Start = s0, End = e0, FixedX = fx, FixedY = fy };
+            Edit(p => { p.Segments.Add(seg); p.Segments = p.Segments.OrderBy(x => x.Start).ToList(); });
+            Selected = seg.Id;
+            Changed?.Invoke();
+        }
+
+        public void DeleteSelected()
+        {
+            var id = Selected;
+            if (id == null) return;
+            Edit(p => p.Segments.RemoveAll(s => s.Id == id));
+            Selected = null; Picking = false;
+            Changed?.Invoke();
+        }
+
+        // 在预览上点一下：设成选中那段的固定位置。x、y = 预览画面里的比例（左上为原点）
+        void PickAt(double x, double y)
+        {
+            if (!Picking || Selected == null) return;
+            StudioScene sc; FramePlan[] pl;
+            lock (sceneGate) { sc = scene; pl = plan; }
+            if (sc == null || pl == null) return;
+            var f = pl[Math.Min(Math.Max((int)Math.Round(Time * Fps), 0), pl.Length - 1)];
+            var pt = StudioPlan.SourcePoint(sc.Lay, x * sc.Lay.cw, y * sc.Lay.ch, f);
+            var id = Selected;
+            Edit(p => { var sg = p.Segments.FirstOrDefault(s => s.Id == id); if (sg != null) { sg.Fixed = true; sg.FixedX = pt.x; sg.FixedY = pt.y; } });
+            Picking = false;
+            Changed?.Invoke();
+        }
+
+        // ---- 样式 ----
+        public void EditLook(Action<StudioLook> change) => Edit(p => change(p.Look));
+        public void DragLook(Action<StudioLook> change) { DragBegin(); DragUpdate(p => change(p.Look)); }
+
+        public void ApplyPreset(string name) { var pr = Presets.Find(name); if (pr != null) Edit(p => p.Look = pr.Look.Clone()); }
+
+        // ---- 预览：重建场景（样式变了）、重算镜头（推近段变了）、重新合成当前帧 ----
+        void Rebuild()
+        {
+            var sc = new StudioScene(Dir, ptrack, Project.Look.Clone(), st, CursorTracker.LoadCursor);
+            var pl = sc.Plan(Project.Segments, Duration, Math.Max(1, (int)(Duration * Fps)));
+            lock (sceneGate) { scene = sc; plan = pl; }
+        }
+
+        void Replan()
+        {
+            StudioScene sc; lock (sceneGate) sc = scene;
+            var pl = sc.Plan(Project.Segments.Select(s => s.Clone()).ToList(), Duration, Math.Max(1, (int)(Duration * Fps)));
+            lock (sceneGate) plan = pl;
+        }
+
+        // 用手上最近那张原画面重新合成（样式、推近改了，播放头没动）
+        void Recompose()
+        {
+            if (Playing) return;
+            byte[] src = srcFrame; double t = srcTime;
+            if (src == null) return;
+            ShowFrame(src, t);
+        }
+
+        void ShowFrame(byte[] src, double t)
+        {
+            StudioScene sc; FramePlan[] pl;
+            lock (sceneGate) { sc = scene; pl = plan; }
+            if (sc == null || pl == null) return;
+            int CW = (int)sc.Lay.cw, CH = (int)sc.Lay.ch;
+            var dst = new byte[CW * CH * 4];
+            int i = Math.Min(Math.Max((int)Math.Round(t * Fps), 0), pl.Length - 1);
+            sc.Frame(sc.Cpu, src, i, pl, dst);
+            var bmp = new Bitmap(CW, CH, PixelFormat.Format32bppRgb);
+            var bd = bmp.LockBits(new Rectangle(0, 0, CW, CH), ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
+            for (int y = 0; y < CH; y++) Marshal.Copy(dst, y * CW * 4, bd.Scan0 + y * bd.Stride, CW * 4);
+            bmp.UnlockBits(bd);
+            if (InvokeRequired) { try { BeginInvoke((Action)(() => SetShown(bmp))); } catch { bmp.Dispose(); } }
+            else SetShown(bmp);
+        }
+
+        void SetShown(Bitmap b)
+        {
+            if (IsDisposed) { b.Dispose(); return; }
+            var old = shown; shown = b; preview.Image = b; preview.Invalidate(); old?.Dispose();
+            FirstFrameShown = true;
+        }
+        public bool FirstFrameShown;
+
+        // 播放头跳到 t（拖动时排队：同时只解一帧，只追最新的目标）
+        public void Seek(double t)
+        {
+            t = Math.Min(Math.Max(t, 0), Duration);
+            Time = t;
+            Changed?.Invoke();
+            if (Playing) { StopPlayback(); }
+            RequestFrame(t);
+        }
+
+        void RequestFrame(double t)
+        {
+            if (!(scrub.Request(t) is double go)) return;
+            Task.Run(() => Decode(go));
+        }
+
+        void Decode(double t)
+        {
+            while (true)
+            {
+                byte[] src = null;
+                try { src = Studio.DecodeFrame(Raw, Math.Min(t, Math.Max(0, Duration - 0.05)), pw, ph, Info.Matrix); } catch { }
+                if (src != null) { srcFrame = src; srcTime = t; ShowFrame(src, t); }
+                double? next = null;
+                try { next = (double?)Invoke((Func<double?>)(() => scrub.SeekDone())); } catch { return; }
+                if (!(next is double n)) return;
+                t = n;
+            }
+        }
+
+        public void ScrubBegin() { scrub.Begin(); if (Playing) StopPlayback(); }
+        public void ScrubEnd() => scrub.End();
+
+        // ---- 播放：从播放头开始连续解码（每秒 30 张），按时钟推进，声音用 MCI 放抽出来的 wav ----
+        Process player; Thread playThread; volatile bool stopPlay;
+        string audioWav; Task audioPrep;
+        readonly int playFps = 30;
+
+        void StartAudioPrep()
+        {
+            if (!Info.HasAudio) return;
+            var wav = Path.Combine(Path.GetTempPath(), "studio-preview-" + Guid.NewGuid().ToString("N") + ".wav");
+            audioPrep = Task.Run(() => { if (Studio.ExtractAudio(Raw, wav)) audioWav = wav; });
+        }
+
+        public void TogglePlay()
+        {
+            if (Playing) { StopPlayback(); Changed?.Invoke(); return; }
+            if (Time >= Project.TrimEnd - 0.05 || Time < Project.TrimStart - 0.01) Time = Project.TrimStart;
+            StartPlayback(Time);
+        }
+
+        void StartPlayback(double t0)
+        {
+            StopPlayback();
+            Playing = true; stopPlay = false;
+            Changed?.Invoke();
+            var proc = Studio.StartDecode(Raw, t0, pw, ph, playFps, Info.Matrix);
+            player = proc;
+            proc.ErrorDataReceived += (s, e) => { }; proc.BeginErrorReadLine();
+            if (audioWav != null) Mci.Play(audioWav, t0);
+            playThread = new Thread(() => PlayLoop(proc, t0)) { IsBackground = true, Name = "studio-preview" };
+            playThread.Start();
+        }
+
+        void PlayLoop(Process proc, double t0)
+        {
+            int bytes = pw * ph * 4;
+            var sw = Stopwatch.StartNew();
+            var stream = proc.StandardOutput.BaseStream;
+            double end = Project.TrimEnd;
+            for (int k = 0; !stopPlay; k++)
+            {
+                var buf = new byte[bytes]; int got = 0;
+                while (got < bytes) { int n = stream.Read(buf, got, bytes - got); if (n <= 0) break; got += n; }
+                if (got < bytes) break;
+                double t = t0 + k / (double)playFps;
+                if (t >= end) break;
+                // 赶不上就跳过这张（按时钟走，不拖慢）
+                double due = k / (double)playFps, now = sw.Elapsed.TotalSeconds;
+                if (now > due + 0.1) continue;
+                if (due > now) Thread.Sleep((int)((due - now) * 1000));
+                srcFrame = buf; srcTime = t;
+                ShowFrame(buf, t);
+                try { BeginInvoke((Action)(() => { if (!stopPlay) { Time = t; Changed?.Invoke(); Timeline.FollowPlayhead(); } })); } catch { return; }
+            }
+            try { BeginInvoke((Action)(() => { if (!stopPlay) { StopPlayback(); if (Time >= end - 0.1) Time = end; Changed?.Invoke(); } })); } catch { }
+        }
+
+        void StopPlayback()
+        {
+            stopPlay = true;
+            Playing = false;
+            Mci.Stop();
+            try { if (player != null && !player.HasExited) player.Kill(); } catch { }
+            player = null;
+        }
+
+        public void Step(int n)
+        {
+            if (Playing) StopPlayback();
+            Seek((Math.Round(Time * Fps) + n) / Fps);
+        }
+
+        // ---- 时间轴缩放 ----
+        public void SetTimelineScale(double s, double? anchorX)
+        {
+            var z = TimelineMath.Zoom(Timeline.Scale, Timeline.Offset, Math.Max(1, Timeline.ViewWidth), anchorX ?? Timeline.ViewWidth / 2.0, s);
+            Timeline.Scale = z.scale; Timeline.Offset = z.offset;
+            Changed?.Invoke();
+        }
+
+        // ---- 存盘、导出 ----
+        void SaveNow()
+        {
+            if (TestMode) return;
+            try { Project.Save(Dir); } catch { }
+        }
+        public static bool TestMode;   // 截图自测时不写工程文件
+
+        public void Export()
+        {
+            if (exporting) return;
+            saveTimer.Stop(); SaveNow();
+            exporting = true; exported = null;
+            exportBtn.Enabled = false; exportBar.Visible = true; exportBar.Value = 0;
+            openBtn.Visible = showBtn.Visible = false;
+            exportStatus.Text = ""; exportStatus.ForeColor = Theme.Secondary;
+            var p = Project.Clone();
+            var outPath = Unique(OutPath);
+            Task.Run(() =>
+            {
+                string err = null; RenderStats stats = null;
+                try { stats = Studio.Render(Dir, outPath, new StudioStyle(), v => { try { BeginInvoke((Action)(() => { exportBar.Value = (int)Math.Min(100, v * 100); exportStatus.Text = (int)(v * 100) + "%"; })); } catch { } }, CursorTracker.LoadCursor, null, p); }
+                catch (Exception e) { err = e.Message; }
+                try
+                {
+                    BeginInvoke((Action)(() =>
+                    {
+                        exporting = false; exportBtn.Enabled = true; exportBar.Visible = false;
+                        if (err != null) { exportStatus.Text = L("导出失败：", "Export failed: ") + err; exportStatus.ForeColor = Color.FromArgb(200, 30, 30); return; }
+                        exported = outPath;
+                        string how = stats != null && (stats.Gpu || stats.Encoder != "libx264") ? L("显卡", "GPU") : "CPU";
+                        exportStatus.Text = L($"已导出到桌面，用时 {stats?.TotalSeconds:0} 秒（{how}）", $"Exported to Desktop in {stats?.TotalSeconds:0} s ({how})");
+                        openBtn.Visible = showBtn.Visible = true;
+                        Exported?.Invoke(outPath);
+                    }));
+                }
+                catch { }
+            });
+        }
+        public event Action<string> Exported;
+        public bool Exporting => exporting;
+        public string ExportStatusText => exportStatus.Text;
+
+        static void Shell(string path) { try { Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); } catch { } }
+
+        // ---- 键盘：空格播放、←→ 逐帧、Ctrl+Z / Ctrl+Y、Delete、Esc ----
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (ActiveControl is TextBox) return base.ProcessCmdKey(ref msg, keyData);
+            switch (keyData)
+            {
+                case Keys.Space: TogglePlay(); return true;
+                case Keys.Left: Step(-1); return true;
+                case Keys.Right: Step(1); return true;
+                case Keys.Control | Keys.Z: Undo(); return true;
+                case Keys.Control | Keys.Y: case Keys.Control | Keys.Shift | Keys.Z: Redo(); return true;
+                case Keys.Delete: case Keys.Back: if (Selected != null) { DeleteSelected(); return true; } break;
+                case Keys.Escape: if (Picking) { Picking = false; Changed?.Invoke(); return true; } if (Selected != null) { Selected = null; Changed?.Invoke(); return true; } break;
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (exporting && e.CloseReason == CloseReason.UserClosing)
+            {
+                exportStatus.Text = L("正在导出，等它做完再关", "Still exporting, close it when it's done");
+                e.Cancel = true; return;
+            }
+            StopPlayback();
+            saveTimer.Stop(); SaveNow();
+            base.OnFormClosing(e);
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            base.OnFormClosed(e);
+            shown?.Dispose();
+            var wav = audioWav;
+            if (wav != null) Task.Run(() => { Thread.Sleep(500); try { File.Delete(wav); } catch { } });
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            Theme.DarkTitle(Handle);
+        }
+    }
+
+    // 预览画面：按比例放进框里；选固定位置时把点击换算成画面里的比例
+    sealed class PreviewBox : Control
+    {
+        public Image Image;
+        public bool Picking;
+        public string Hint;
+        public Action<double, double> Pick;
+        RectangleF imgRect;
+
+        public PreviewBox()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            BackColor = Theme.Under;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(Theme.Window);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var path = Theme.Round(new RectangleF(0, 0, Width - 1, Height - 1), 8))
+            using (var b = new SolidBrush(Theme.Under)) g.FillPath(b, path);
+            if (Image != null)
+            {
+                float k = Math.Min((Width - 16f) / Image.Width, (Height - 16f) / Image.Height);
+                float w = Image.Width * k, h = Image.Height * k;
+                imgRect = new RectangleF((Width - w) / 2, (Height - h) / 2, w, h);
+                g.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                g.PixelOffsetMode = PixelOffsetMode.Half;
+                g.DrawImage(Image, imgRect);
+            }
+            if (Hint != null)
+            {
+                var sz = g.MeasureString(Hint, Font);
+                var r = new RectangleF((Width - sz.Width) / 2 - 12, 10, sz.Width + 24, sz.Height + 10);
+                using (var path = Theme.Round(r, r.Height / 2))
+                using (var b = new SolidBrush(Color.FromArgb(230, Theme.Control))) g.FillPath(b, path);
+                using (var t = new SolidBrush(Theme.Text)) g.DrawString(Hint, Font, t, r.X + 12, r.Y + 5);
+            }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            Cursor = Picking && imgRect.Contains(e.Location) ? Cursors.Cross : Cursors.Default;
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (!Picking || !imgRect.Contains(e.Location) || imgRect.Width <= 0) return;
+            Pick?.Invoke((e.X - imgRect.X) / imgRect.Width, (e.Y - imgRect.Y) / imgRect.Height);
+        }
+    }
+
+    // 预览声音：MCI 放 wav，可以从任意位置开始
+    static class Mci
+    {
+        static bool open;
+        public static void Play(string wav, double from)
+        {
+            try
+            {
+                Stop();
+                if (mciSendString($"open \"{wav}\" type waveaudio alias studiopv", null, 0, IntPtr.Zero) != 0) return;
+                open = true;
+                mciSendString("set studiopv time format milliseconds", null, 0, IntPtr.Zero);
+                mciSendString($"play studiopv from {(int)(from * 1000)}", null, 0, IntPtr.Zero);
+            }
+            catch { }
+        }
+        public static void Stop()
+        {
+            if (!open) return;
+            try { mciSendString("stop studiopv", null, 0, IntPtr.Zero); mciSendString("close studiopv", null, 0, IntPtr.Zero); } catch { }
+            open = false;
+        }
+        [DllImport("winmm.dll", CharSet = CharSet.Unicode)] static extern int mciSendString(string cmd, StringBuilder ret, int len, IntPtr cb);
+    }
+
+    // 剪辑窗口的配色（我们自己画的部分统一用这几种颜色）
+    static class Theme
+    {
+        public static readonly bool Dark = IsDark();
+        public static Color Window => Dark ? Color.FromArgb(32, 32, 34) : Color.FromArgb(246, 246, 247);
+        public static Color Control => Dark ? Color.FromArgb(52, 52, 56) : Color.White;
+        public static Color Under => Dark ? Color.FromArgb(22, 22, 24) : Color.FromArgb(228, 228, 231);
+        public static Color Line => Dark ? Color.FromArgb(64, 64, 68) : Color.FromArgb(218, 218, 222);
+        public static Color Text => Dark ? Color.FromArgb(235, 235, 238) : Color.FromArgb(28, 28, 30);
+        public static Color Secondary => Dark ? Color.FromArgb(160, 160, 166) : Color.FromArgb(110, 110, 116);
+        public static Color Accent => Color.FromArgb(0, 103, 192);
+        public static Color Segment => Color.FromArgb(108, 92, 242);
+
+        static bool IsDark()
+        {
+            // WinForms 自带的滑块、勾选框、下拉框不跟深色，混在一起难看：默认浅色（EDITOR_APPEARANCE=dark 可以看深色效果）
+            return Environment.GetEnvironmentVariable("EDITOR_APPEARANCE") == "dark";
+        }
+
+        public static GraphicsPath Round(RectangleF r, float rad)
+        {
+            var p = new GraphicsPath();
+            rad = Math.Max(0.1f, Math.Min(rad, Math.Min(r.Width, r.Height) / 2));
+            float d = rad * 2;
+            p.AddArc(r.X, r.Y, d, d, 180, 90); p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90); p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+
+        // 深色模式下标题栏也用深色（Windows 10 2004+ / 11）
+        public static void DarkTitle(IntPtr h)
+        {
+            if (!Dark) return;
+            try { int on = 1; DwmSetWindowAttribute(h, 20, ref on, 4); } catch { }
+        }
+        [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int value, int size);
+    }
+}

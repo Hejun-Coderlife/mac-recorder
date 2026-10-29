@@ -248,8 +248,8 @@ namespace ScreenRecorder
         [DllImport("winmm.dll")] static extern uint timeEndPeriod(uint ms);
     }
 
-    // 一次 Studio 录制：原始画面 + 轨迹进「Studio 素材\<名字>\」，录完生成成片
-    sealed class StudioProject
+    // 一次 Studio 录制：原始画面 + 轨迹进「Studio 素材\<名字>\」，录完打开剪辑窗口（自测时直接生成成片）
+    sealed class StudioSession
     {
         public string Dir, Raw, Out;
         public CursorTracker Tracker;
@@ -259,19 +259,25 @@ namespace ScreenRecorder
             get { var d = Path.Combine(App.Folder, "Studio 素材"); Directory.CreateDirectory(d); return d; }
         }
 
-        public static StudioProject Create(string name, string outPath, Source src)
+        public static StudioSession Create(string name, string outPath, Source src)
         {
             var dir = Path.Combine(Folder, name);
             Directory.CreateDirectory(dir);
-            return new StudioProject { Dir = dir, Raw = Path.Combine(dir, "raw.mp4"), Out = outPath, Tracker = new CursorTracker(CursorTracker.AreaOf(src), CursorTracker.ScaleOf(src)) };
+            return new StudioSession { Dir = dir, Raw = Path.Combine(dir, "raw.mp4"), Out = outPath, Tracker = new CursorTracker(CursorTracker.AreaOf(src), CursorTracker.ScaleOf(src)) };
         }
 
-        // 录完：存轨迹（时间对齐到原始画面第一帧），生成成片
-        public RenderStats Finish(double firstFrameAt, Action<double> progress, Action<string> log = null)
+        // 录完：存轨迹（时间对齐到原始画面第一帧）；工程文件第一次打开剪辑窗口时按默认预设生成
+        public void SaveTrack(double firstFrameAt)
         {
             Tracker.Stop();
             var info = Studio.Probe(Raw);
             Tracker.Save(Dir, firstFrameAt, info.Width, info.Height);
+        }
+
+        // 自测用：存轨迹后直接按自动规则 + 默认样式生成成片
+        public RenderStats Finish(double firstFrameAt, Action<double> progress, Action<string> log = null)
+        {
+            SaveTrack(firstFrameAt);
             return Studio.Render(Dir, Out, new StudioStyle(), progress, CursorTracker.LoadCursor, log);
         }
 

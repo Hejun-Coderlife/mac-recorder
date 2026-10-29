@@ -17,7 +17,8 @@ namespace ScreenRecorder
 {
     static class App
     {
-        public static readonly bool Zh = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "zh";
+        // 界面语言跟系统；APP_LANG=zh / en 可以强制（自测截中文界面用）
+        public static readonly bool Zh = Environment.GetEnvironmentVariable("APP_LANG") is string lang ? lang == "zh" : CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "zh";
         public static string L(string zh, string en) => Zh ? zh : en;
         public static string Name => L("录屏", "Screen Recorder");
 
@@ -88,6 +89,11 @@ namespace ScreenRecorder
             // Studio 合成用显卡（StudioGpu.cs）；建不起来自动回到 CPU。STUDIO_COMPOSE=gpu 时没有真显卡也用软件渲染（自测）
             Studio.GpuFactory = (lay, cpu, info) => GpuComposer.TryCreate(lay, cpu, info, Environment.GetEnvironmentVariable("STUDIO_COMPOSE") == "gpu");
             if (Environment.GetEnvironmentVariable("STUDIO") != null) return SelfTest.RenderOnly();
+            if (Environment.GetEnvironmentVariable("STUDIOTESTS") != null) return SelfTestEditor.Core();
+            if (Environment.GetEnvironmentVariable("EDITORSHOT") != null) return SelfTestEditor.Shot();
+            if (Environment.GetEnvironmentVariable("EDITORTEST") != null) return SelfTestEditor.Interactive();
+            if (Environment.GetEnvironmentVariable("COUNTDOWNSHOT") != null) return SelfTestEditor.Countdown();
+            if (Environment.GetEnvironmentVariable("ICONSTEST") != null) return SelfTestEditor.Icons();
             if (Environment.GetEnvironmentVariable("AUTOTEST") != null) return SelfTest.Run();
             if (Environment.GetEnvironmentVariable("UPDATE_TEST") != null) return Updater.SelfTest();
             // 自测：UPDATESTATE_TEST=1 → 把「已更新到」（只给一次）写到 %TEMP%\update_state.txt 后退出
@@ -100,6 +106,7 @@ namespace ScreenRecorder
             if (Environment.GetEnvironmentVariable("HOTKEY_HOG") != null) return SelfTest.Hog();
             if (Environment.GetEnvironmentVariable("HOTKEYTEST") != null) return SelfTest.Hotkeys();
             Shots.CleanTemp();
+            DesktopIcons.Restore();   // 上次录制时藏了桌面图标、没来得及换回来（比如崩了）：先换回来
             // 上次后台下好了新版、却没等到正常退出就被结束了：先换上，再打开新版
             if (Updater.StagedVersion != null && Updater.ApplyStaged(true)) return 0;
             Application.Run(new MainForm());

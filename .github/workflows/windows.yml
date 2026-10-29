@@ -323,6 +323,100 @@ jobs:
           # 只看中位数：两次点击之间鼠标快速横穿、以及「提前转向下一个点击处」那半秒，鼠标本来就会离中间远（p90 只打印）
           if ($median -gt 0.3) { throw "camera does not follow the cursor closely enough" }
 
+      - name: Studio editor - core tests (auto segments, Mac project.json, scrub math, presets, looks, motion blur)
+        run: |
+          foreach ($k in "AUTOTEST", "AUTOSTUDIO", "AUTOINPUT", "AUTOAUDIO", "AUTOOUT", "STUDIO") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $env:STUDIOTESTS = "1"; $env:STUDIOTESTS_DIR = (Join-Path $env:RUNNER_TEMP "studio/project"); $env:MACPROJECT = (Resolve-Path windows/tests/mac-project.json).Path
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          foreach ($k in "STUDIOTESTS", "STUDIOTESTS_DIR", "MACPROJECT") { Remove-Item "env:$k" }
+          $txt = Get-Content "$env:TEMP\studio_tests.txt" -Raw
+          Write-Host "exit=$($p.ExitCode)`n$txt"
+          if ($p.ExitCode -ne 0 -or -not $txt.StartsWith("OK")) { throw "studio core tests failed" }
+
+      - name: Studio editor - screenshots (English / Chinese, two widths, selected zoom, zoomed timeline, styles)
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "studio/editor"; New-Item -ItemType Directory -Force $out | Out-Null
+          $proj = Join-Path $env:RUNNER_TEMP "studio/project"
+          function Shot($name, $vars) {
+            foreach ($k in "APP_LANG", "EDITOR_WIDTH", "EDITOR_SELECT", "EDITOR_TLZOOM", "EDITOR_LOOK") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+            foreach ($k in $vars.Keys) { Set-Item "env:$k" $vars[$k] }
+            $env:EDITOR = $proj; $env:EDITORSHOT = (Join-Path $out "$name.png")
+            $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+            Write-Host "[$name] exit=$($p.ExitCode) $(Get-Content "$env:TEMP\editorshot.txt" -Raw)"
+            if ($p.ExitCode -ne 0) { throw "editor screenshot $name failed" }
+          }
+          Shot "en-1440" @{ APP_LANG = "en"; EDITOR_WIDTH = "1440" }
+          Shot "zh-1440-selected" @{ APP_LANG = "zh"; EDITOR_WIDTH = "1440"; EDITOR_SELECT = "1" }
+          Shot "zh-1920-tlzoom" @{ APP_LANG = "zh"; EDITOR_WIDTH = "1920"; EDITOR_TLZOOM = "3" }
+          Shot "en-1440-gradient-9x16" @{ APP_LANG = "en"; EDITOR_WIDTH = "1440"; EDITOR_LOOK = '{"aspect":"9:16","background":"gradient","gradient0":{"r":1,"g":0.76,"b":0.62},"gradient1":{"r":0.97,"g":0.46,"b":0.62},"gradientAngle":160,"cursorScale":1.8,"clickSound":true,"hideIdleCursor":true}' }
+          Shot "zh-1440-wallpaper" @{ APP_LANG = "zh"; EDITOR_WIDTH = "1440"; EDITOR_LOOK = '{"background":"wallpaper"}' }
+          foreach ($k in "APP_LANG", "EDITOR_WIDTH", "EDITOR_SELECT", "EDITOR_TLZOOM", "EDITOR_LOOK", "EDITOR", "EDITORSHOT") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          Get-ChildItem $out | Format-Table Name, Length
+
+      - name: Studio editor - real mouse / keyboard (trim drag, undo / redo, add zoom, drag its edge, play, frame step, timeline zoom, export, save)
+        run: |
+          $proj = Join-Path $env:RUNNER_TEMP "studio/project"; $copy = Join-Path $env:RUNNER_TEMP "studio/editor-project"
+          Remove-Item $copy -Recurse -Force -ErrorAction SilentlyContinue; Copy-Item $proj $copy -Recurse
+          $env:EDITORTEST = $copy
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          Remove-Item env:EDITORTEST
+          $txt = Get-Content "$env:TEMP\editor_test.txt" -Raw
+          Write-Host "exit=$($p.ExitCode)`n$txt"
+          Get-ChildItem "$env:TEMP\editor-export*.mp4" -ErrorAction SilentlyContinue | Copy-Item -Destination (Join-Path $env:RUNNER_TEMP "studio")
+          if (Test-Path "$copy\project.json") { Copy-Item "$copy\project.json" (Join-Path $env:RUNNER_TEMP "studio/editor/project-after-edit.json") }
+          if ($p.ExitCode -ne 0 -or -not $txt.StartsWith("OK")) { throw "editor interaction test failed" }
+
+      - name: Studio export with a style (9:16, red background, trim, wood click sound, strong blur)
+        run: |
+          foreach ($k in "AUTOTEST", "AUTOSTUDIO", "AUTOINPUT", "AUTOAUDIO", "AUTOOUT", "STUDIO_COMPOSE", "STUDIO_ENCODER") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $proj = Join-Path $env:RUNNER_TEMP "studio/project"
+          function Variant($name, $look) {
+            $dir = Join-Path $env:RUNNER_TEMP "studio/$name"; Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue; Copy-Item $proj $dir -Recurse
+            Remove-Item "$dir\project.json" -ErrorAction SilentlyContinue
+            Set-Content "$dir\project.json" ('{"look":' + $look + ',"trimStart":0.5,"trimEnd":5.0}') -Encoding utf8NoBOM
+            $env:STUDIO = $dir; $env:STUDIO_OUT = (Join-Path $env:RUNNER_TEMP "studio/$name.mp4")
+            $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+            $res = Get-Content "$env:TEMP\recorder_test.txt" -Raw
+            Write-Host "[$name] exit=$($p.ExitCode)`n$res"
+            if ($p.ExitCode -ne 0) { throw "$name render failed" }
+            return $env:STUDIO_OUT
+          }
+          $styled = Variant "styled" '{"aspect":"9:16","background":"color","color":{"r":1,"g":0,"b":0},"clickSound":true,"clickStyle":"wood","blur":"strong"}'
+          $plain = Variant "plain" '{"aspect":"9:16","background":"color","color":{"r":1,"g":0,"b":0},"clickSound":false,"blur":"off"}'
+          Remove-Item env:STUDIO; Remove-Item env:STUDIO_OUT
+          $info = ffprobe -v error -show_entries "stream=codec_type,width,height:format=duration" -of json $styled | ConvertFrom-Json
+          $v = $info.streams | Where-Object codec_type -eq video; $dur = [double]$info.format.duration
+          Write-Host "styled: $($v.width)x$($v.height) duration=$dur"
+          if ([Math]::Abs($v.width / $v.height - 9 / 16) -gt 0.01) { throw "not 9:16" }
+          if ([Math]::Abs($dur - 4.5) -gt 0.15) { throw "trim 0.5–5.0 should give 4.5 s, got $dur" }
+          ffmpeg -v error -y -ss 0.3 -i $styled -frames:v 1 (Join-Path $env:RUNNER_TEMP "studio/styled-frame.png")
+          Add-Type -AssemblyName System.Drawing
+          $b = [System.Drawing.Bitmap]::new((Join-Path $env:RUNNER_TEMP "studio/styled-frame.png")); $c = $b.GetPixel(3, 3); $b.Dispose()
+          Write-Host "corner pixel: $($c.R),$($c.G),$($c.B)"
+          if ($c.R -lt 200 -or $c.G -gt 50 -or $c.B -gt 50) { throw "background not red" }
+          # 点击音效：开了的比没开的响（这台机器录的系统声音几乎是静音）
+          function MaxVol($f) { $o = ffmpeg -hide_banner -i $f -af volumedetect -vn -f null - 2>&1 | Select-String "max_volume"; return [double](($o.ToString() -replace '.*max_volume:\s*(-?[\d.]+) dB.*', '$1')) }
+          $clicks = @((Get-Content (Join-Path $proj "track.json") -Raw | ConvertFrom-Json).clicks | Where-Object { $_[0] -ge 0.5 -and $_[0] -lt 5.0 }).Count
+          $ms = MaxVol $styled; $mp = MaxVol $plain
+          Write-Host "clicks in range: $clicks  max volume with click sound: $ms dB  without: $mp dB"
+          if ($clicks -gt 0 -and $ms -lt $mp + 6) { throw "click sound not audible in export" }
+
+      - name: Countdown overlay + hide desktop icons
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "studio/editor"; New-Item -ItemType Directory -Force $out | Out-Null
+          $env:COUNTDOWNSHOT = (Join-Path $out "countdown.png")
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          Remove-Item env:COUNTDOWNSHOT
+          $txt = Get-Content "$env:TEMP\countdown_test.txt" -Raw
+          Write-Host "countdown exit=$($p.ExitCode)`n$txt"
+          if ($p.ExitCode -ne 0 -or -not $txt.StartsWith("OK")) { throw "countdown test failed" }
+          $env:ICONSTEST = "1"
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          Remove-Item env:ICONSTEST
+          $txt = Get-Content "$env:TEMP\icons_test.txt" -Raw
+          Write-Host "icons exit=$($p.ExitCode)`n$txt"
+          if ($p.ExitCode -ne 0 -or -not ($txt.StartsWith("OK") -or $txt.StartsWith("SKIP"))) { throw "desktop icons test failed" }
+
       - name: Studio GPU vs CPU compositor give the same picture; encoder fallback
         run: |
           $proj = Join-Path $env:RUNNER_TEMP "studio/project"

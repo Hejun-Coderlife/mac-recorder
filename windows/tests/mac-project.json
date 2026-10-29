@@ -1,0 +1,68 @@
+{
+  "look" : {
+    "aspect" : "original",
+    "background" : "transparent",
+    "blur" : "off",
+    "clickSound" : true,
+    "clickStyle" : "soft",
+    "color" : {
+      "b" : 0.9587920924191939,
+      "g" : 0.9699999690055847,
+      "r" : 0.5834845683398406
+    },
+    "cornerRadius" : 24.081153100775197,
+    "cursorScale" : 2.0170027858527133,
+    "gradient0" : {
+      "b" : 0.96,
+      "g" : 0.4,
+      "r" : 0.36
+    },
+    "gradient1" : {
+      "b" : 0.78,
+      "g" : 0.43,
+      "r" : 0.86
+    },
+    "gradientAngle" : 135,
+    "hideAfter" : 2.250738011537768,
+    "hideIdleCursor" : true,
+    "imagePath" : "",
+    "padding" : 0.08673207364341085,
+    "ripple" : true,
+    "shadow" : 0.8872274709302327,
+    "shadowBlur" : 0.8336967054263565,
+    "smoothing" : 0.7220390109343972,
+    "wallpaper" : ""
+  },
+  "segments" : [
+    {
+      "end" : 9.352,
+      "fixedX" : 0.187160751565762,
+      "fixedY" : 0.06587926509186359,
+      "id" : "59FF7D12-C582-45FC-B25A-2AECCE5A1C4E",
+      "mode" : "follow",
+      "start" : 1.4167900167609468,
+      "zoom" : 2.4
+    },
+    {
+      "end" : 14.585000000000003,
+      "fixedX" : 0.6175365344467642,
+      "fixedY" : 0.32099737532808403,
+      "id" : "2C013E4C-4158-4A61-BB0A-3783C980FCBB",
+      "mode" : "follow",
+      "start" : 10.552,
+      "zoom" : 2.4
+    },
+    {
+      "end" : 17.696666666666665,
+      "fixedX" : 0.6426931106471817,
+      "fixedY" : 1.1507874015748032,
+      "id" : "D5AB106D-13FA-4EBA-9163-D8AFED0D5933",
+      "mode" : "follow",
+      "start" : 15.785000000000002,
+      "zoom" : 2.4
+    }
+  ],
+  "segmentsEdited" : true,
+  "trimEnd" : 17.655520317737793,
+  "trimStart" : 0.02689502638539709
+}

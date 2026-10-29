@@ -13,8 +13,10 @@ namespace ScreenRecorder
     sealed class MainForm : Form
     {
         readonly ListView list = new ListView();
-        readonly CheckBox sysAudio = new CheckBox(), mic = new CheckBox(), cursor = new CheckBox(), studio = new CheckBox();
-        readonly Button recordBtn = new Button(), shotBtn = new Button(), regionBtn = new Button(), refreshBtn = new Button(), folderBtn = new Button();
+        readonly CheckBox sysAudio = new CheckBox(), mic = new CheckBox(), cursor = new CheckBox(), studio = new CheckBox(), hideIcons = new CheckBox();
+        readonly ComboBox countdown = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 96 };
+        bool counting;              // 正在开录倒计时
+        readonly Button recordBtn = new Button(), shotBtn = new Button(), regionBtn = new Button(), refreshBtn = new Button(), folderBtn = new Button(), footageBtn = new Button();
         readonly Label timeLabel = new Label(), status = new Label();
         readonly Button recKeyBtn = new Button(), shotKeyBtn = new Button();   // 显示当前快捷键，点一下就改
         readonly ToolTip tips = new ToolTip();
@@ -26,7 +28,7 @@ namespace ScreenRecorder
         Source region;
         string selectedId;
         Session session;
-        StudioProject project;      // 开着 Studio 效果录的这一次
+        StudioSession project;      // 开着 Studio 效果录的这一次
         DateTime startedAt;
         bool busy;
 
@@ -42,8 +44,8 @@ namespace ScreenRecorder
             Font = SystemFonts.MessageBoxFont;
             AutoScaleMode = AutoScaleMode.Dpi;
             AutoScaleDimensions = new SizeF(96, 96);
-            ClientSize = new Size(600, 470);
-            MinimumSize = new Size(560, 440);
+            ClientSize = new Size(640, 510);
+            MinimumSize = new Size(600, 470);
             StartPosition = FormStartPosition.CenterScreen;
 
             var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(16), ColumnCount = 1, RowCount = 6 };
@@ -89,7 +91,20 @@ namespace ScreenRecorder
             Check(studio, L("Studio 效果", "Studio effects"), "studio", false);
             studio.CheckedChanged += (s, e) => UpdateUi();
             opts.Controls.AddRange(new Control[] { sysAudio, mic, cursor, studio });
+            // 开录倒计时、录制时隐藏桌面图标
+            var cdLabel = new Label { Text = L("开录倒计时", "Countdown"), AutoSize = true, Margin = new Padding(0, 4, 4, 0) };
+            countdown.Items.AddRange(new object[] { L("关", "Off"), L("3 秒", "3 s"), L("5 秒", "5 s") });
+            countdown.SelectedIndex = Math.Max(0, Math.Min(2, new[] { "0", "3", "5" }.ToList().IndexOf(Settings.GetString("countdown", "0"))));
+            countdown.SelectedIndexChanged += (s, e) => Settings.SetString("countdown", new[] { "0", "3", "5" }[countdown.SelectedIndex]);
+            countdown.Margin = new Padding(0, 0, 22, 0);
+            Check(hideIcons, L("录制时隐藏桌面图标", "Hide desktop icons while recording"), "hideDesktopIcons", false);
+            tips.SetToolTip(hideIcons, L("录的时候先把桌面上的图标藏起来，录完自动恢复", "Hides the icons on your desktop while recording, and brings them back afterwards"));
+            var opts2 = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0, 6, 0, 4), WrapContents = true };
+            opts2.Controls.AddRange(new Control[] { cdLabel, countdown, hideIcons });
+            root.RowCount = 7;
+            root.RowStyles.Insert(3, new RowStyle(SizeType.AutoSize));
             root.Controls.Add(opts);
+            root.Controls.Add(opts2);
 
             // 录制按钮 + 计时 + 快捷键提示
             var rec = Row();
@@ -134,9 +149,15 @@ namespace ScreenRecorder
             var bottom = Row();
             status.AutoSize = true; status.Anchor = AnchorStyles.Left; status.MaximumSize = new Size(440, 0);
             Btn(folderBtn, L("打开所在文件夹", "Show in Folder"), (s, e) => ShowInFolder());
+            // 以前录的 Studio 素材：选一个文件夹，打开剪辑窗口接着改
+            Btn(footageBtn, L("打开 Studio 素材…", "Open Studio Footage…"), (s, e) => OpenFootage());
+            tips.SetToolTip(footageBtn, L("选「视频\\录屏\\Studio 素材」里的一个文件夹，打开剪辑窗口接着改", "Pick a folder in Videos\\录屏\\Studio 素材 to edit it again"));
+            footageBtn.Margin = new Padding(0, 3, 8, 3);
+            bottom.ColumnCount = 3;
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            bottom.Controls.Add(status, 0, 0); bottom.Controls.Add(folderBtn, 1, 0);
+            bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            bottom.Controls.Add(status, 0, 0); bottom.Controls.Add(footageBtn, 1, 0); bottom.Controls.Add(folderBtn, 2, 0);
             root.Controls.Add(bottom);
 
             // 更新：有新版本时左边出「有新版本 vX.Y · 更新」，右边常驻「检查更新」
@@ -226,10 +247,10 @@ namespace ScreenRecorder
             bool rec = session != null;
             list.Enabled = !rec && !busy;
             regionBtn.Enabled = refreshBtn.Enabled = !rec && !busy;
-            sysAudio.Enabled = mic.Enabled = studio.Enabled = !rec && !busy;
+            sysAudio.Enabled = mic.Enabled = studio.Enabled = hideIcons.Enabled = countdown.Enabled = !rec && !busy && !counting;
             cursor.Enabled = !rec && !busy && !studio.Checked;   // Studio 模式鼠标后期再画
             recordBtn.Enabled = !busy && (rec || selectedId != null);   // 后台在下新版也照样能录
-            recordBtn.Text = rec ? "■  " + L("停止", "Stop") : "●  " + L("开始录制", "Record");
+            recordBtn.Text = rec ? "■  " + L("停止", "Stop") : counting ? L("取消倒计时", "Cancel") : "●  " + L("开始录制", "Record");
             recordBtn.BackColor = rec ? Color.FromArgb(220, 50, 50) : (recordBtn.Enabled ? Color.FromArgb(0, 103, 192) : Color.FromArgb(160, 170, 180));
             timeLabel.Visible = rec;
             checkLink.Enabled = !updating;
@@ -322,6 +343,7 @@ namespace ScreenRecorder
         {
             if (busy) return;
             if (session != null) { Stop(); return; }
+            if (counting) { CountdownForm.Current?.Cancel(); return; }   // 倒计时中再按一次 = 取消
             var src = sources.FirstOrDefault(s => s.Id == selectedId);
             if (src == null) { Say(L("先选一个要录的屏幕或窗口", "Pick a screen or window to record first"), true); return; }
             if (src.Kind == SourceKind.Window && !IsWindow(src.Hwnd)) { Say(L("这个窗口已经关掉了，换一个", "That window is gone, pick another one"), true); Refresh_(); return; }
@@ -331,22 +353,40 @@ namespace ScreenRecorder
                 return;
             }
             bool studioOn = studio.Checked;
-            if (studioOn && !StudioProject.Available) { Say(L("找不到 ffmpeg，Studio 效果用不了（请重新下载 录屏.exe）", "ffmpeg is missing, Studio effects can't run (please download the app again)"), true); return; }
+            int secs = new[] { 0, 3, 5 }[Math.Max(0, countdown.SelectedIndex)];
+            if (secs > 0)
+            {
+                counting = true; UpdateUi();
+                Say(L($"{secs} 秒后开录（Esc 或再按一次取消）", $"Recording starts in {secs} s (Esc or press again to cancel)"));
+                var scr = src.Kind == SourceKind.Window ? Screen.FromHandle(src.Hwnd) : Screen.AllScreens.FirstOrDefault(x => x.DeviceName == src.DeviceName) ?? Screen.PrimaryScreen;
+                CountdownForm.Run(secs, scr, () => { counting = false; UpdateUi(); Begin(src); }, () => { counting = false; UpdateUi(); Say(L("已取消", "Cancelled")); });
+                return;
+            }
+            Begin(src);
+        }
+
+        // 真正开录（倒计时完）
+        void Begin(Source src)
+        {
+            bool studioOn = studio.Checked;
+            if (studioOn && !StudioSession.Available) { Say(L("找不到 ffmpeg，Studio 效果用不了（请重新下载 录屏.exe）", "ffmpeg is missing, Studio effects can't run (please download the app again)"), true); return; }
             string name = NewName(), outPath = Unique(Path.Combine(Desktop, name + ".mp4"));
             // Studio 模式：原始画面写进素材文件夹，成片录完再生成到 outPath
-            StudioProject proj = studioOn ? StudioProject.Create(name, outPath, src) : null;
+            StudioSession proj = studioOn ? StudioSession.Create(name, outPath, src) : null;
             Session s;
             try
             {
                 s = new Session(src, sysAudio.Checked, mic.Checked, cursor.Checked && !studioOn, proj?.Raw ?? outPath);
                 s.Completed += path => BeginInvoke((Action)(() => Finished(path, null)));
                 s.Failed += err => BeginInvoke((Action)(() => Finished(null, err)));
+                if (hideIcons.Checked && src.Kind != SourceKind.Window) DesktopIcons.Hide();   // 只录某个窗口时桌面本来就不在画面里
                 proj?.Tracker.Start();   // 比画面早一点开始记，第一帧前后都有鼠标位置
                 s.Start();
             }
             catch (Exception e)
             {
                 proj?.Tracker.Stop();
+                DesktopIcons.Restore();
                 if (proj != null) try { Directory.Delete(proj.Dir, true); } catch { }
                 Say(L("开始录制失败：", "Couldn't start recording: ") + e.Message, true);
                 return;
@@ -376,6 +416,7 @@ namespace ScreenRecorder
             bool wasStopping = busy;
             var s = session; var proj = project;
             session = null; project = null; busy = false; timer.Stop();
+            DesktopIcons.Restore();
             UpdateUi();
             if (error != null)
             {
@@ -383,7 +424,7 @@ namespace ScreenRecorder
                 Say((wasStopping ? L("保存失败：", "Save failed: ") : L("录制中断：", "Recording interrupted: ")) + error, true);
                 return;
             }
-            if (proj != null) { RenderStudio(proj, s.FirstFrameAt); return; }
+            if (proj != null) { OpenStudio(proj, s.FirstFrameAt); return; }
             Saved(path);
         }
 
@@ -410,37 +451,53 @@ namespace ScreenRecorder
             Shots.Start(bmp => { using (bmp) Shots.Deliver(bmp); });
         }
 
-        // 存轨迹，按轨迹生成 Studio 版（后台线程；进度显示在状态栏）
-        void RenderStudio(StudioProject proj, double firstFrameAt)
+        // Studio 录完：存轨迹，打开剪辑窗口（推近、修剪、样式都在那里调，点「导出」出成片到桌面）
+        void OpenStudio(StudioSession proj, double firstFrameAt)
         {
             busy = true; UpdateUi();
-            Say(L("正在生成 Studio 版…", "Rendering Studio version…"));
+            Say(L("正在打开剪辑窗口…", "Opening the editor…"));
             System.Threading.Tasks.Task.Run(() =>
             {
                 string err = null;
-                RenderStats stats = null;
-                try
-                {
-                    stats = proj.Finish(firstFrameAt, p => BeginInvoke((Action)(() => Say(L($"正在生成 Studio 版… {(int)(p * 100)}%", $"Rendering Studio version… {(int)(p * 100)}%")))));
-                }
+                try { proj.SaveTrack(firstFrameAt); }
                 catch (Exception e) { err = e.Message; }
                 BeginInvoke((Action)(() =>
                 {
                     busy = false; UpdateUi();
-                    if (err != null)
-                    {
-                        Say(L("生成 Studio 版失败（原始素材在「Studio 素材」文件夹）：", "Studio render failed (raw footage is in the “Studio 素材” folder): ") + err, true);
-                        return;
-                    }
-                    Saved(proj.Out);
-                    // 生成用了多久、用的显卡还是 CPU（详细的在素材文件夹的 render.log）
-                    if (stats != null)
-                    {
-                        string how = stats.Gpu || stats.Encoder != "libx264" ? L("显卡", "GPU") : "CPU";
-                        Say(L($"Studio 版已存到桌面，生成用时 {stats.TotalSeconds:0} 秒（{how}）：", $"Studio version saved to Desktop, rendered in {stats.TotalSeconds:0} s ({how}): ") + Path.GetFileName(proj.Out));
-                    }
+                    if (err != null) { Say(L("保存 Studio 素材失败：", "Couldn't save the Studio footage: ") + err, true); return; }
+                    ShowEditor(proj.Dir, proj.Out);
                 }));
             });
+        }
+
+        void ShowEditor(string dir, string outPath = null)
+        {
+            try
+            {
+                var ed = StudioEditor.Open(dir, outPath);
+                ed.Exported -= OnExported; ed.Exported += OnExported;
+                Say(L("剪辑窗口已打开：调好后点右上角「导出」", "Editor opened: click Export (top right) when you're done"));
+            }
+            catch (Exception e) { Say(L("打开剪辑窗口失败：", "Couldn't open the editor: ") + e.Message, true); }
+        }
+
+        void OnExported(string path) { if (!IsDisposed) BeginInvoke((Action)(() => Saved(path))); }
+
+        // 「打开 Studio 素材…」：选一个素材文件夹（里面要有 raw.mp4 和 track.json）
+        void OpenFootage()
+        {
+            using (var dlg = new FolderBrowserDialog { Description = L("选一个 Studio 素材文件夹", "Choose a Studio footage folder"), SelectedPath = StudioSession.Folder, ShowNewFolderButton = false })
+            {
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                var dir = dlg.SelectedPath;
+                if (!File.Exists(Path.Combine(dir, "raw.mp4")) || !File.Exists(Path.Combine(dir, "track.json")))
+                {
+                    Say(L("这个文件夹不是 Studio 素材（里面要有 raw.mp4 和 track.json）", "That folder isn't Studio footage (it needs raw.mp4 and track.json)"), true);
+                    return;
+                }
+                if (!StudioSession.Available) { Say(L("找不到 ffmpeg，Studio 剪辑用不了（请重新下载 录屏.exe）", "ffmpeg is missing, the Studio editor can't run"), true); return; }
+                ShowEditor(dir);
+            }
         }
 
         static void Open(string path)
@@ -552,6 +609,7 @@ namespace ScreenRecorder
             }
             UnregisterHotKey(Handle, HotkeyId);
             UnregisterHotKey(Handle, ShotHotkeyId);
+            DesktopIcons.Restore();
             base.OnFormClosing(e);
         }
 
