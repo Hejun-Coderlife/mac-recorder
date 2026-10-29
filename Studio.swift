@@ -120,6 +120,57 @@ struct StudioStyle {
     var zoom = 2.0                 // 放大时镜头推近几倍
     var fps = 60
     var bitsPerPixel = 0.12        // 码率：每像素每帧多少比特
+    var minBitRate = 10_000_000    // 码率下限
+    var maxShort: Double?          // 成片短边最多多少像素（nil = 原始大小，画面 1:1）
+    var maxWidth: Double?          // 成片宽度最多多少（GIF 用）
+    var gif = false                // 导出 GIF
+
+    // 按导出选项设好：分辨率、帧率、画质、格式
+    init(_ o: ExportOptions? = nil) {
+        guard let o else { return }
+        if o.format == .gif {
+            gif = true; fps = 15; maxWidth = 960
+        } else {
+            fps = o.fps == 30 ? 30 : 60
+            maxShort = o.res.shortEdge
+            switch o.quality {
+            case .high: bitsPerPixel = 0.12; minBitRate = 10_000_000
+            case .standard: bitsPerPixel = 0.07; minBitRate = 6_000_000
+            case .small: bitsPerPixel = 0.035; minBitRate = 3_000_000
+            }
+        }
+    }
+}
+
+// 剪辑窗口「导出」旁边的选项；记住上次选的
+struct ExportOptions: Codable, Equatable {
+    enum Res: String, Codable, CaseIterable {
+        case original, uhd = "4k", qhd = "1440p", hd = "1080p", sd = "720p"
+        var shortEdge: Double? { switch self { case .original: nil; case .uhd: 2160; case .qhd: 1440; case .hd: 1080; case .sd: 720 } }
+    }
+    enum Quality: String, Codable, CaseIterable { case high, standard, small }
+    enum Format: String, Codable, CaseIterable { case video, gif }
+    // 默认 1440p：推近时字照样清楚（放大 2 倍时原画面 1 像素≈成片 1.3 像素），像素只有 Retina 原始大小的四成多，导出快一倍多、文件小
+    var res = Res.qhd
+    var fps = 60
+    var quality = Quality.high
+    var format = Format.video
+    var copyToClipboard = false
+
+    init() {}
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self), z = ExportOptions()
+        res = (try? c.decodeIfPresent(Res.self, forKey: .res)) ?? z.res
+        fps = (try? c.decodeIfPresent(Int.self, forKey: .fps)) ?? z.fps
+        quality = (try? c.decodeIfPresent(Quality.self, forKey: .quality)) ?? z.quality
+        format = (try? c.decodeIfPresent(Format.self, forKey: .format)) ?? z.format
+        copyToClipboard = (try? c.decodeIfPresent(Bool.self, forKey: .copyToClipboard)) ?? z.copyToClipboard
+    }
+    private static let key = "studioExportOptions"
+    static var saved: ExportOptions {
+        get { UserDefaults.standard.data(forKey: key).flatMap { try? JSONDecoder().decode(ExportOptions.self, from: $0) } ?? ExportOptions() }
+        set { UserDefaults.standard.set(try? JSONEncoder().encode(newValue), forKey: key) }
+    }
 }
 
 struct RGB: Codable, Equatable {
@@ -270,7 +321,7 @@ struct StudioLayout {
     let card: CGRect               // 画面（圆角卡片）在画布上的位置
     let radius: Double
 
-    init(track: Track, look: StudioLook) {
+    init(track: Track, look: StudioLook, maxShort: Double? = nil, maxWidth: Double? = nil) {
         W = Double(track.width); H = Double(track.height)
         let f = min(max(look.padding, 0), 0.2), a = look.ratio ?? W / H
         // 先按「画面 1:1 放得下、四周留 f 的边」算画布
@@ -278,7 +329,10 @@ struct StudioLayout {
         if a >= 1 { ch = max(H / (1 - 2 * f), W / (a - 2 * f)); cw = ch * a }
         else { cw = max(W / (1 - 2 * f), H / (1 / a - 2 * f)); ch = cw / a }
         // H.264 硬件编码上限：边长 4096、约 890 万像素；超了整体缩小
-        let k = min(1, 4096 / max(cw, ch), (8_800_000 / (cw * ch)).squareRoot())
+        var k = min(1, 4096 / max(cw, ch), (8_800_000 / (cw * ch)).squareRoot())
+        // 导出选了较小的分辨率：整体按比例缩（只缩不放）。所有东西都按缩小后的画布画，不是画大了再缩
+        if let m = maxShort { k = min(k, m / min(cw, ch)) }
+        if let m = maxWidth { k = min(k, m / cw) }
         cw = (cw * k / 2).rounded(.down) * 2; ch = (ch * k / 2).rounded(.down) * 2
         self.cw = cw; self.ch = ch
         let pad = f * min(cw, ch)
@@ -519,17 +573,22 @@ enum Studio {
     static let failure = { (s: String) in NSError(domain: "Studio", code: 1, userInfo: [NSLocalizedDescriptionKey: s]) }
 
     // 成片文件名：透明背景存 HEVC .mov，其他背景存 H.264 .mp4
-    static func output(_ out: URL, look: StudioLook) -> URL { out.deletingPathExtension().appendingPathExtension(look.transparent ? "mov" : "mp4") }
+    static func output(_ out: URL, look: StudioLook, gif: Bool = false) -> URL {
+        out.deletingPathExtension().appendingPathExtension(gif ? "gif" : look.transparent ? "mov" : "mp4")
+    }
 
     // 返回实际写出的文件（扩展名跟着背景走）
     @discardableResult
     static func render(project dir: URL, to out: URL, style: StudioStyle = StudioStyle(), edits: StudioProject? = nil, progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
         let job = try await StudioJob(project: dir, out: out, style: style, project: edits, progress: progress)
-        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                do { try job.run(); c.resume() } catch { c.resume(throwing: error) }
+        // 取消导出（Task 被取消）：合成线程停下、写了一半的文件删掉
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do { try job.run(); c.resume() } catch { c.resume(throwing: error) }
+                }
             }
-        }
+        } onCancel: { job.cancel() }
         return job.outURL
     }
 
@@ -540,7 +599,17 @@ enum Studio {
         guard let p = env["STUDIO"] else { return false }
         let dir = URL(fileURLWithPath: p)
         let out = URL(fileURLWithPath: env["STUDIO_OUT"] ?? dir.appendingPathComponent("studio.mov").path)
-        var st = StudioStyle()
+        // STUDIO_RES=original|4k|1440p|1080p|720p STUDIO_FPS=30|60 STUDIO_QUALITY=high|standard|small STUDIO_FORMAT=video|gif（不给 = 原始大小、60 帧、高画质）
+        var o: ExportOptions?
+        if env["STUDIO_RES"] != nil || env["STUDIO_FPS"] != nil || env["STUDIO_QUALITY"] != nil || env["STUDIO_FORMAT"] != nil {
+            var x = ExportOptions(); x.res = .original
+            if let v = env["STUDIO_RES"].flatMap(ExportOptions.Res.init(rawValue:)) { x.res = v }
+            if let v = env["STUDIO_FPS"].flatMap(Int.init) { x.fps = v }
+            if let v = env["STUDIO_QUALITY"].flatMap(ExportOptions.Quality.init(rawValue:)) { x.quality = v }
+            if let v = env["STUDIO_FORMAT"].flatMap(ExportOptions.Format.init(rawValue:)) { x.format = v }
+            o = x
+        }
+        var st = StudioStyle(o)
         if let z = env["STUDIO_ZOOM"].flatMap(Double.init) { st.zoom = z }
         if let b = env["STUDIO_BPP"].flatMap(Double.init) { st.bitsPerPixel = b }
         Task {
@@ -554,6 +623,14 @@ enum Studio {
                     if let a = env["STUDIO_ASPECT"].flatMap(StudioLook.Aspect.init(rawValue:)) { pr.look.aspect = a }
                     if let b = env["STUDIO_BLUR"].flatMap(StudioLook.Blur.init(rawValue:)) { pr.look.blur = b }
                     edits = pr
+                }
+                // STUDIO_CANCEL=秒：导出开始这么久后取消，看能不能干净停下（文件删掉）
+                if let c = env["STUDIO_CANCEL"].flatMap(Double.init) {
+                    let job = Task { try await render(project: dir, to: out, style: st, edits: edits) { _ in } }
+                    try? await Task.sleep(for: .seconds(c)); job.cancel()
+                    let r = await job.result
+                    print("STUDIO CANCEL", String(format: "%.1fs", Date().timeIntervalSince(t0)), (try? r.get()) == nil ? "cancelled" : "finished")
+                    NSApp.terminate(nil); return
                 }
                 let u = try await render(project: dir, to: out, style: st, edits: edits) { _ in }
                 print("STUDIO OK", String(format: "%.1fs", Date().timeIntervalSince(t0)), u.path)
@@ -582,7 +659,7 @@ final class StudioRenderer: @unchecked Sendable {
 
     init(project dir: URL, track: Track, style: StudioStyle, look: StudioLook) {
         self.track = track; st = style; self.look = look
-        lay = StudioLayout(track: track, look: look)
+        lay = StudioLayout(track: track, look: look, maxShort: style.maxShort, maxWidth: style.maxWidth)
         let h = Double(track.height)
         clicks = track.clicks.map { ($0[0], $0[1], h - $0[2]) }
         arrow = Self.drawArrow()
@@ -650,7 +727,14 @@ final class StudioRenderer: @unchecked Sendable {
         var src = source
         let bh = src.extent.height   // 高度是奇数时底下补过 1 像素，切掉
         src = src.cropped(to: CGRect(x: 0, y: bh - H, width: W, height: H)).transformed(by: CGAffineTransform(translationX: 0, y: -(bh - H)))
-        var scene = src.transformed(by: lay.toScene).applyingFilter("CIBlendWithAlphaMask", parameters: [
+        // 成片里原画面缩得比较小（全景 + 导出分辨率小）：先用 Lanczos 缩好再贴，字不发虚、不闪；1:1 附近不碰，结果和原来一样
+        var toScene = lay.toScene
+        let eff = lay.s * f.z
+        if eff < 0.75 {
+            src = src.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: eff, kCIInputAspectRatioKey: 1.0])
+            toScene = CGAffineTransform(scaleX: 1 / eff, y: 1 / eff).concatenating(toScene)
+        }
+        var scene = src.transformed(by: toScene).applyingFilter("CIBlendWithAlphaMask", parameters: [
             kCIInputBackgroundImageKey: background!, kCIInputMaskImageKey: mask!,
         ])
         let t = Double(i) / Double(st.fps), ppp = track.pixelsPerPoint
@@ -769,7 +853,7 @@ final class StudioJob: @unchecked Sendable {
         let duration = try await asset.load(.duration).seconds
         self.progress = progress
         let p = project ?? StudioProject.load(dir, track: track, duration: duration, zoom: style.zoom)
-        outURL = Studio.output(out, look: p.look)
+        outURL = Studio.output(out, look: p.look, gif: style.gif)
         r = StudioRenderer(project: dir, track: track, style: style, look: p.look)
         plan = r.plan(p, duration: duration)
         let fps = Double(style.fps)
@@ -779,7 +863,14 @@ final class StudioJob: @unchecked Sendable {
         clickStyle = p.look.clickStyle
     }
 
+    private let lock = NSLock()
+    private var _cancelled = false
+    var cancelled: Bool { lock.lock(); defer { lock.unlock() }; return _cancelled }
+    func cancel() { lock.lock(); _cancelled = true; lock.unlock() }
+    private static let profiling = ProcessInfo.processInfo.environment["STUDIO_PROFILE"] != nil
+
     func run() throws {
+        if r.st.gif { try runGIF(); return }
         let st = r.st, lay = r.lay, fps = CMTimeScale(st.fps), alpha = r.look.transparent
         let range = CMTimeRange(start: CMTime(value: CMTimeValue(first), timescale: fps), end: CMTime(value: CMTimeValue(last), timescale: fps))
         let reader = try AVAssetReader(asset: asset)
@@ -804,7 +895,7 @@ final class StudioJob: @unchecked Sendable {
         let writer = try AVAssetWriter(outputURL: outURL, fileType: alpha ? .mov : .mp4)
         let w = Int(lay.cw), h = Int(lay.ch)
         var props: [String: Any] = [
-            AVVideoAverageBitRateKey: max(10_000_000, Int(Double(w * h * st.fps) * st.bitsPerPixel)),
+            AVVideoAverageBitRateKey: max(st.minBitRate, Int(Double(w * h * st.fps) * st.bitsPerPixel)),
             AVVideoExpectedSourceFrameRateKey: st.fps,
             AVVideoMaxKeyFrameIntervalKey: st.fps * 2,
         ]
@@ -836,44 +927,92 @@ final class StudioJob: @unchecked Sendable {
         guard reader.startReading() else { throw reader.error ?? Studio.failure("reader") }
         guard writer.startWriting() else { throw writer.error ?? Studio.failure("writer") }
 
-        // 原画面是「有变化才有新帧」，成片固定每秒 60 帧：每帧用当时最新的那张原画面
+        // 原画面是「有变化才有新帧」，成片固定帧率：每帧用当时最新的那张原画面
         guard var cur = vOut.copyNextSampleBuffer() else { throw Studio.failure(L("素材里没有画面", "No video in the recording")) }
         var next = vOut.copyNextSampleBuffer()
         writer.startSession(atSourceTime: range.start)
 
-        let group = DispatchGroup()
+        // 流水线：合成线程按顺序取原画面、交给显卡异步画（最多 depth 帧同时在画），
+        // 写入这边等最早那帧画完就交给编码器——取画面、显卡合成、编码三件事同时进行，谁也不干等谁
+        let depth = 4
+        // 从 0 开始再放 depth 个名额：取消时名额没还齐，信号量按初始值 0 判断就不会在释放时崩
+        let slots = DispatchSemaphore(value: 0), filled = DispatchSemaphore(value: 0)
+        for _ in 0..<depth { slots.signal() }
+        var ring: [(i: Int, pb: CVPixelBuffer, task: CIRenderTask?)] = []
+        var renderDone = false
         var failure: Error?
-        var i = first
+        func fail(_ e: Error) { lock.lock(); if failure == nil { failure = e }; lock.unlock() }
+        func failed() -> Bool { lock.lock(); defer { lock.unlock() }; return failure != nil || _cancelled }
+        var tDec = 0.0, tBuild = 0.0, tWait = 0.0, tAppend = 0.0
         let total = last - first
-        group.enter()
-        var videoDone = false
-        vIn.requestMediaDataWhenReady(on: DispatchQueue(label: "studio.video")) { [self] in
-            while vIn.isReadyForMoreMediaData && !videoDone {
-                if i >= last || failure != nil { videoDone = true; vIn.markAsFinished(); group.leave(); return }
+
+        let renderThread = Thread { [self] in
+            for i in first..<last {
+                slots.wait()
+                if failed() { break }
                 let pts = CMTime(value: CMTimeValue(i), timescale: fps)
+                var t0 = CACurrentMediaTime()
                 while let nx = next, nx.presentationTimeStamp <= pts { cur = nx; next = vOut.copyNextSampleBuffer() }
-                autoreleasepool {
-                    guard let src = CMSampleBufferGetImageBuffer(cur), let pool = adaptor.pixelBufferPool else { failure = Studio.failure("frame"); return }
+                tDec += CACurrentMediaTime() - t0
+                let ok: Bool = autoreleasepool {
+                    guard let src = CMSampleBufferGetImageBuffer(cur), let pool = adaptor.pixelBufferPool else { fail(Studio.failure("frame")); return false }
                     var pb: CVPixelBuffer?
                     CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
-                    guard let pb else { failure = Studio.failure("pool"); return }
-                    r.ctx.render(r.frame(i, plan: plan, source: CIImage(cvPixelBuffer: src)), to: pb, bounds: lay.canvas, colorSpace: nil)
-                    if !adaptor.append(pb, withPresentationTime: pts) { failure = writer.error ?? Studio.failure("append") }
+                    guard let pb else { fail(Studio.failure("pool")); return false }
+                    t0 = CACurrentMediaTime()
+                    let img = r.frame(i, plan: plan, source: CIImage(cvPixelBuffer: src))
+                    let dest = CIRenderDestination(pixelBuffer: pb)
+                    dest.colorSpace = nil
+                    let task: CIRenderTask
+                    do { task = try r.ctx.startTask(toRender: img, from: lay.canvas, to: dest, at: .zero) } catch { fail(error); return false }
+                    tBuild += CACurrentMediaTime() - t0
+                    lock.lock(); ring.append((i, pb, task)); lock.unlock()
+                    filled.signal()
+                    return true
                 }
-                i += 1
-                if (i - first) % 30 == 0 { progress(Double(i - first) / Double(total)) }
+                if !ok { break }
+            }
+            lock.lock(); renderDone = true; lock.unlock()
+            filled.signal()
+        }
+        renderThread.qualityOfService = .userInitiated
+
+        let group = DispatchGroup()
+        group.enter()
+        var videoDone = false, written = 0
+        vIn.requestMediaDataWhenReady(on: DispatchQueue(label: "studio.video")) { [self] in
+            while vIn.isReadyForMoreMediaData && !videoDone {
+                filled.wait()
+                lock.lock()
+                let item = ring.isEmpty ? nil : ring.removeFirst()
+                let done = renderDone && item == nil
+                lock.unlock()
+                guard let item, !done else {
+                    videoDone = true; vIn.markAsFinished(); group.leave(); return
+                }
+                if failed() { slots.signal(); continue }   // 出错 / 取消：剩下的帧丢掉，等合成线程收尾
+                var t0 = CACurrentMediaTime()
+                do { _ = try item.task?.waitUntilCompleted() } catch { fail(error) }
+                tWait += CACurrentMediaTime() - t0; t0 = CACurrentMediaTime()
+                if !adaptor.append(item.pb, withPresentationTime: CMTime(value: CMTimeValue(item.i), timescale: fps)) { fail(writer.error ?? Studio.failure("append")) }
+                tAppend += CACurrentMediaTime() - t0
+                slots.signal()
+                written += 1
+                if written % 30 == 0 { progress(Double(written) / Double(total)) }
             }
         }
+        renderThread.start()
         if let aIn {
             group.enter()
             var audioDone = false
             let clicks = ClickSound(times: clickTimes, style: clickStyle)
             // 没有原声音只有点击声：自己按 0.1 秒一块生成静音 + 点击
             var genAt = Int64((range.start.seconds * 48000).rounded()), genEnd = Int64((range.end.seconds * 48000).rounded())
-            aIn.requestMediaDataWhenReady(on: DispatchQueue(label: "studio.audio")) {
+            aIn.requestMediaDataWhenReady(on: DispatchQueue(label: "studio.audio")) { [self] in
                 while aIn.isReadyForMoreMediaData && !audioDone {
                     let sb: CMSampleBuffer?
-                    if let aOut {
+                    if failed() { sb = nil }
+                    else if let aOut {
                         sb = aOut.copyNextSampleBuffer().map { clicks.isEmpty ? $0 : (clicks.mix(into: $0) ?? $0) }
                     } else if genAt < genEnd {
                         let n = Int(min(4800, genEnd - genAt))
@@ -885,6 +1024,11 @@ final class StudioJob: @unchecked Sendable {
             }
         }
         group.wait()
+        while !renderThread.isFinished { usleep(1000) }
+        if cancelled {
+            reader.cancelReading(); writer.cancelWriting(); try? FileManager.default.removeItem(at: outURL)
+            throw CancellationError()
+        }
         if let failure { reader.cancelReading(); writer.cancelWriting(); throw failure }
         if reader.status == .failed { writer.cancelWriting(); throw reader.error ?? Studio.failure("reader") }
         let sem = DispatchSemaphore(value: 0)
@@ -892,6 +1036,45 @@ final class StudioJob: @unchecked Sendable {
         writer.finishWriting { sem.signal() }
         sem.wait()
         guard writer.status == .completed else { throw writer.error ?? Studio.failure("finish") }
+        progress(1)
+        if Self.profiling {
+            print(String(format: "PROFILE %dx%d %dfps frames %d | decode %.1fs  build+submit %.1fs  wait-gpu %.1fs  append %.1fs", w, h, st.fps, written, tDec, tBuild, tWait, tAppend))
+        }
+    }
+
+    // GIF：宽不超过 960、每秒 15 帧；透明背景铺白（GIF 的透明只有全透 / 不透，阴影会很难看）
+    private func runGIF() throws {
+        let lay = r.lay, fps = CMTimeScale(r.st.fps)
+        let range = CMTimeRange(start: CMTime(value: CMTimeValue(first), timescale: fps), end: CMTime(value: CMTimeValue(last), timescale: fps))
+        let reader = try AVAssetReader(asset: asset)
+        reader.timeRange = range
+        let vOut = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
+        vOut.alwaysCopiesSampleData = false
+        reader.add(vOut)
+        guard reader.startReading() else { throw reader.error ?? Studio.failure("reader") }
+        guard var cur = vOut.copyNextSampleBuffer() else { throw Studio.failure(L("素材里没有画面", "No video in the recording")) }
+        var next = vOut.copyNextSampleBuffer()
+        try? FileManager.default.removeItem(at: outURL)
+        let total = last - first
+        guard let dst = CGImageDestinationCreateWithURL(outURL as CFURL, "com.compuserve.gif" as CFString, total, nil) else { throw Studio.failure("gif") }
+        CGImageDestinationSetProperties(dst, [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0]] as CFDictionary)
+        let frameProps = [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: 1.0 / Double(r.st.fps), kCGImagePropertyGIFUnclampedDelayTime: 1.0 / Double(r.st.fps)]] as CFDictionary
+        let white = CIImage(color: .white).cropped(to: lay.canvas), srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+        for i in first..<last {
+            if cancelled { break }
+            let pts = CMTime(value: CMTimeValue(i), timescale: fps)
+            while let nx = next, nx.presentationTimeStamp <= pts { cur = nx; next = vOut.copyNextSampleBuffer() }
+            try autoreleasepool {
+                guard let src = CMSampleBufferGetImageBuffer(cur) else { throw Studio.failure("frame") }
+                let img = r.frame(i, plan: plan, source: CIImage(cvPixelBuffer: src)).composited(over: white)
+                guard let cg = r.ctx.createCGImage(img, from: lay.canvas, format: .RGBA8, colorSpace: srgb) else { throw Studio.failure("gif frame") }
+                CGImageDestinationAddImage(dst, cg, frameProps)
+            }
+            if (i - first) % 15 == 0 { progress(Double(i - first) / Double(total) * 0.9) }
+        }
+        reader.cancelReading()
+        if cancelled { try? FileManager.default.removeItem(at: outURL); throw CancellationError() }
+        guard CGImageDestinationFinalize(dst) else { throw Studio.failure("gif") }
         progress(1)
     }
 }

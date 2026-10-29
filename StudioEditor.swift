@@ -49,6 +49,9 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     @Published var exportProgress: Double?
     @Published var exported: URL?
     @Published var exportError: String?
+    @Published var exportCopied = false
+    @Published var exportOptions = ExportOptions.saved { didSet { ExportOptions.saved = exportOptions } }
+    private var exportTask: Task<Void, Never>?
     @Published var still: NSImage?             // 截图自测时用静态画面代替播放器
     @Published var presets = PresetStore.load()
     @Published var timelineScale = 1.0         // 时间轴横向放大（1 = 整段刚好铺满）
@@ -418,19 +421,28 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     func export() {
         guard exportProgress == nil else { return }
         saveNow()
-        exported = nil; exportError = nil; exportProgress = 0
-        let dir = self.dir, out = self.out, p = project
-        Task {
+        exported = nil; exportError = nil; exportCopied = false; exportProgress = 0
+        let dir = self.dir, out = self.out, p = project, o = exportOptions
+        exportTask = Task {
             do {
-                exported = try await Studio.render(project: dir, to: out, edits: p) { v in
-                    Task { @MainActor [weak self] in self?.exportProgress = v }
+                let u = try await Studio.render(project: dir, to: out, style: StudioStyle(o), edits: p) { v in
+                    Task { @MainActor [weak self] in if self?.exportProgress != nil { self?.exportProgress = v } }
                 }
+                exported = u
+                // 导出后放进剪贴板：在微信、访达里直接粘贴就是这个文件
+                if o.copyToClipboard {
+                    NSPasteboard.general.clearContents()
+                    exportCopied = NSPasteboard.general.writeObjects([u as NSURL])
+                }
+            } catch is CancellationError {
             } catch {
                 exportError = L("导出失败：", "Export failed: ") + error.localizedDescription
             }
-            exportProgress = nil
+            exportProgress = nil; exportTask = nil
         }
     }
+
+    func cancelExport() { exportTask?.cancel() }
 }
 
 // ---- 界面 ----
@@ -470,13 +482,15 @@ struct EditorView: View {
             if let p = ed.exportProgress {
                 ProgressView(value: p).frame(width: 160)
                 Text("\(Int(p * 100))%").font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                Button(L("取消", "Cancel")) { ed.cancelExport() }
             } else if let u = ed.exported {
-                Text(L("已导出", "Exported")).font(.callout).foregroundStyle(.secondary)
+                Text(ed.exportCopied ? L("已导出，已复制到剪贴板", "Exported and copied") : L("已导出", "Exported")).font(.callout).foregroundStyle(.secondary)
                 Button(L("打开", "Open")) { NSWorkspace.shared.open(u) }
                 Button(L("在访达中显示", "Show in Finder")) { NSWorkspace.shared.activateFileViewerSelecting([u]) }
             } else if let e = ed.exportError {
                 Text(e).font(.callout).foregroundStyle(.red).lineLimit(1)
             }
+            ExportOptionsButton(ed: ed).disabled(ed.exportProgress != nil)
             Button(L("导出", "Export")) { ed.export() }.buttonStyle(.borderedProminent).disabled(ed.exportProgress != nil)
         }
     }
@@ -1410,5 +1424,89 @@ enum StudioTests {
     static func play(_ c: StudioLook.Click) {
         player = try? AVAudioPlayer(data: ClickSound.wav(c))
         player?.play()
+    }
+}
+
+// 「导出」左边的小按钮：写着当前设置（1440p · 60 帧），点开改分辨率、帧率、画质、格式、导出后复制
+struct ExportOptionsButton: View {
+    @ObservedObject var ed: StudioEditor
+    @State private var open = false
+
+    static func resName(_ r: ExportOptions.Res) -> String {
+        switch r { case .original: L("原始大小", "Original"); case .uhd: "4K"; case .qhd: "1440p"; case .hd: "1080p"; case .sd: "720p" }
+    }
+    private var summary: String {
+        let o = ed.exportOptions
+        return o.format == .gif ? "GIF" : "\(Self.resName(o.res)) · \(o.fps)" + L(" 帧", "fps")
+    }
+
+    var body: some View {
+        Button { open.toggle() } label: {
+            HStack(spacing: 4) { Image(systemName: "slider.horizontal.3"); Text(summary).font(.callout.monospacedDigit()) }
+        }
+        .help(L("导出设置：分辨率、帧率、画质、格式", "Export settings: resolution, frame rate, quality, format"))
+        .popover(isPresented: $open, arrowEdge: .bottom) { ExportOptionsPanel(o: $ed.exportOptions) }
+    }
+}
+
+struct ExportOptionsPanel: View {
+    @Binding var o: ExportOptions
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(L("导出设置", "Export Settings")).font(.headline)
+            Picker(L("格式", "Format"), selection: $o.format) {
+                Text(L("视频", "Video")).tag(ExportOptions.Format.video)
+                Text("GIF").tag(ExportOptions.Format.gif)
+            }.pickerStyle(.segmented)
+            if o.format == .video {
+                Picker(L("分辨率", "Resolution"), selection: $o.res) {
+                    ForEach(ExportOptions.Res.allCases, id: \.self) { Text(ExportOptionsButton.resName($0)).tag($0) }
+                }
+                Picker(L("帧率", "Frame rate"), selection: $o.fps) {
+                    Text(L("60 帧（更顺）", "60 fps (smoother)")).tag(60)
+                    Text(L("30 帧（更快更小）", "30 fps (faster, smaller)")).tag(30)
+                }
+                Picker(L("画质", "Quality"), selection: $o.quality) {
+                    Text(L("高", "High")).tag(ExportOptions.Quality.high)
+                    Text(L("标准", "Standard")).tag(ExportOptions.Quality.standard)
+                    Text(L("小文件", "Small file")).tag(ExportOptions.Quality.small)
+                }
+                Text(L("分辨率越小、帧率越低，导出越快。发微信、抖音选 1080p 就够；透明背景导出 .mov，其他导出 .mp4",
+                       "Lower resolution and frame rate export faster. 1080p is plenty for social media; transparent backgrounds export .mov, others .mp4"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(L("GIF：宽 960、每秒 15 帧、没有声音；透明背景会铺成白色。适合发很短的片段",
+                       "GIF: 960 wide, 15 fps, no sound; transparent backgrounds become white. Best for short clips"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Toggle(isOn: $o.copyToClipboard) {
+                Text(L("导出后复制到剪贴板（可以直接粘贴到微信、访达）", "Copy to clipboard after export (paste into chats or Finder)"))
+                    .fixedSize(horizontal: false, vertical: true)
+            }.toggleStyle(.checkbox)
+        }
+        .padding(16).frame(width: 320)
+    }
+
+    // 自测：EXPORTOPTSSHOT=图片路径 [EXPORTOPTS_GIF=1] → 不开窗口，把导出设置面板画成图片后退出
+    @MainActor static func selfTest() -> Bool {
+        let env = ProcessInfo.processInfo.environment
+        guard let path = env["EXPORTOPTSSHOT"] else { return false }
+        var o = ExportOptions(); if env["EXPORTOPTS_GIF"] != nil { o.format = .gif }
+        // 系统控件（下拉框、复选框）只有放进真窗口才画得出来：窗口放到屏幕外，不抢前台
+        NSApp.setActivationPolicy(.accessory)
+        let v = NSHostingView(rootView: ExportOptionsPanel(o: .constant(o)).background(Color(nsColor: .windowBackgroundColor)))
+        if let a = env["EDITOR_APPEARANCE"] { v.appearance = NSAppearance(named: a == "dark" ? .darkAqua : .aqua) }
+        v.frame.size = v.fittingSize
+        let w = NSWindow(contentRect: v.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        w.contentView = v; w.setFrameOrigin(CGPoint(x: -20000, y: -20000)); w.orderBack(nil)
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(0.5))
+            if let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) {
+                v.cacheDisplay(in: v.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path)); print("EXPORTOPTSSHOT OK", path)
+            }
+            exit(0)
+        }
+        return true
     }
 }

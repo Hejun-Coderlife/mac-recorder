@@ -812,7 +812,7 @@ struct RecorderApp: App {
             ContentView(rec: rec)
                 .onAppear {
                     HotKey.action = { [weak rec] in rec?.toggle() }
-                    if Studio.selfTest() || Updater.selfTest() || StudioTests.planTest() || StudioTests.scrubTest() || StudioTests.editorShot() || StudioTests.blurTest() || StudioTests.presetTest() || Countdown.selfTest() || Recorder.iconsTest() { return }
+                    if Studio.selfTest() || Updater.selfTest() || ExportOptionsPanel.selfTest() || StudioTests.planTest() || StudioTests.scrubTest() || StudioTests.editorShot() || StudioTests.blurTest() || StudioTests.presetTest() || Countdown.selfTest() || Recorder.iconsTest() { return }
                     if ProcessInfo.processInfo.environment["AUTOTEST"] == nil {
                         Updater.shared.isBusy = { [weak rec] in rec.map { $0.recording || $0.busy } ?? false }
                         Updater.shared.start()
