@@ -141,6 +141,12 @@ final class Recorder: NSObject, ObservableObject {
     @Published var countdown = UserDefaults.standard.integer(forKey: "countdown") { didSet { UserDefaults.standard.set(countdown, forKey: "countdown") } }
     // 录整个屏幕 / 区域时不录桌面上的图标（只排除访达画图标的那层窗口，桌面图片照录）
     @Published var hideDesktopIcons = UserDefaults.standard.bool(forKey: "hideDesktopIcons") { didSet { UserDefaults.standard.set(hideDesktopIcons, forKey: "hideDesktopIcons") } }
+    // 摄像头：屏幕上浮一个小窗；普通录制直接录进画面，Studio 模式单独录成 camera.mp4、剪辑时再摆
+    @Published var camera = false
+    @Published var cameraID = UserDefaults.standard.string(forKey: "cameraID") { didSet { UserDefaults.standard.set(cameraID, forKey: "cameraID"); if camera { setCamera(true) } } }
+    private let camCapture = CameraCapture()
+    private var camRecording = false
+    private var recordArea: (() -> CGRect?)?
     @Published var counting = false
     private var countdownCancelled = false
     private var needsPermission = false
@@ -208,6 +214,20 @@ final class Recorder: NSObject, ObservableObject {
         }
     }
 
+    // 打开 / 关上摄像头小窗（第一次会弹相机授权）
+    func setCamera(_ on: Bool) {
+        guard on else { CameraBubble.shared.hide(); camCapture.stopSession(); camera = false; return }
+        Task { @MainActor in
+            guard await AVCaptureDevice.requestAccess(for: .video) else {
+                camera = false
+                say(L("没有相机权限：系统设置 → 隐私与安全性 → 相机，打开「\(appName)」", "No camera permission: System Settings → Privacy & Security → Camera, turn on “\(appName)”"), error: true)
+                return
+            }
+            do { try camCapture.start(deviceID: cameraID); CameraBubble.shared.show(session: camCapture.session); camera = true }
+            catch { camera = false; say(L("打开摄像头失败：", "Couldn't open the camera: ") + error.localizedDescription, error: true) }
+        }
+    }
+
     func toggle() {
         if counting { countdownCancelled = true; return }   // 倒计时中再按一次 = 取消
         guard !busy else { return }
@@ -240,13 +260,13 @@ final class Recorder: NSObject, ObservableObject {
             guard let r = region, let d = c.displays.first(where: { $0.displayID == r.display }) else {
                 say(L("那块屏幕不见了，重新选一下区域", "That screen is gone, select the area again"), error: true); return
             }
-            filter = await displayFilter(d, content: c)
+            filter = await displayFilter(d, content: c, keepBubble: camera && !studio)
             crop = r.rect
             let a = r.rect.offsetBy(dx: CGDisplayBounds(r.display).minX, dy: CGDisplayBounds(r.display).minY)
             area = { a }
         } else if sel.hasPrefix("d"), let d = c.displays.first(where: { "d\($0.displayID)" == sel }) {
-            // 整个屏幕：把本程序自己的窗口排除掉
-            filter = await displayFilter(d, content: c)
+            // 整个屏幕：把本程序自己的窗口排除掉（普通录制开着摄像头时小窗留着，直接录进画面）
+            filter = await displayFilter(d, content: c, keepBubble: camera && !studio)
             let a = CGDisplayBounds(d.displayID)
             area = { a }
         } else if let w = c.windows.first(where: { "w\($0.windowID)" == sel }) {
@@ -304,6 +324,12 @@ final class Recorder: NSObject, ObservableObject {
         do { w = try Writer(url: rawURL, width: cfg.width, height: cfg.height, system: systemAudio, mic: microphone) }
         catch { say(L("开始录制失败：", "Couldn't start recording: ") + error.localizedDescription, error: true); return }
         let tr = studioOn ? CursorTracker(size: CGSize(width: pw, height: ph), pixelsPerPoint: Double(scale), area: area) : nil
+        recordArea = area
+        camRecording = false
+        if studioOn, camera, let dir {   // Studio 模式：摄像头单独录，剪辑时再摆（小窗不录进原始画面）
+            do { try camCapture.beginRecording(to: dir.appendingPathComponent("camera.mp4")); camRecording = true }
+            catch { say(L("摄像头没能开始录：", "Camera recording didn't start: ") + error.localizedDescription, error: true) }
+        }
         w.onError = { [weak self] e in Task { @MainActor in self?.fail(e) } }
         let s = SCStream(filter: filter, configuration: cfg, delegate: self)
         do {
@@ -329,12 +355,15 @@ final class Recorder: NSObject, ObservableObject {
     }
 
     // 录整个屏幕 / 区域的范围：排除本程序；开了「隐藏桌面图标」再排除访达画桌面图标的那层窗口
-    private func displayFilter(_ d: SCDisplay, content c: SCShareableContent) async -> SCContentFilter {
+    private func displayFilter(_ d: SCDisplay, content c: SCShareableContent, keepBubble: Bool = false) async -> SCContentFilter {
         let me = Bundle.main.bundleIdentifier
+        let bubbleID = keepBubble ? CameraBubble.shared.windowID : nil
+        let fresh = bubbleID != nil ? try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) : nil
         guard hideDesktopIcons, let all = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else {
-            return SCContentFilter(display: d, excludingApplications: c.applications.filter { $0.bundleIdentifier == me }, exceptingWindows: [])
+            let keep = (fresh ?? c).windows.filter { $0.windowID == bubbleID }
+            return SCContentFilter(display: d, excludingApplications: c.applications.filter { $0.bundleIdentifier == me }, exceptingWindows: keep)
         }
-        let skip = all.windows.filter { $0.owningApplication?.bundleIdentifier == me || Self.isDesktopIcons($0) }
+        let skip = all.windows.filter { ($0.owningApplication?.bundleIdentifier == me && $0.windowID != bubbleID) || Self.isDesktopIcons($0) }
         return SCContentFilter(display: d, excludingWindows: skip)
     }
     // 访达的桌面图标窗口：层级在普通窗口之下（桌面图片是程序坞 / 壁纸进程画的，不是访达，不会被排除）
@@ -357,7 +386,7 @@ final class Recorder: NSObject, ObservableObject {
         // Studio 模式：存轨迹，打开剪辑窗口（自动生成推近段，调好再导出；声音在导出时混成一条）
         if let tr, let dir, let out = lastFile {
             if ProcessInfo.processInfo.environment["AUTOTEST"] == nil {
-                do { try tr.save(to: dir, start: w.startSeconds) }
+                do { try tr.save(to: dir, start: w.startSeconds); await saveCamera(dir: dir, start: w.startSeconds) }
                 catch { say(L("保存 Studio 素材失败：", "Couldn't save Studio footage: ") + error.localizedDescription, error: true); return }
                 say(L("已打开 Studio 剪辑窗口，调好后点「导出」", "Opened the Studio editor — adjust, then click Export"))
                 await StudioEditor.open(dir)
@@ -383,6 +412,21 @@ final class Recorder: NSObject, ObservableObject {
         }
         finished(nil)
     }
+    // Studio 模式录了摄像头：收尾 camera.mp4，把对齐偏移和小窗位置写进 track.json
+    private func saveCamera(dir: URL, start: Double) async {
+        guard camRecording else { return }
+        camRecording = false
+        guard let first = await camCapture.endRecording() else { try? FileManager.default.removeItem(at: dir.appendingPathComponent("camera.mp4")); return }
+        let url = dir.appendingPathComponent("track.json")
+        guard var t = try? JSONDecoder().decode(Track.self, from: Data(contentsOf: url)) else { return }
+        var ct = CameraTrack()
+        ct.offset = first - start
+        ct.round = CameraBubble.shared.round
+        if let a = recordArea?(), let pl = CameraBubble.shared.placement(in: a) { ct.x = pl.x; ct.y = pl.y; ct.size = pl.size }
+        t.camera = ct
+        try? JSONEncoder().encode(t).write(to: url)
+    }
+
     // 录到一半出错（写文件失败、窗口关了）：停下，提示原因
     fileprivate func fail(_ e: Error) {
         say(L("录制出错：", "Recording error: ") + e.localizedDescription, error: true)
@@ -723,6 +767,9 @@ struct ContentView: View {
                 Toggle(L("显示鼠标", "Show cursor"), isOn: $rec.showCursor).disabled(rec.studio)
                 Toggle(L("Studio 效果", "Studio effects"), isOn: $rec.studio)
                     .help(L("自动放大点击和打字的地方、鼠标更顺滑、加背景和圆角阴影；录完自动生成", "Auto-zoom on clicks and typing, smooth cursor, background with rounded corners and shadow; rendered after recording"))
+                Toggle(L("摄像头", "Camera"), isOn: Binding(get: { rec.camera }, set: { rec.setCamera($0) }))
+                    .help(L("屏幕上浮一个摄像头小窗，可拖动、右键换形状和大小。普通录制直接录进画面；开了 Studio 效果会单独录，剪辑时再调位置和布局",
+                            "Shows a floating camera bubble (drag it; right-click for shape and size). Normal recordings capture it as is; with Studio effects it's recorded separately so you can lay it out in the editor"))
             }.disabled(rec.recording || rec.busy)
             HStack(spacing: 22) {
                 Picker(L("倒计时", "Countdown"), selection: $rec.countdown) {
@@ -734,6 +781,12 @@ struct ContentView: View {
                     .help(L("录整个屏幕或区域时，画面里不出现桌面上的图标（桌面本身不动）", "Desktop icons are left out of full-screen and area recordings (your desktop isn't changed)"))
                 FocusToggle()
             }.disabled(rec.recording || rec.busy)
+            // 开着摄像头、接了不止一个摄像头时选用哪个
+            if rec.camera, CameraCapture.devices.count > 1 {
+                Picker(L("摄像头", "Camera"), selection: Binding(get: { rec.cameraID ?? CameraCapture.devices.first?.uniqueID ?? "" }, set: { rec.cameraID = $0 })) {
+                    ForEach(CameraCapture.devices, id: \.uniqueID) { Text($0.localizedName).tag($0.uniqueID) }
+                }.frame(width: 320).disabled(rec.recording || rec.busy)
+            }
 
             HStack(alignment: .center, spacing: 16) {
                 Button(action: rec.toggle) {

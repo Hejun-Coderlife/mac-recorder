@@ -20,6 +20,10 @@ final class PlanBox: @unchecked Sendable {
     private var cap: CaptionLayer?
     var captions: CaptionLayer? { lock.lock(); defer { lock.unlock() }; return cap }
     func setCaptions(_ c: CaptionLayer?) { lock.lock(); cap = c; lock.unlock() }
+    // 摄像头画中画（素材时间查）
+    private var cam: CameraLayer?
+    var camera: CameraLayer? { lock.lock(); defer { lock.unlock() }; return cam }
+    func setCamera(_ c: CameraLayer?) { lock.lock(); cam = c; lock.unlock() }
 }
 
 @MainActor
@@ -145,6 +149,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         }
         box.set(box.renderer.plan(project, duration: duration), renderer: box.renderer)
         box.setCaptions(captionLayer(box.renderer))
+        box.setCamera(cameraLayer(box.renderer))
         let item = AVPlayerItem(asset: asset)
         item.videoComposition = makeComposition()
         item.audioMix = PreviewAudio.mix(tracks: aTracks, gains: gains)
@@ -351,6 +356,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
             let i = min(max(Int((req.compositionTime.seconds * fps).rounded()), 0), plan.count - 1)
             let kk = min(1, 1600 / max(r.lay.cw, r.lay.ch))   // 样式刚改、合成还没换时按新画布缩放
             var img = r.frame(i, plan: plan, source: req.sourceImage)
+            if let cam = box.camera { img = cam.compose(img, srcTime: req.compositionTime.seconds) }
             if let c = box.captions?.image(atSource: req.compositionTime.seconds) { img = c.composited(over: img) }
             img = img.transformed(by: CGAffineTransform(scaleX: kk, y: kk))
             req.finish(with: img.composited(over: bg).cropped(to: bg.extent), context: nil)
@@ -373,6 +379,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
                 if r.look != self.project.look { r = StudioRenderer(project: self.dir, track: self.track, style: self.style, look: self.project.look) }
                 self.box.set(r.plan(self.project, duration: self.duration), renderer: r)
                 self.box.setCaptions(self.captionLayer(r))
+                self.box.setCamera(self.cameraLayer(r))
                 self.player.currentItem?.videoComposition = self.makeComposition()
                 self.refreshDenoise()
                 self.updateGains()
@@ -391,6 +398,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         let (r, plan) = box.both, i = min(max(Int((t * fps).rounded()), 0), plan.count - 1)
         let lay = r.lay
         var fr = r.frame(i, plan: plan, source: CIImage(cgImage: cg))
+        if let cam = box.camera { fr = cam.compose(fr, srcTime: t) }
         if let c = box.captions?.image(atSource: t) { fr = c.composited(over: fr) }
         let img = fr.composited(over: CIImage(color: CIColor(red: 0.86, green: 0.86, blue: 0.88)).cropped(to: lay.canvas))
         let ctx = CIContext()
@@ -655,6 +663,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     func deleteSelected() {
         if let i = captionIndex(selected) { edit { $0.captions.remove(at: i) }; selected = nil; return }
         if let i = cutIndex(selected) { edit { $0.cuts.remove(at: i) }; selected = nil; return }
+        if let i = layoutIndex(selected) { edit { $0.layouts.remove(at: i) }; selected = nil; return }
         if let i = voiceIndex(selected) { edit { $0.voiceovers.remove(at: i) }; selected = nil; return }
         guard let i = index(selected) else { return }
         edit { $0.segments.remove(at: i) }
@@ -684,6 +693,57 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         let c = CutSegment(start: s, end: e)
         edit { $0.cuts.append(c); $0.cuts.sort { $0.start < $1.start } }
         selected = c.id
+    }
+
+    // ---- 摄像头画中画 ----
+    var hasCamera: Bool { track.camera != nil }
+    func cameraLayer(_ r: StudioRenderer) -> CameraLayer? {
+        CameraLayer(dir: dir, track: track, project: project, canvas: CGSize(width: r.lay.cw, height: r.lay.ch), background: r.background)
+    }
+    func camSet<T: Equatable>(_ kp: WritableKeyPath<CameraSettings, T>) -> Binding<T> {
+        Binding(get: { (self.project.camera ?? CameraSettings())[keyPath: kp] },
+                set: { v in self.edit { var c = $0.camera ?? CameraSettings(); c[keyPath: kp] = v; $0.camera = c } })
+    }
+    func camSlider(_ kp: WritableKeyPath<CameraSettings, Double>) -> Binding<Double> {
+        Binding(get: { (self.project.camera ?? CameraSettings())[keyPath: kp] },
+                set: { v in self.dragBegin(); self.dragUpdate { var c = $0.camera ?? CameraSettings(); c[keyPath: kp] = v; $0.camera = c } })
+    }
+    // 小窗在预览里的位置（比例，左上为原点），给拖动命中用
+    var cameraPipRect: CGRect? {
+        guard hasCamera, let c = project.camera, c.show else { return nil }
+        let lay = renderer.lay, r = CameraLayer.pipRect(c, cw: lay.cw, ch: lay.ch)
+        return CGRect(x: r.minX / lay.cw, y: 1 - r.maxY / lay.ch, width: r.width / lay.cw, height: r.height / lay.ch)
+    }
+    // 在预览上拖小窗：d = 拖了多远（预览里的比例）
+    func moveCamera(by d: CGSize, phase: Int) {
+        switch phase {
+        case 0: dragBegin()
+        case 1: dragUpdate { p in
+            var c = p.camera ?? CameraSettings()
+            c.x = min(max(c.x + d.width, 0), 1); c.y = min(max(c.y + d.height, 0), 1)
+            p.camera = c
+        }
+        default: dragEnd()
+        }
+    }
+    func layoutIndex(_ id: UUID?) -> Int? { project.layouts.firstIndex { $0.id == id } }
+    func layoutRoom(for id: UUID, in p: StudioProject) -> ClosedRange<Double> {
+        let ls = p.layouts.sorted { $0.start < $1.start }
+        guard let i = ls.firstIndex(where: { $0.id == id }) else { return 0...duration }
+        let lo = i > 0 ? ls[i - 1].end : 0, hi = i + 1 < ls.count ? ls[i + 1].start : duration
+        return lo...max(lo, hi)
+    }
+    // 在 t 处放一段布局（默认「摄像头全屏」2 秒），放不下就缩短
+    func addLayout(at t: Double) {
+        let len = 2.0, ls = project.layouts.sorted { $0.start < $1.start }
+        guard !ls.contains(where: { t >= $0.start && t < $0.end }) else { NSSound.beep(); return }
+        let lo = ls.last(where: { $0.end <= t })?.end ?? 0, hi = ls.first(where: { $0.start > t })?.start ?? duration
+        guard hi - lo >= 0.3 else { NSSound.beep(); return }
+        var s = max(lo, t), e = min(hi, s + len)
+        s = max(lo, e - len); e = min(hi, s + len)
+        let g = CameraLayoutSeg(start: s, end: e)
+        edit { $0.layouts.append(g); $0.layouts.sort { $0.start < $1.start } }
+        selected = g.id
     }
 
     // ---- 字幕 ----
@@ -897,9 +957,10 @@ struct EditorView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         if ed.captionIndex(ed.selected) != nil { captionInspector.frame(height: 30) }   // 选中字幕
                         else if ed.cutIndex(ed.selected) != nil { cutInspector.frame(height: 30) }   // 选中剪辑段
+                        else if ed.layoutIndex(ed.selected) != nil { layoutInspector.frame(height: 30) }   // 选中布局段
                         else if ed.voiceIndex(ed.selected) != nil { voiceInspector.frame(height: 30) }   // 选中讲解
                         else if ed.selected != nil { inspector.frame(height: 30) }   // 选中推近段才出现
-                        timeline.frame(height: 176)
+                        timeline.frame(height: ed.hasCamera ? 204 : 176)
                             .help(L("从上到下：剪掉 / 快放、推近、讲解、字幕；点选来调整，空白处双击新加推近（字幕那条双击新加字幕），两端黄条修剪",
                                    "Top to bottom: cut / speed-up, zooms, voiceovers, captions. Click to edit, double-click empty space to add a zoom (a caption on the caption lane), drag the yellow bars to trim"))
                     }
@@ -1015,7 +1076,8 @@ struct EditorView: View {
             if let img = ed.still {
                 Image(nsImage: img).resizable().aspectRatio(contentMode: .fit)
             } else {
-                PlayerPane(player: ed.player, picking: ed.picking) { ed.pick($0) }
+                PlayerPane(player: ed.player, picking: ed.picking, camRect: ed.cameraPipRect, onPick: { ed.pick($0) },
+                           onCamMove: { d, ph in ed.moveCamera(by: d, phase: ph) })
             }
             if ed.picking {
                 VStack {
@@ -1171,6 +1233,23 @@ extension EditorView {
     }
 
     // 选中剪辑段：剪掉 / 加速几倍，原来多长、成片里多长
+    @ViewBuilder var layoutInspector: some View {
+        if let i = ed.layoutIndex(ed.selected) {
+            let g = ed.project.layouts[i]
+            HStack(spacing: 14) {
+                Text(L("布局", "Layout")).font(.callout.weight(.semibold))
+                Text(clock(g.start) + " – " + clock(g.end)).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                Divider().frame(height: 16)
+                Picker("", selection: Binding(get: { g.mode }, set: { m in ed.edit { $0.layouts[i].mode = m } })) {
+                    ForEach(CameraLayoutSeg.Mode.allCases, id: \.self) { m in Label(CameraLayoutSeg.name(m), systemImage: CameraLayoutSeg.icon(m)).tag(m) }
+                }
+                .labelsHidden().frame(width: 200)
+                Spacer()
+                Button(role: .destructive) { ed.deleteSelected() } label: { Label(L("删除", "Delete"), systemImage: "trash") }
+            }
+        }
+    }
+
     @ViewBuilder var cutInspector: some View {
         if let i = ed.cutIndex(ed.selected) {
             let c = ed.project.cuts[i], len = c.end - c.start
@@ -1208,14 +1287,19 @@ func clock(_ t: Double) -> String {
 struct PlayerPane: NSViewRepresentable {
     let player: AVPlayer
     var picking: Bool
+    var camRect: CGRect? = nil                       // 摄像头小窗在画面里的位置（比例，左上为原点），能拖
     let onPick: (CGPoint) -> Void
+    var onCamMove: ((CGSize, Int) -> Void)? = nil   // 拖了多远（画面比例）；0 开始 / 1 拖动中 / 2 松手
     func makeNSView(context: Context) -> PlayerNSView { let v = PlayerNSView(); v.layerP.player = player; v.onPick = onPick; return v }
-    func updateNSView(_ v: PlayerNSView, context: Context) { v.picking = picking; v.onPick = onPick }
+    func updateNSView(_ v: PlayerNSView, context: Context) { v.picking = picking; v.onPick = onPick; v.camRect = camRect; v.onCamMove = onCamMove }
 }
 final class PlayerNSView: NSView {
     let layerP = AVPlayerLayer()
     var picking = false { didSet { window?.invalidateCursorRects(for: self) } }
     var onPick: ((CGPoint) -> Void)?
+    var camRect: CGRect? { didSet { if camRect != oldValue { window?.invalidateCursorRects(for: self) } } }
+    var onCamMove: ((CGSize, Int) -> Void)?
+    private var camDragFrom: CGPoint?
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
@@ -1225,12 +1309,34 @@ final class PlayerNSView: NSView {
     }
     required init?(coder: NSCoder) { fatalError() }
     override func layout() { super.layout(); CATransaction.begin(); CATransaction.setDisableActions(true); layerP.frame = bounds; CATransaction.commit() }
-    override func resetCursorRects() { if picking { addCursorRect(bounds, cursor: .crosshair) } }
+    // 画面比例（左上原点）的矩形 → 本视图坐标
+    private func viewRect(_ n: CGRect) -> CGRect? {
+        let r = layerP.videoRect
+        guard r.width > 0 else { return nil }
+        return CGRect(x: r.minX + n.minX * r.width, y: r.minY + (1 - n.maxY) * r.height, width: n.width * r.width, height: n.height * r.height)
+    }
+    override func resetCursorRects() {
+        if picking { addCursorRect(bounds, cursor: .crosshair) }
+        else if let c = camRect, let v = viewRect(c) { addCursorRect(v, cursor: .openHand) }
+    }
     override func mouseDown(with e: NSEvent) {
-        guard picking else { return }
         let p = convert(e.locationInWindow, from: nil), r = layerP.videoRect
+        if !picking, let c = camRect, let v = viewRect(c), v.contains(p) {
+            camDragFrom = p; onCamMove?(.zero, 0); NSCursor.closedHand.push(); return
+        }
+        guard picking else { return }
         guard r.width > 0, r.contains(p) else { return }
         onPick?(CGPoint(x: (p.x - r.minX) / r.width, y: 1 - (p.y - r.minY) / r.height))
+    }
+    override func mouseDragged(with e: NSEvent) {
+        guard let s = camDragFrom else { return }
+        let p = convert(e.locationInWindow, from: nil), r = layerP.videoRect
+        guard r.width > 0 else { return }
+        onCamMove?(CGSize(width: (p.x - s.x) / r.width, height: -(p.y - s.y) / r.height), 1)
+    }
+    override func mouseUp(with e: NSEvent) {
+        guard camDragFrom != nil else { return }
+        camDragFrom = nil; NSCursor.pop(); onCamMove?(.zero, 2)
     }
 }
 
@@ -1275,7 +1381,7 @@ struct TimelineGestures: NSViewRepresentable {
 
 struct TimelineStrip: View {
     @ObservedObject var ed: StudioEditor
-    private let rulerH = 22.0, cutY = 38.0, cutH = 20.0, segY = 64.0, segH = 40.0, voiceY = 112.0, voiceH = 26.0, capY = 144.0, capH = 26.0
+    private let rulerH = 22.0, cutY = 38.0, cutH = 20.0, segY = 64.0, segH = 40.0, voiceY = 112.0, voiceH = 26.0, capY = 144.0, capH = 26.0, layY = 176.0, layH = 22.0
     private let accent = Color(red: 0.42, green: 0.36, blue: 0.95)
 
     var body: some View {
@@ -1335,6 +1441,19 @@ struct TimelineStrip: View {
                 ForEach(ed.project.captions) { c in
                     CaptionBlock(ed: ed, cap: c, w: w, d: d).frame(width: max(6, x(c.end) - x(c.start)), height: capH)
                         .offset(x: x(c.start), y: capY)
+                }
+                // 布局轨（有摄像头才有）：每段一块；空白处双击新加一段
+                if ed.hasCamera {
+                    RoundedRectangle(cornerRadius: 5).fill(Color.secondary.opacity(0.07)).frame(width: w - 4, height: layH)
+                        .overlay(Text(L("小窗", "Bubble")).font(.system(size: 9)).foregroundStyle(.secondary).padding(.leading, 8), alignment: .leading)
+                        .contentShape(Rectangle())
+                        .gesture(SpatialTapGesture(count: 2).onEnded { ed.addLayout(at: tAt($0.location.x + 2)) }
+                            .exclusively(before: SpatialTapGesture().onEnded { ed.selected = nil; ed.picking = false; ed.seek(tAt($0.location.x + 2)) }))
+                        .offset(x: 2, y: layY)
+                    ForEach(ed.project.layouts) { g in
+                        LayoutBlock(ed: ed, seg: g, w: w, d: d).frame(width: max(6, x(g.end) - x(g.start)), height: layH)
+                            .offset(x: x(g.start), y: layY)
+                    }
                 }
                 // 修剪范围外压暗
                 Rectangle().fill(Color.black.opacity(0.28)).frame(width: max(0, x(ed.project.trimStart)), height: g.size.height).allowsHitTesting(false)
@@ -1463,6 +1582,65 @@ enum TimelineMath {
 }
 
 // 剪辑轨上的一段：拖中间挪、拖两头改范围，单击选中
+// 布局轨上的一段：颜色按布局分，拖中间挪、拖两头改长短
+struct LayoutBlock: View {
+    @ObservedObject var ed: StudioEditor
+    let seg: CameraLayoutSeg
+    let w: Double, d: Double
+    private let minLen = 0.3
+
+    var body: some View {
+        let sel = ed.selected == seg.id
+        let base: Color = switch seg.mode {
+        case .pip: Color(red: 0.55, green: 0.55, blue: 0.62)
+        case .split, .splitSwap: Color(red: 0.16, green: 0.62, blue: 0.56)
+        case .full: Color(red: 0.93, green: 0.55, blue: 0.18)
+        case .hidden: Color(red: 0.40, green: 0.40, blue: 0.45)
+        }
+        ZStack {
+            RoundedRectangle(cornerRadius: 5).fill(base.opacity(sel ? 0.95 : 0.78))
+            RoundedRectangle(cornerRadius: 5).stroke(sel ? Color.white : Color.clear, lineWidth: 2)
+            HStack(spacing: 3) {
+                Image(systemName: CameraLayoutSeg.icon(seg.mode)).font(.system(size: 9, weight: .bold))
+                Text(CameraLayoutSeg.name(seg.mode)).font(.system(size: 10, weight: .semibold))
+            }.foregroundStyle(.white).lineLimit(1).padding(.horizontal, 8)
+            HStack { edge(isStart: true); Spacer(minLength: 0); edge(isStart: false) }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { ed.selected = seg.id; ed.picking = false }
+        .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .named(TimelineStrip.space))
+            .onChanged { v in ed.selected = seg.id; ed.dragBegin(); moveBy(v.translation.width / w * d) }
+            .onEnded { _ in ed.dragEnd() })
+        .help(L("这段时间摄像头的摆法；选中后在上面改", "How the camera is laid out here; select it to change"))
+    }
+    private func moveBy(_ dt: Double) {
+        ed.dragUpdate { p in
+            guard let i = p.layouts.firstIndex(where: { $0.id == seg.id }) else { return }
+            let b = p.layouts[i], r = ed.layoutRoom(for: seg.id, in: p), len = b.end - b.start
+            let s = min(max(b.start + dt, r.lowerBound), r.upperBound - len)
+            p.layouts[i].start = s; p.layouts[i].end = s + len
+        }
+    }
+    private func resize(_ isStart: Bool, _ dt: Double) {
+        ed.dragUpdate { p in
+            guard let i = p.layouts.firstIndex(where: { $0.id == seg.id }) else { return }
+            let r = ed.layoutRoom(for: seg.id, in: p)
+            if isStart { p.layouts[i].start = min(max(p.layouts[i].start + dt, r.lowerBound), p.layouts[i].end - minLen) }
+            else { p.layouts[i].end = max(min(p.layouts[i].end + dt, r.upperBound), p.layouts[i].start + minLen) }
+        }
+    }
+    private func edge(isStart: Bool) -> some View {
+        Rectangle().fill(Color.white.opacity(0.001)).frame(width: 8)
+            .overlay(Capsule().fill(Color.white.opacity(0.9)).frame(width: 2.5, height: 9))
+            .contentShape(Rectangle())
+            .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
+            .onTapGesture { ed.selected = seg.id; ed.picking = false }
+            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named(TimelineStrip.space))
+                .onChanged { v in ed.selected = seg.id; ed.dragBegin(); resize(isStart, v.translation.width / w * d) }
+                .onEnded { _ in ed.dragEnd() })
+    }
+}
+
 struct CutBlock: View {
     @ObservedObject var ed: StudioEditor
     let cut: CutSegment
@@ -1792,7 +1970,7 @@ struct StylePanel: View {
     @AppStorage("voiceCountdown") private var voiceCountdown = true
     @AppStorage("voiceMuteOriginal") private var voiceMuteOriginal = true
     @State private var open: Set<String> = ProcessInfo.processInfo.environment["EDITOR_OPEN"].map { Set($0.split(separator: ",").map(String.init)) }
-        ?? ["preset", "aspect", "bg", "frame", "cursor", "keys", "audio", "caption", "blur"]
+        ?? ["preset", "aspect", "bg", "frame", "cursor", "keys", "audio", "camera", "caption", "blur"]
 
     var body: some View {
         ScrollView {
@@ -1804,6 +1982,7 @@ struct StylePanel: View {
                 section("cursor", L("鼠标", "Cursor")) { cursorBox }
                 section("keys", L("快捷键", "Keystrokes")) { keysBox }
                 section("audio", L("声音", "Sound")) { audioBox }
+                if ed.hasCamera { section("camera", L("摄像头", "Camera")) { cameraBox } }
                 section("caption", L("字幕", "Captions")) { captionBox }
                 section("blur", L("运动模糊", "Motion Blur")) { blurBox }
             }
@@ -1968,6 +2147,42 @@ struct StylePanel: View {
     }
 
     // 显示快捷键：开关、位置、大小、深浅
+    // 摄像头：只有录的时候开了摄像头的素材才有这一组
+    private var cameraBox: some View {
+        let c = ed.project.camera ?? CameraSettings()
+        return VStack(alignment: .leading, spacing: 8) {
+            Toggle(L("显示摄像头", "Show camera"), isOn: ed.camSet(\.show))
+            if c.show {
+                chips(ed.camSet(\.round), [(true, L("圆形", "Circle")), (false, L("圆角方形", "Rounded"))], columns: 2)
+                camSlider(L("大小", "Size"), \.size, 0.1...0.5) { "\(Int(($0 * 100).rounded()))%" }
+                Text(L("位置：在预览上直接拖动小窗，或点四个角", "Position: drag the bubble in the preview, or pick a corner"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 4) {
+                    ForEach(Array([(0.14, 0.2, "arrow.up.left"), (0.86, 0.2, "arrow.up.right"), (0.14, 0.8, "arrow.down.left"), (0.86, 0.8, "arrow.down.right")].enumerated()), id: \.offset) { _, v in
+                        Button { ed.edit { var k = $0.camera ?? CameraSettings(); k.x = v.0; k.y = v.1; $0.camera = k } } label: {
+                            Image(systemName: v.2).frame(maxWidth: .infinity)
+                        }.controlSize(.small)
+                    }
+                }
+                camSlider(L("边框", "Border"), \.border, 0...12) { "\(Int($0.rounded()))" }
+                if c.border > 0.3 {
+                    ColorPicker(L("边框颜色", "Border color"), selection: Binding(get: { c.borderColor.color }, set: { v in ed.edit { var k = $0.camera ?? CameraSettings(); k.borderColor = RGB(v); $0.camera = k } }))
+                }
+                camSlider(L("阴影", "Shadow"), \.shadow, 0...1) { "\(Int(($0 * 100).rounded()))%" }
+                Toggle(L("左右镜像", "Mirror"), isOn: ed.camSet(\.mirror))
+                Text(L("时间轴最下面的「布局」轨：双击加一段，换成分屏、摄像头全屏或隐藏", "The Layout lane at the bottom of the timeline: double-click to add a part, then switch it to side-by-side, camera full or hidden"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }.toggleStyle(.checkbox).font(.callout)
+    }
+    private func camSlider(_ title: String, _ kp: WritableKeyPath<CameraSettings, Double>, _ range: ClosedRange<Double>, _ fmt: @escaping (Double) -> String) -> some View {
+        HStack(spacing: 8) {
+            Text(title).font(.callout).frame(width: 62, alignment: .leading)
+            Slider(value: ed.camSlider(kp), in: range, onEditingChanged: { if !$0 { ed.dragEnd() } }).controlSize(.small)
+            Text(fmt((ed.project.camera ?? CameraSettings())[keyPath: kp])).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
+        }
+    }
+
     private var keysBox: some View {
         let look = ed.project.look
         return VStack(alignment: .leading, spacing: 8) {

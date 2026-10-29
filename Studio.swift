@@ -18,6 +18,7 @@ struct Track: Codable {
     var keys: [Double] = []         // 按键的时刻（秒）
     var cursors: [CursorShape] = []
     var shortcuts: [KeyStroke]?     // 按的快捷键（只记带 ⌘⌃⌥ 的组合和 Esc、方向键这类功能键，不记打的字）；旧素材没有
+    var camera: CameraTrack?        // 单独录的摄像头（camera.mp4）；没开摄像头的素材没有
 }
 // 指针图案：热点（点下去的那个点）和大小按「点」；arrow = 标准箭头，导出时换成矢量画的高清箭头
 struct CursorShape: Codable { var file: String; var hotX: Double; var hotY: Double; var w: Double; var h: Double; var arrow: Bool }
@@ -474,11 +475,13 @@ struct StudioProject: Codable, Equatable {
     var voiceovers: [VoiceClip] = []    // 后来录的讲解（Windows 版还没有，打开后会原样留着）
     var captions: [Caption] = []        // 字幕（素材时间；Windows 版还没有，打开后会原样留着）
     var captionStyle = CaptionStyle()
+    var camera: CameraSettings?         // 摄像头样式；素材里有摄像头、工程里还没有时按录制时的小窗位置生成（Windows 版还没有）
+    var layouts: [CameraLayoutSeg] = []  // 布局轨：不在任何一段里 = 小窗
 
     init(segments: [ZoomSegment] = [], trimStart: Double = 0, trimEnd: Double = 0, look: StudioLook = StudioLook()) {
         self.segments = segments; self.trimStart = trimStart; self.trimEnd = trimEnd; self.look = look
     }
-    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look, segmentsEdited, cuts, audio, voiceovers, captions, captionStyle }
+    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look, segmentsEdited, cuts, audio, voiceovers, captions, captionStyle, camera, layouts }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         segments = try c.decodeIfPresent([ZoomSegment].self, forKey: .segments) ?? []
@@ -491,6 +494,8 @@ struct StudioProject: Codable, Equatable {
         voiceovers = (try? c.decodeIfPresent([VoiceClip].self, forKey: .voiceovers)) ?? []
         captions = (try? c.decodeIfPresent([Caption].self, forKey: .captions)) ?? []
         captionStyle = (try? c.decodeIfPresent(CaptionStyle.self, forKey: .captionStyle)) ?? CaptionStyle()
+        camera = try? c.decodeIfPresent(CameraSettings.self, forKey: .camera)
+        layouts = (try? c.decodeIfPresent([CameraLayoutSeg].self, forKey: .layouts)) ?? []
     }
 
     static func url(_ dir: URL) -> URL { dir.appendingPathComponent("project.json") }
@@ -506,10 +511,13 @@ struct StudioProject: Codable, Equatable {
                 if k.segments == nil || !p.segmentsEdited { p.segments = StudioPlan.autoSegments(track, duration: duration, zoom: zoom) }
                 if k.trimEnd == nil { p.trimEnd = duration }
             }
+            if p.camera == nil, let ct = track.camera { p.camera = CameraSettings(from: ct) }
             return p
         }
-        return StudioProject(segments: StudioPlan.autoSegments(track, duration: duration, zoom: zoom), trimStart: 0, trimEnd: duration,
-                             look: PresetStore.defaultLook)   // 新工程用默认预设
+        var p = StudioProject(segments: StudioPlan.autoSegments(track, duration: duration, zoom: zoom), trimStart: 0, trimEnd: duration,
+                              look: PresetStore.defaultLook)   // 新工程用默认预设
+        if let ct = track.camera { p.camera = CameraSettings(from: ct) }
+        return p
     }
     func save(_ dir: URL) throws {
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -815,7 +823,7 @@ final class StudioRenderer: @unchecked Sendable {
     private var cursorArt: [Int: (img: CIImage, ppp: Double, hotX: Double, hotY: Double)] = [:]
     private let arrow: (img: CIImage, ppp: Double, hotX: Double, hotY: Double)
     private let ring: CIImage
-    private var background: CIImage!
+    private(set) var background: CIImage!   // 背景 + 卡片阴影（分屏布局时露出来的地方也用它）
     private var mask: CIImage!
 
     init(project dir: URL, track: Track, style: StudioStyle, look: StudioLook) {
@@ -1009,6 +1017,7 @@ final class StudioJob: @unchecked Sendable {
     private let trackVolumes: [Double]         // 每条音轨的音量（按声道数认：双声道 = 电脑声音，单声道 = 麦克风）
     private let voice: VoiceMix?               // 后来录的讲解（GIF 不要声音）
     private let captions: CaptionLayer         // 字幕：烧进画面（成片时间）
+    private let camLayer: CameraLayer?         // 摄像头画中画（素材时间查布局和画面）
     private let progress: @Sendable (Double) -> Void
 
     init(project dir: URL, out: URL, style: StudioStyle, project: StudioProject? = nil, progress: @escaping @Sendable (Double) -> Void) async throws {
@@ -1048,13 +1057,17 @@ final class StudioJob: @unchecked Sendable {
         }
         trackVolumes = vols
         voice = style.gif ? nil : try await VoiceMix.load(dir: dir, project: p, map: map)
+        camLayer = CameraLayer(dir: dir, track: track, project: p, canvas: CGSize(width: r.lay.cw, height: r.lay.ch), background: r.background)
         captions = CaptionLayer(captions: p.captions, style: p.captionStyle, map: map, trim: (p.trimStart, p.trimEnd), canvas: CGSize(width: r.lay.cw, height: r.lay.ch))
         captions.keys = KeyLayer(strokes: track.shortcuts, look: p.look, map: map, trim: (p.trimStart, p.trimEnd),
                                  canvas: CGSize(width: r.lay.cw, height: r.lay.ch), captionsShown: !captions.isEmpty)
     }
-    // 第 i 帧（成片时间）叠上字幕
+    // 第 i 帧（成片时间）叠上摄像头、字幕
     private func withCaption(_ img: CIImage, _ i: Int) -> CIImage {
-        guard let c = captions.image(atOut: Double(i) / Double(r.st.fps)) else { return img }
+        let o = Double(i) / Double(r.st.fps)
+        var img = img
+        if let camLayer { img = camLayer.compose(img, srcTime: map.isIdentity ? o : map.src(o)) }
+        guard let c = captions.image(atOut: o) else { return img }
         return c.composited(over: img)
     }
 
