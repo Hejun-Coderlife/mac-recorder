@@ -23,7 +23,7 @@ namespace ScreenRecorder
         Hit drag = Hit.None;
         string dragSeg;
         int downX;
-        bool moved;
+        bool moved, justAdded;
         double baseStart, baseEnd, baseTrimS, baseTrimE;
 
         public TimelineView(StudioEditor ed)
@@ -234,6 +234,8 @@ namespace ScreenRecorder
             var was = drag; drag = Hit.None;
             if (was == Hit.Ruler) { ed.ScrubEnd(); return; }
             if (ed.IsDragging) { ed.DragEnd(); return; }
+            // 双击加了一段：WinForms 在双击之后还会来一次 MouseUp，别把刚加的那段又取消选中
+            if (justAdded) { justAdded = false; return; }
             if (!moved && was == Hit.Empty) { ed.Selected = null; ed.Picking = false; ed.Seek(T(e.X)); }
             if (!moved && (was == Hit.SegBody || was == Hit.SegStart || was == Hit.SegEnd)) ed.Touch();
         }
@@ -241,7 +243,7 @@ namespace ScreenRecorder
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
             base.OnMouseDoubleClick(e);
-            if (HitTest(e.Location, out _) == Hit.Empty) ed.AddSegment(T(e.X));
+            if (HitTest(e.Location, out _) == Hit.Empty) { ed.AddSegment(T(e.X)); justAdded = true; }
         }
 
         // ---- 滚轮 / 触控板 ----
