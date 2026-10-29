@@ -74,8 +74,12 @@ jobs:
           if ($after -ne $expected -or $after -eq $before) { throw "录屏.exe was not replaced by the release build" }
           foreach ($f in "ScreenRecorderLib.dll", "ffmpeg.exe", "录屏.exe.config") { if (!(Test-Path "$dir\$f")) { throw "missing $f after update" } }
 
-      - name: Install ffmpeg
-        run: choco install ffmpeg -y --no-progress | Out-Null
+      - name: Put ffmpeg / ffprobe on PATH
+        # 用打包时下的同一份 BtbN ffmpeg（自带 ffprobe）；choco 装有时静默失败
+        run: |
+          $ffdir = Get-ChildItem ff -Directory | Select-Object -First 1
+          "$($ffdir.FullName)\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          & "$($ffdir.FullName)\bin\ffprobe.exe" -hide_banner -version | Select-Object -First 1
 
       - name: Self-test (screen / region / window, no audio)
         run: |
