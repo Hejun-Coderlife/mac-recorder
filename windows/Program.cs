@@ -1,8 +1,8 @@
 // 录屏 · Screen Recorder（Windows 版）
 // 录制引擎：ScreenRecorderLib（Desktop Duplication / Windows.Graphics.Capture + Media Foundation 硬件编码，声音在库里混成一条音轨）
-// 界面语言跟随系统（中文 / 英文）；Studio 效果见 StudioCore.cs / StudioWin.cs（背景白色、出 mp4，读写视频用「运行库」里的 ffmpeg.exe）
+// 界面语言跟随系统（中文 / 英文）；Studio 效果见 StudioCore.cs / StudioWin.cs（背景白色、出 mp4，读写视频用 ffmpeg.exe）
 // 截图见 Shots.cs，录完 / 截完右下角浮出的缩略图见 Thumb.cs
-// 安装包布局：最外层只有 录屏.exe 和 README.txt，其余（录制引擎、VC++ 运行库、ffmpeg）都在「运行库」文件夹里
+// 发布出去只有一个 录屏.exe：录制引擎、VC++ 运行库、ffmpeg 都嵌在里面，第一次打开解到 %LOCALAPPDATA%（见 Runtime.cs）
 using System;
 using System.Drawing;
 using System.Globalization;
@@ -54,20 +54,22 @@ namespace ScreenRecorder
             }
         }
 
-        // 「运行库」文件夹：托管的 ScreenRecorderLib.dll 靠 AssemblyResolve 从这里加载，原生的 VC++ dll 靠 SetDllDirectory 找到
+        // 开发时没嵌运行库的版本：ScreenRecorderLib.dll 等在 exe 旁边或旁边的「运行库」文件夹
         public const string LibDir = Studio.LibDirName;
 
         [STAThread]
         static int Main()
         {
-            UseLibFolder();
+            Runtime.Prepare();
+            if (Runtime.Dir != null) Studio.Locate = Runtime.FfmpegPath;
+            else UseLibFolder();
             return Run();   // 分开写：Main 里不能直接碰到引用 ScreenRecorderLib 的类型，否则还没装好 AssemblyResolve 就去找 dll 了
         }
 
         static void UseLibFolder()
         {
             var lib = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, LibDir);
-            if (!Directory.Exists(lib)) return;   // 老布局（dll 和 exe 放在一起）照样能用
+            if (!Directory.Exists(lib)) return;   // dll 和 exe 放在一起照样能用
             SetDllDirectory(lib);
             AppDomain.CurrentDomain.AssemblyResolve += (s, e) =>
             {

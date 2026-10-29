@@ -21,7 +21,9 @@ A tiny macOS screen recorder: record a whole screen, a single window or a select
 
 ## Windows 版 Windows
 
-Windows 10 / 11（64 位）可用：下载 `ScreenRecorder-Windows-x64.zip`，解压后双击「录屏.exe」（旁边的「运行库」文件夹要留着，不用另装别的）。第一次打开如果出现「Windows 已保护你的电脑」，点「更多信息 → 仍要运行」。
+Windows 10 / 11（64 位）可用：在 Releases 下载 `ScreenRecorder.exe`，**只有这一个文件**，放哪都行（比如改名叫「录屏.exe」放进 D:\软件），双击就用，不用安装、不用另装别的。第一次打开会把录制引擎和 ffmpeg 解到 `%LOCALAPPDATA%\录屏`（只解一次）。第一次打开如果出现「Windows 已保护你的电脑」，点「更多信息 → 仍要运行」。
+
+Windows: download the single `ScreenRecorder.exe` from Releases and double-click it — no installer, nothing else to install. On first launch it unpacks its recording engine and ffmpeg to `%LOCALAPPDATA%\录屏` once. If SmartScreen warns, click "More info → Run anyway" (not code-signed).
 
 - 录整个屏幕、单个窗口，或框选一块区域（遮罩上拖八个点调大小，点「录制」直接开录，Esc 取消）
 - 同时录电脑声音和麦克风（混成一条音轨），可选是否显示鼠标
@@ -30,11 +32,11 @@ Windows 10 / 11（64 位）可用：下载 `ScreenRecorder-Windows-x64.zip`，�
 - 截完 / 录完右下角浮出**缩略图**（跟 Mac 一样）：拖进微信、文件夹、剪辑软件就是发过去；单击打开；悬停不消失，× 不要了。截图没动它就自动存到**桌面**，录好的视频也存在桌面
 - 会自动检查更新，有新版本窗口底部提示，点「更新」自动装好重开
 - **Studio 效果**：打开开关正常录，录完自动出片——点击、打字处镜头自动推近、鼠标更顺滑、点击有波纹，**白色背景**加圆角和阴影，出普通 mp4（Mac 版是透明背景 .mov）。原始素材留在「视频 \ 录屏 \ Studio 素材」。生成要花点时间（普通电脑大约录多久就要算多久到它的 2～3 倍）
-- 安装包里带了 ffmpeg（Studio 效果读写视频用），所以 zip 有几十 MB
+- 程序里带了 ffmpeg（Studio 效果读写视频用），所以 exe 有几十 MB
 
-> **Windows:** unzip `ScreenRecorder-Windows-x64.zip` and run `录屏.exe` (Windows 10/11 x64; no extra runtime needed). Records a screen, a window or a selected area with system audio and/or microphone mixed into one track; **Ctrl+Alt+R** starts / stops; **Ctrl+Alt+S** takes a screenshot straight to the clipboard. A Mac-style floating thumbnail appears after each screenshot / recording (drag it into any app, click to open, × to discard); screenshots you leave alone and all recordings are saved to the Desktop. Checks for updates automatically. **Studio effects** work too: auto-zoom on clicks/typing, smoothed cursor, click ripples, **white background** with rounded corners and shadow, exported as a regular mp4 (the Mac version uses a transparent .mov). The zip bundles ffmpeg for Studio rendering, hence a few dozen MB. If SmartScreen warns on first launch, click "More info → Run anyway".
+> **Windows:** run the single `ScreenRecorder.exe` (Windows 10/11 x64; no extra runtime needed). Records a screen, a window or a selected area with system audio and/or microphone mixed into one track; **Ctrl+Alt+R** starts / stops; **Ctrl+Alt+S** takes a screenshot straight to the clipboard. A Mac-style floating thumbnail appears after each screenshot / recording (drag it into any app, click to open, × to discard); screenshots you leave alone and all recordings are saved to the Desktop. Checks for updates automatically. **Studio effects** work too: auto-zoom on clicks/typing, smoothed cursor, click ripples, **white background** with rounded corners and shadow, exported as a regular mp4 (the Mac version uses a transparent .mov). The exe bundles ffmpeg for Studio rendering, hence a few dozen MB. If SmartScreen warns on first launch, click "More info → Run anyway".
 >
-> 源码在 `windows/`（C# WinForms，.NET Framework 4.8 + [ScreenRecorderLib](https://github.com/sskodje/ScreenRecorderLib)；Studio 合成在 `windows/StudioCore.cs`，读写视频用 [BtbN 的 FFmpeg Windows 版](https://github.com/BtbN/FFmpeg-Builds)，GPL，许可证见包里 ffmpeg-LICENSE.txt），GitHub Actions 自动编译打包并真录几秒自测（含模拟点击、打字的 Studio 自测）。Source in `windows/`, built and self-tested by GitHub Actions.
+> 源码在 `windows/`（C# WinForms，.NET Framework 4.8 + [ScreenRecorderLib](https://github.com/sskodje/ScreenRecorderLib)；Studio 合成在 `windows/StudioCore.cs`，读写视频用 [BtbN 的 FFmpeg Windows 版](https://github.com/BtbN/FFmpeg-Builds)，GPL v3，作为单独的程序调用；许可证随程序解到 `%LOCALAPPDATA%\录屏\runtime\…\ffmpeg-LICENSE.txt`，源码 https://github.com/FFmpeg/FFmpeg；VC++ 运行库 dll 随程序带上），GitHub Actions 自动编译打包并真录几秒自测（含模拟点击、打字的 Studio 自测）。Source in `windows/`, built and self-tested by GitHub Actions.
 
 ## 功能 Features
 

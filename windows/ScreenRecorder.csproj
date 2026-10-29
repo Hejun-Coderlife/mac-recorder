@@ -15,7 +15,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Product>录屏 Screen Recorder</Product>
     <AssemblyTitle>录屏 Screen Recorder</AssemblyTitle>
-    <Version>1.2.0</Version>
+    <Version>1.3.0</Version>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
@@ -23,6 +23,8 @@
     <PackageReference Include="ScreenRecorderLib" Version="6.6.0" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
     <EmbeddedResource Include="app.ico" LogicalName="app.ico" />
+    <!-- 单个 exe：CI 先编一次拿到 ScreenRecorderLib.dll，把它、VC++ dll、ffmpeg.exe 压成 embed\*.gz 再编一次嵌进来（见 Runtime.cs） -->
+    <EmbeddedResource Include="embed\*.gz" LogicalName="rt/%(Filename)%(Extension)" />
     <!-- tools/ 里是在 Mac 上跑合成用的 .NET 8 小工具，不编进程序 -->
     <Compile Remove="tools/**" />
     <None Remove="tools/**" />

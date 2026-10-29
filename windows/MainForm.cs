@@ -275,9 +275,9 @@ namespace ScreenRecorder
             ShowUpdate(L("正在下载新版本… 0%", "Downloading update… 0%"), false);
             try
             {
-                var dir = await Updater.DownloadAsync(r, p => BeginInvoke((Action)(() => ShowUpdate(L($"正在下载新版本… {p}%", $"Downloading update… {p}%"), false))));
+                var exe = await Updater.DownloadAsync(r, p => BeginInvoke((Action)(() => ShowUpdate(L($"正在下载新版本… {p}%", $"Downloading update… {p}%"), false))));
                 ShowUpdate(L("正在安装新版本，马上重新打开…", "Installing, the app will reopen…"), false);
-                Updater.LaunchInstaller(dir, true);
+                Updater.Replace(exe, true);
                 Close();
             }
             catch (Exception e)
@@ -306,7 +306,7 @@ namespace ScreenRecorder
                 return;
             }
             bool studioOn = studio.Checked;
-            if (studioOn && !StudioProject.Available) { Say(L("找不到 ffmpeg.exe，Studio 效果用不了（应该在「运行库」文件夹里，整个文件夹要和 录屏.exe 放在一起）", "ffmpeg.exe is missing from the 运行库 folder next to the app, Studio effects can't run"), true); return; }
+            if (studioOn && !StudioProject.Available) { Say(L("找不到 ffmpeg，Studio 效果用不了（请重新下载 录屏.exe）", "ffmpeg is missing, Studio effects can't run (please download the app again)"), true); return; }
             string name = NewName(), outPath = Unique(Path.Combine(Desktop, name + ".mp4"));
             // Studio 模式：原始画面写进素材文件夹，成片录完再生成到 outPath
             StudioProject proj = studioOn ? StudioProject.Create(name, outPath, src) : null;

@@ -1,4 +1,4 @@
-# Windows 版：编译 → 打包 zip（最外层只有 录屏.exe + README.txt；录制引擎、VC++ 运行库、ffmpeg 在「运行库」里）→ 在 runner 上真录几秒自测（含 Studio、截图、缩略图、自动更新）
+# Windows 版：编译 → 把录制引擎、VC++ 运行库、ffmpeg 压缩嵌进去，出单个 录屏.exe（Release 资源名 ScreenRecorder.exe，另给 v1.2 自动更新用的 zip）→ 在 runner 上真录几秒自测（含首次启动、自动更新、Studio、截图、缩略图）
 name: Windows
 
 on:
@@ -15,112 +15,140 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build
+      - name: Build (first pass, to get ScreenRecorderLib.dll)
         run: dotnet build windows/ScreenRecorder.csproj -c Release -p:Platform=x64
 
-      - name: Package
+      - name: Embed runtime and build the single exe
         run: |
           $out = "windows/bin/x64/Release/net48"
-          # 最外层只放 录屏.exe 和 README（.exe.config 不要：net48 用不着，资源管理器隐藏扩展名时它显示成「录屏.exe」会被当成程序双击）
-          $lib = "pkg/运行库"
-          New-Item -ItemType Directory -Force $lib | Out-Null
-          Copy-Item "$out/ScreenRecorder.exe" "pkg/录屏.exe"
-          Copy-Item "$out/ScreenRecorderLib.dll" $lib
-          # ScreenRecorderLib 是 C++/CLI，要 VC++ 2015-2022 运行库；随程序带上（程序启动时 SetDllDirectory 到「运行库」），用户不用另装 vc_redist
-          foreach ($d in "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll") {
-            Copy-Item "C:\Windows\System32\$d" $lib
-          }
-          # Studio 效果读写视频用的 ffmpeg（BtbN 的 Windows 64 位 GPL 版，带 libx264）
-          # 取最新的正式分支版（文件名形如 ffmpeg-n8.1-latest-win64-gpl-8.1.zip，版本号会变，所以按规则挑）
+          # Studio 效果读写视频用的 ffmpeg（BtbN 的 Windows 64 位 GPL 版，带 libx264），取最新的正式分支版
           $rel = Invoke-RestMethod "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/latest" -Headers @{ Authorization = "Bearer ${{ github.token }}" }
           $asset = $rel.assets | Where-Object { $_.name -match '^ffmpeg-n[\d.]+-latest-win64-gpl-[\d.]+\.zip$' } | Sort-Object { [version]($_.name -replace '^ffmpeg-n([\d.]+)-.*$', '$1') } | Select-Object -Last 1
           Write-Host "ffmpeg: $($asset.name)"
           Invoke-WebRequest $asset.browser_download_url -OutFile ff.zip
           Expand-Archive ff.zip -DestinationPath ff
-          $ffdir = Get-ChildItem ff -Directory | Select-Object -First 1
-          Copy-Item "$($ffdir.FullName)/bin/ffmpeg.exe" $lib
-          Copy-Item "$($ffdir.FullName)/LICENSE.txt" "$lib/ffmpeg-LICENSE.txt"
-          & "$lib/ffmpeg.exe" -hide_banner -version | Select-Object -First 1
-          Copy-Item windows/README.txt pkg/
-          Compress-Archive -Path pkg/* -DestinationPath ScreenRecorder-Windows-x64.zip
-          Get-ChildItem pkg, $lib, ScreenRecorder-Windows-x64.zip | Format-Table Name, Length
+          $ffdir = (Get-ChildItem ff -Directory | Select-Object -First 1).FullName
+          # 录制引擎 + VC++ 运行库（ScreenRecorderLib 是 C++/CLI）+ ffmpeg 和它的许可证，各压成 .gz（7-Zip 最高压缩）嵌进 exe
+          $files = @{
+            "ScreenRecorderLib.dll" = "$out/ScreenRecorderLib.dll"
+            "msvcp140.dll" = "C:\Windows\System32\msvcp140.dll"
+            "vcruntime140.dll" = "C:\Windows\System32\vcruntime140.dll"
+            "vcruntime140_1.dll" = "C:\Windows\System32\vcruntime140_1.dll"
+            "concrt140.dll" = "C:\Windows\System32\concrt140.dll"
+            "ffmpeg.exe" = "$ffdir/bin/ffmpeg.exe"
+            "ffmpeg-LICENSE.txt" = "$ffdir/LICENSE.txt"
+          }
+          New-Item -ItemType Directory -Force windows/embed | Out-Null
+          New-Item -ItemType Directory -Force stage | Out-Null
+          foreach ($k in $files.Keys) {
+            Copy-Item $files[$k] "stage/$k"
+            & "C:\Program Files\7-Zip\7z.exe" a -tgzip -mx=9 "windows/embed/$k.gz" "stage/$k" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "gzip $k failed" }
+          }
+          Get-ChildItem stage, windows/embed | Format-Table Name, Length
+          dotnet build windows/ScreenRecorder.csproj -c Release -p:Platform=x64
+          if ($LASTEXITCODE -ne 0) { throw "second build failed" }
+          # 发布物：单个 exe（GitHub 资源名不能用中文，叫 ScreenRecorder.exe）；v1.2 的自动更新只认 zip，zip 里也只放一个 录屏.exe
+          New-Item -ItemType Directory -Force pkg, dist | Out-Null
+          Copy-Item "$out/ScreenRecorder.exe" "pkg/录屏.exe"
+          Copy-Item "$out/ScreenRecorder.exe" "dist/ScreenRecorder.exe"
+          Compress-Archive -Path "pkg/录屏.exe" -DestinationPath dist/ScreenRecorder-Windows-x64.zip
+          Get-ChildItem pkg, dist | Format-Table Name, Length
 
-      - name: Check package layout
+      - name: Check it's a single exe
         run: |
+          $top = (Get-ChildItem pkg | ForEach-Object Name) -join '|'
+          if ($top -ne '录屏.exe') { throw "pkg should only contain 录屏.exe: $top" }
           Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $z = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path ScreenRecorder-Windows-x64.zip))
-          $names = $z.Entries | ForEach-Object { $_.FullName -replace '\\', '/' }
-          $z.Dispose()
-          $names | ForEach-Object { Write-Host "  $_" }
-          $top = $names | ForEach-Object { ($_ -split '/')[0] } | Sort-Object -Unique
-          Write-Host "top level: $($top -join ', ')"
-          $want = (@('README.txt', '运行库', '录屏.exe') | Sort-Object) -join '|'
-          if (($top -join '|') -ne $want) { throw "unexpected top level: $($top -join ', ')" }
-          foreach ($f in "ScreenRecorderLib.dll", "ffmpeg.exe", "vcruntime140.dll", "msvcp140.dll") { if ($names -notcontains "运行库/$f") { throw "missing 运行库/$f" } }
-          if ($names -match '\.config$') { throw "config file should not be shipped" }
+          $z = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path dist/ScreenRecorder-Windows-x64.zip))
+          $names = ($z.Entries | ForEach-Object FullName) -join '|'; $z.Dispose()
+          Write-Host "zip: $names"
+          if ($names -ne '录屏.exe') { throw "zip should only contain 录屏.exe: $names" }
+          $mb = (Get-Item pkg/录屏.exe).Length / 1MB
+          Write-Host ("exe size: {0:N1} MB" -f $mb)
+          if ($mb -lt 20) { throw "exe too small, runtime not embedded?" }
 
       - uses: actions/upload-artifact@v4
         with:
           name: ScreenRecorder-Windows-x64
-          path: ScreenRecorder-Windows-x64.zip
+          path: dist/*
 
-      - name: Self-test (auto update, pretend to be v1.0 and update to the latest release)
+      - name: Put ffmpeg / ffprobe on PATH
+        run: |
+          $ffdir = Get-ChildItem ff -Directory | Select-Object -First 1
+          "$($ffdir.FullName)\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Self-test (first launch from an empty folder, runtime unpacked to LocalAppData)
+        run: |
+          Remove-Item "$env:LOCALAPPDATA\录屏" -Recurse -Force -ErrorAction SilentlyContinue
+          $solo = Join-Path $env:RUNNER_TEMP "solo"; New-Item -ItemType Directory -Force $solo | Out-Null
+          Copy-Item pkg/录屏.exe $solo
+          foreach ($run in "first", "second") {
+            $env:AUTOTEST = "2"; $env:AUTOOUT = Join-Path $env:RUNNER_TEMP "solo-$run.mp4"
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $p = Start-Process -FilePath "$solo\录屏.exe" -Wait -PassThru
+            Write-Host ("[$run launch] exit=$($p.ExitCode) wall={0:N1}s  $(Get-Content "$env:TEMP\recorder_test.txt" -Raw)" -f $sw.Elapsed.TotalSeconds)
+            if ($p.ExitCode -ne 0) { throw "$run launch failed" }
+          }
+          $rt = Get-ChildItem "$env:LOCALAPPDATA\录屏\runtime" -Directory
+          Write-Host "runtime dirs: $($rt.Name -join ', ')"
+          if ($rt.Count -ne 1) { throw "expected exactly one runtime dir" }
+          Get-ChildItem $rt[0].FullName -Force | Format-Table Name, Length
+          foreach ($f in ".complete", "ScreenRecorderLib.dll", "vcruntime140.dll", "ffmpeg.exe", "ffmpeg-LICENSE.txt") { if (!(Test-Path (Join-Path $rt[0].FullName $f))) { throw "runtime missing $f" } }
+          $top = (Get-ChildItem $solo -Force | ForEach-Object Name) -join '|'
+          if ($top -ne '录屏.exe') { throw "app folder should stay clean: $top" }
+
+      - name: Self-test (v1.2 user auto-updates to this build, old files cleaned up)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $dir = Join-Path $env:RUNNER_TEMP "upd"
-          Copy-Item pkg $dir -Recurse
-          $before = (Get-FileHash "$dir\录屏.exe").Hash
-          # 期望装上的：最新 Release 里的 录屏.exe
-          gh release download --repo "${{ github.repository }}" --pattern ScreenRecorder-Windows-x64.zip --dir latest
-          Expand-Archive latest\ScreenRecorder-Windows-x64.zip latest\x
-          $expected = (Get-FileHash "latest\x\录屏.exe").Hash
-          $env:UPDATE_TEST = "1"; $env:UPDATE_FAKE_VERSION = "1.0"; $env:UPDATE_NORELAUNCH = "1"; $env:UPDATE_TOKEN = "${{ github.token }}"
-          $p = Start-Process -FilePath "$dir\录屏.exe" -Wait -PassThru
-          $res = "$env:TEMP\update_test.txt"
-          # 安装脚本在本程序退出后才覆盖，做完往结果文件追加 COPIED OK / COPY FAIL
-          function Done { (Test-Path $res) -and ((Get-Content $res -Raw) -match "COPIED|FAIL|UPTODATE") }
-          for ($i = 0; $i -lt 120 -and -not (Done); $i++) { Start-Sleep 1 }
-          $txt = Get-Content $res -Raw
-          Write-Host "exit=$($p.ExitCode)`n$txt"
-          if ($p.ExitCode -ne 0 -or $txt -notmatch "STAGED" -or $txt -notmatch "COPIED OK") { throw "update self-test failed" }
-          $after = (Get-FileHash "$dir\录屏.exe").Hash
-          Write-Host "before=$before after=$after expected=$expected"
-          if ($after -ne $expected -or $after -eq $before) { throw "录屏.exe was not replaced by the release build" }
-          # 最新 Release 还是老布局（dll 散在外面），装上后这些文件应该在
-          foreach ($f in "ScreenRecorderLib.dll", "ffmpeg.exe") { if (!(Test-Path "$dir\$f") -and !(Test-Path "$dir\运行库\$f")) { throw "missing $f after update" } }
-
-      - name: Self-test (update to the new package layout, old loose files cleaned up)
-        run: |
-          $dir = Join-Path $env:RUNNER_TEMP "upd2"
-          Copy-Item pkg $dir -Recurse
-          # 假装是老布局升级上来的：外面还散着老的 dll / ffmpeg / 配置文件
-          Copy-Item "pkg\运行库\ScreenRecorderLib.dll", "pkg\运行库\vcruntime140.dll" $dir
-          Set-Content "$dir\录屏.exe.config" "<configuration/>"; Set-Content "$dir\ffmpeg.exe" "old"
-          $env:UPDATE_TEST = "1"; $env:UPDATE_FAKE_VERSION = "1.0"; $env:UPDATE_NORELAUNCH = "1"; $env:UPDATE_ZIP = (Resolve-Path ScreenRecorder-Windows-x64.zip).Path
+          gh release download v1.2 --repo "${{ github.repository }}" --pattern ScreenRecorder-Windows-x64.zip --dir v12
+          $dir = Join-Path $env:RUNNER_TEMP "from12"
+          Expand-Archive v12\ScreenRecorder-Windows-x64.zip $dir
+          Write-Host "v1.2 layout: $((Get-ChildItem $dir | ForEach-Object Name) -join ', ')"
+          # 用 v1.2 自己的更新器装这次的 zip（v1.2 支持 UPDATE_ZIP=本地包）
+          $env:UPDATE_TEST = "1"; $env:UPDATE_FAKE_VERSION = "1.0"; $env:UPDATE_NORELAUNCH = "1"; $env:UPDATE_ZIP = (Resolve-Path dist/ScreenRecorder-Windows-x64.zip).Path
           $p = Start-Process -FilePath "$dir\录屏.exe" -Wait -PassThru
           $res = "$env:TEMP\update_test.txt"
           for ($i = 0; $i -lt 120 -and -not ((Test-Path $res) -and ((Get-Content $res -Raw) -match "COPIED|FAIL")); $i++) { Start-Sleep 1 }
           $txt = Get-Content $res -Raw
           Write-Host "exit=$($p.ExitCode)`n$txt"
-          if ($p.ExitCode -ne 0 -or $txt -notmatch "COPIED OK") { throw "update failed" }
-          $top = (Get-ChildItem $dir | ForEach-Object Name | Sort-Object) -join '|'
-          Write-Host "after update: $top"
-          if ($top -ne ((@('README.txt', '运行库', '录屏.exe') | Sort-Object) -join '|')) { throw "old loose files not cleaned up: $top" }
-          if ((Get-Item "$dir\运行库\ffmpeg.exe").Length -lt 1000000) { throw "ffmpeg in 运行库 broken" }
-          # 升级后的程序能正常录
+          if ($txt -notmatch "COPIED OK") { throw "v1.2 updater failed" }
+          if ((Get-FileHash "$dir\录屏.exe").Hash -ne (Get-FileHash pkg\录屏.exe).Hash) { throw "录屏.exe not replaced" }
           foreach ($k in "UPDATE_TEST", "UPDATE_ZIP", "UPDATE_FAKE_VERSION", "UPDATE_NORELAUNCH") { Remove-Item "env:$k" }
-          $env:AUTOTEST = "2"; $env:AUTOOUT = Join-Path $env:RUNNER_TEMP "after-update.mp4"
+          # 新版第一次打开：把 v1.2 留下的「运行库」、README.txt 清掉，并且能录
+          $env:AUTOTEST = "3"; $env:AUTOOUT = Join-Path $env:RUNNER_TEMP "after-update.mp4"
           $p = Start-Process -FilePath "$dir\录屏.exe" -Wait -PassThru
           Write-Host (Get-Content "$env:TEMP\recorder_test.txt" -Raw)
           if ($p.ExitCode -ne 0) { throw "app doesn't record after update" }
+          $top = (Get-ChildItem $dir -Force | ForEach-Object Name) -join '|'
+          Write-Host "after update: $top"
+          if ($top -ne '录屏.exe') { throw "old v1.2 files not cleaned up: $top" }
 
-      - name: Put ffmpeg / ffprobe on PATH
-        # 用打包时下的同一份 BtbN ffmpeg（自带 ffprobe）；choco 装有时静默失败
+      - name: Self-test (new updater replaces itself; online check falls back to the v1.2 zip; .old removed on next launch)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $ffdir = Get-ChildItem ff -Directory | Select-Object -First 1
-          "$($ffdir.FullName)\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          & "$($ffdir.FullName)\bin\ffprobe.exe" -hide_banner -version | Select-Object -First 1
+          $dir = Join-Path $env:RUNNER_TEMP "self"; New-Item -ItemType Directory -Force $dir | Out-Null
+          Copy-Item pkg/录屏.exe $dir
+          $before = (Get-FileHash "$dir\录屏.exe").Hash
+          Expand-Archive v12\ScreenRecorder-Windows-x64.zip v12x
+          $expected = (Get-FileHash "v12x\录屏.exe").Hash
+          $env:UPDATE_TEST = "1"; $env:UPDATE_FAKE_VERSION = "1.0"; $env:UPDATE_NORELAUNCH = "1"; $env:UPDATE_TOKEN = "${{ github.token }}"
+          $p = Start-Process -FilePath "$dir\录屏.exe" -Wait -PassThru
+          $txt = Get-Content "$env:TEMP\update_test.txt" -Raw
+          Write-Host "exit=$($p.ExitCode)`n$txt"
+          if ($p.ExitCode -ne 0 -or $txt -notmatch "REPLACED OK") { throw "self-replace failed" }
+          if ((Get-FileHash "$dir\录屏.exe").Hash -ne $expected) { throw "录屏.exe is not the release build" }
+          if ((Get-FileHash "$dir\录屏.exe.old").Hash -ne $before) { throw "录屏.exe.old should be the previous exe" }
+          foreach ($k in "UPDATE_TEST", "UPDATE_FAKE_VERSION", "UPDATE_NORELAUNCH", "UPDATE_TOKEN") { Remove-Item "env:$k" }
+          # 下次启动删 .old
+          $dir2 = Join-Path $env:RUNNER_TEMP "old"; New-Item -ItemType Directory -Force $dir2 | Out-Null
+          Copy-Item pkg/录屏.exe $dir2; Set-Content "$dir2\录屏.exe.old" "old"
+          $env:AUTOTEST = "3"; $env:AUTOOUT = Join-Path $env:RUNNER_TEMP "old-cleanup.mp4"
+          $p = Start-Process -FilePath "$dir2\录屏.exe" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "recording failed" }
+          if (Test-Path "$dir2\录屏.exe.old") { throw ".old not removed" }
 
       - name: Self-test (screen / region / window, no audio)
         run: |

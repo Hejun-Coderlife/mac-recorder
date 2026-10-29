@@ -613,9 +613,12 @@ namespace ScreenRecorder
 
     static class Studio
     {
-        // 安装包里 ffmpeg 在「运行库」文件夹；老布局（和 exe 放一起）、Mac 上的测试工具也认
+        // 没嵌运行库时：ffmpeg 在旁边的「运行库」文件夹或和 exe 放一起
         public const string LibDirName = "运行库";
-        public static string FfmpegPath = FindFfmpeg();
+        // Windows 版单 exe：Locate 指向解出来的 ffmpeg（还在后台解就等它）；Mac 上的测试工具直接给路径
+        public static Func<string> Locate;
+        static string ffmpeg;
+        public static string FfmpegPath { get => ffmpeg ?? (ffmpeg = Locate?.Invoke() ?? FindFfmpeg()); set => ffmpeg = value; }
 
         static string FindFfmpeg()
         {
