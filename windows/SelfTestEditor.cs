@@ -74,6 +74,15 @@ namespace ScreenRecorder
                     ed.ScrollStyleTo(App.L("声音", "Sound"));
                     Pump(2);
                 }
+                // EDITOR_W3DEMO=keys|split|camera：快捷键键帽 / 分屏布局（选中）/ 摄像头小窗，样式面板滚到对应分组
+                if (Env("EDITOR_W3DEMO") is string w3)
+                {
+                    ed.Edit(p => { p.Look.ShowKeys = true; if (ed.HasCamera) { p.Layouts.Clear(); p.Layouts.Add(new CameraLayoutSeg { Start = 5, End = 7, Mode = "split" }); p.Layouts.Add(new CameraLayoutSeg { Start = 8, End = 9, Mode = "hidden" }); } });
+                    if (w3 == "keys") { ed.Seek(1.3); ed.ScrollStyleTo(App.L("快捷键", "Shortcuts")); }
+                    else if (w3 == "split") { ed.Select("layout", ed.Project.Layouts.FirstOrDefault()?.Id); ed.Seek(6.0); ed.ScrollStyleTo(App.L("摄像头", "Camera")); }
+                    else { ed.Seek(3.0); ed.ScrollStyleTo(App.L("摄像头", "Camera")); }
+                    Pump(3);
+                }
                 Pump(1.5);
                 using (var bmp = new Bitmap(ed.Width, ed.Height))
                 {

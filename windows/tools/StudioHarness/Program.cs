@@ -48,5 +48,12 @@ if (args.Length > 0 && args[0] == "w2")
     { Console.Write(res); ok &= res.TrimEnd().EndsWith(" OK"); }
     return ok ? 0 : 1;
 }
+if (args.Length > 0 && args[0] == "w3")
+{
+    bool ok = true;
+    foreach (var res in new[] { StudioTestsW3.Rules(), StudioTestsW3.Export(args.Length > 1 ? args[1] : "/tmp/w3work") })
+    { Console.Write(res); ok &= res.TrimEnd().EndsWith(" OK"); }
+    return ok ? 0 : 1;
+}
 Console.WriteLine("usage: render <dir> <out.mp4> | test [dir] [mac project.json]");
 return 2;

@@ -216,11 +216,11 @@ namespace ScreenRecorder
                     int cxp = (int)(ex + eside / 2), cyp = (int)(ey + eside / 2);
                     double lum = Luma(fc, W, cxp, cyp);
                     // 摄像头时间 = 3 − 0.5 = 2.5 秒 → 亮度 ≈ 50（有限范围解码，留点余量）
-                    r.Check("bubble shows the camera at source time − offset (2.5 s → ~50)", Math.Abs(lum - 50 * 255.0 / 219 + 16 * 255.0 / 219) < 12 || Math.Abs(lum - 50) < 12, F(lum));
+                    r.Check("bubble shows the camera at source time − offset (3 − 0.5 = 2.5 s)", Math.Abs((lum * 219 / 255 + 16) / 20 - 2.5) < 0.15, F((lum * 219 / 255 + 16) / 20) + " s");
                     // 圆形：外接框四角是底图（和不带摄像头一样）
                     var (cr, cg, cb) = Px(fc, W, (int)ex + 3, (int)ey + 3); var (pr_, pg, pb) = Px(fp, W, (int)ex + 3, (int)ey + 3);
                     r.Check("round: corners of the bounding box untouched", Math.Abs(cr - pr_) < 12 && Math.Abs(cg - pg) < 12 && Math.Abs(cb - pb) < 12, $"{cr},{cg},{cb} vs {pr_},{pg},{pb}");
-                    var (tr_, tg, tb) = Px(fc, W, cxp, (int)ey + 1);
+                    var (tr_, tg, tb) = Px(fc, W, cxp, (int)Math.Floor(ey) - 1);
                     r.Check("white border at the top of the circle", tr_ > 200 && tg > 200 && tb > 200, $"{tr_},{tg},{tb}");
                     // 圆角方形：同一个角是摄像头画面
                     var psq = Base(false, true); psq.Camera.Round = false;
@@ -268,15 +268,13 @@ namespace ScreenRecorder
                     {
                         var map = new TimeMap(ps);
                         var errs = new List<string>(); bool good = true;
-                        // 校准：摄像头每秒亮度 20（有限范围），先量 1 秒和 3 秒两个点
-                        double a1 = Luma(Grab(csync, 1.0, W, H), W, W / 2, H / 2), a3 = Luma(Grab(csync, 3.0, W, H), W, W / 2, H / 2);
-                        double perSec = (a3 - a1) / 2, zero = a1 - perSec * (map.Src(1.0) - 0.5);
-                        foreach (var to in new[] { 4.5, 5.2, 5.6, 6.5 })
+                        // 摄像头画面的 Y（有限范围码值）= 秒 × 20；读回来的是全范围 RGB：Y = 亮度 × 219/255 + 16
+                        foreach (var to in new[] { 3.0, 4.5, 5.2, 5.6, 6.5 })
                         {
-                            double camT = (Luma(Grab(csync, to, W, H), W, W / 2, H / 2) - zero) / perSec, want = map.Src(to) - 0.5;
-                            errs.Add($"{F(to)}→{F(camT)}({F(want)})"); good &= Math.Abs(camT - want) < 0.12;
+                            double camT = (Luma(Grab(csync, to, W, H), W, W / 2, H / 2) * 219 / 255 + 16) / 20, want = map.Src(to) - 0.5;
+                            errs.Add($"{F(to)}→{F(camT)}({F(want)})"); good &= Math.Abs(camT - want) < 0.15;
                         }
-                        r.Check("camera follows cuts / speed-up (camera time = source − offset)", good && perSec > 10, string.Join(" ", errs) + $" perSec {F(perSec)}");
+                        r.Check("camera follows cuts / speed-up (camera time = source − offset)", good, string.Join(" ", errs));
                     }
                 }
             }

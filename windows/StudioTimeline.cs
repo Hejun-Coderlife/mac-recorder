@@ -15,11 +15,11 @@ namespace ScreenRecorder
         readonly StudioEditor ed;
         public double Scale = 1, Offset;      // 放大倍数（1–8）、内容滚出左边的像素
         public int ViewWidth => Math.Max(1, ClientSize.Width);
-        const int RulerH = 22, CutY = 34, CutH = 20, SegY = 58, SegH = 38, VoiceY = 100, VoiceH = 22, CapY = 126, CapH = 22, HandleW = 16, Bar = 4, EdgeW = 9;
+        const int RulerH = 22, CutY = 34, CutH = 20, SegY = 58, SegH = 38, VoiceY = 100, VoiceH = 22, CapY = 126, CapH = 22, LayY = 152, LayH = 22, HandleW = 16, Bar = 4, EdgeW = 9;
         readonly ToolTip tip = new ToolTip { InitialDelay = 500 };
         string tipText;
 
-        enum Hit { None, Ruler, TrimStart, TrimEnd, SegStart, SegEnd, SegBody, CutStart, CutEnd, CutBody, VoiceStart, VoiceEnd, VoiceBody, CapStart, CapEnd, CapBody, Empty }
+        enum Hit { None, Ruler, TrimStart, TrimEnd, SegStart, SegEnd, SegBody, CutStart, CutEnd, CutBody, VoiceStart, VoiceEnd, VoiceBody, CapStart, CapEnd, CapBody, LayStart, LayEnd, LayBody, Empty }
         Hit drag = Hit.None;
         string dragSeg;
         int downX;
@@ -184,6 +184,31 @@ namespace ScreenRecorder
                     if (r.Width > 18)
                         TextRenderer.DrawText(g, c.Text, cf, Rectangle.Round(new RectangleF(r.X + 4, r.Y, r.Width - 8, r.Height)), Color.White, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
                 }
+            // 布局轨（素材里有摄像头才有）：一段一块，写布局名；不在任何一段里 = 小窗
+            if (ed.HasCamera)
+            {
+                using (var lane = new SolidBrush(Color.FromArgb(Theme.Dark ? 30 : 18, Theme.Secondary))) g.FillRectangle(lane, 1, LayY, ClientSize.Width - 2, LayH);
+                if (p.Layouts.Count == 0)
+                    using (var lf = new Font("Segoe UI", 7f)) using (var lb = new SolidBrush(Color.FromArgb(150, Theme.Secondary)))
+                        g.DrawString(L("摄像头布局（双击这里加一段：全屏 / 分屏 / 隐藏；其余时间是小窗）", "Camera layout (double-click to add full / split / hidden; elsewhere it's the bubble)"), lf, lb, 6, LayY + 4);
+                using (var cf = new Font("Segoe UI", 7.5f, FontStyle.Bold))
+                    foreach (var l in p.Layouts)
+                    {
+                        float x0 = X(l.Start), x1 = Math.Max(x0 + 6, X(l.End));
+                        if (x1 < -2 || x0 > ClientSize.Width + 2) continue;
+                        bool sel = l.Id == ed.SelectedLayout;
+                        var col = l.Mode == "full" ? Color.FromArgb(240, 140, 40) : l.Mode == "hidden" ? Color.FromArgb(130, 130, 135) : l.Mode == "pip" ? Color.FromArgb(120, 100, 220) : Color.FromArgb(30, 170, 180);
+                        var r = new RectangleF(x0, LayY, x1 - x0, LayH);
+                        using (var path = Theme.Round(r, 4))
+                        {
+                            using (var b = new SolidBrush(Color.FromArgb(sel ? 240 : 190, col))) g.FillPath(b, path);
+                            if (sel) using (var pen = new Pen(Color.White, 2)) g.DrawPath(pen, path);
+                        }
+                        using (var hb = new SolidBrush(Color.FromArgb(225, Color.White))) { g.FillRectangle(hb, x0 + 3, LayY + LayH / 2 - 5, 2, 10); g.FillRectangle(hb, x1 - 5, LayY + LayH / 2 - 5, 2, 10); }
+                        if (r.Width > 26)
+                            TextRenderer.DrawText(g, CameraLayoutSeg.Name(l.Mode, L), cf, Rectangle.Round(new RectangleF(r.X + 7, r.Y, r.Width - 14, r.Height)), Color.White, TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+                    }
+            }
             // 修剪范围外压暗
             using (var dim = new SolidBrush(Color.FromArgb(70, 0, 0, 0)))
             {
@@ -255,6 +280,15 @@ namespace ScreenRecorder
                     if (x1 - x0 > EdgeW * 2.5f) { if (pt.X <= x0 + EdgeW) return Hit.CapStart; if (pt.X >= x1 - EdgeW) return Hit.CapEnd; }
                     return Hit.CapBody;
                 }
+            if (ed.HasCamera && pt.Y >= LayY && pt.Y <= LayY + LayH)
+                foreach (var l in p.Layouts)
+                {
+                    float x0 = X(l.Start), x1 = Math.Max(x0 + 6, X(l.End));
+                    if (pt.X < x0 - 2 || pt.X > x1 + 2) continue;
+                    seg = l.Id;
+                    if (x1 - x0 > EdgeW * 2.5f) { if (pt.X <= x0 + EdgeW) return Hit.LayStart; if (pt.X >= x1 - EdgeW) return Hit.LayEnd; }
+                    return Hit.LayBody;
+                }
             if (pt.Y >= SegY && pt.Y <= SegY + SegH)
                 foreach (var s in p.Segments)
                 {
@@ -282,6 +316,8 @@ namespace ScreenRecorder
             if (cg != null && (drag == Hit.CutStart || drag == Hit.CutEnd || drag == Hit.CutBody)) { baseStart = cg.Start; baseEnd = cg.End; }
             var vg = p.Voiceovers.FirstOrDefault(v => v.Id == dragSeg);
             if (vg != null && (drag == Hit.VoiceStart || drag == Hit.VoiceEnd || drag == Hit.VoiceBody)) { baseStart = vg.Start; baseIn = vg.TrimIn; baseOut = vg.TrimOut; }
+            var lg = p.Layouts.FirstOrDefault(l => l.Id == dragSeg);
+            if (lg != null && (drag == Hit.LayStart || drag == Hit.LayEnd || drag == Hit.LayBody)) { baseStart = lg.Start; baseEnd = lg.End; }
             var kg = p.Captions.FirstOrDefault(c => c.Id == dragSeg);
             if (kg != null && (drag == Hit.CapStart || drag == Hit.CapEnd || drag == Hit.CapBody)) { baseStart = kg.Start; baseEnd = kg.End; }
             switch (drag)
@@ -291,6 +327,7 @@ namespace ScreenRecorder
                 case Hit.CutStart: case Hit.CutEnd: case Hit.CutBody: ed.Select("cut", dragSeg); break;
                 case Hit.VoiceStart: case Hit.VoiceEnd: case Hit.VoiceBody: ed.Select("voice", dragSeg); break;
                 case Hit.CapStart: case Hit.CapEnd: case Hit.CapBody: ed.Select("cap", dragSeg); break;
+                case Hit.LayStart: case Hit.LayEnd: case Hit.LayBody: ed.Select("layout", dragSeg); break;
                 case Hit.TrimStart: case Hit.TrimEnd: break;   // 单击把手什么都不做（别把播放头叫过来）
             }
             Capture = true;
@@ -302,12 +339,13 @@ namespace ScreenRecorder
             if (drag == Hit.None)
             {
                 var h = HitTest(e.Location, out _);
-                Cursor = h == Hit.TrimStart || h == Hit.TrimEnd || h == Hit.SegStart || h == Hit.SegEnd || h == Hit.CutStart || h == Hit.CutEnd || h == Hit.VoiceStart || h == Hit.VoiceEnd || h == Hit.CapStart || h == Hit.CapEnd ? Cursors.SizeWE
-                       : h == Hit.SegBody || h == Hit.CutBody || h == Hit.VoiceBody || h == Hit.CapBody ? Cursors.SizeAll : Cursors.Default;
+                Cursor = h == Hit.TrimStart || h == Hit.TrimEnd || h == Hit.SegStart || h == Hit.SegEnd || h == Hit.CutStart || h == Hit.CutEnd || h == Hit.VoiceStart || h == Hit.VoiceEnd || h == Hit.CapStart || h == Hit.CapEnd || h == Hit.LayStart || h == Hit.LayEnd ? Cursors.SizeWE
+                       : h == Hit.SegBody || h == Hit.CutBody || h == Hit.VoiceBody || h == Hit.CapBody || h == Hit.LayBody ? Cursors.SizeAll : Cursors.Default;
                 string t = h == Hit.TrimStart ? L("拖动剪掉开头", "Drag to cut the start") : h == Hit.TrimEnd ? L("拖动剪掉结尾", "Drag to cut the end")
                     : h == Hit.CutStart || h == Hit.CutEnd || h == Hit.CutBody ? L("拖两头改范围、拖中间挪；选中后可改成快放", "Drag the ends or the middle; select it to switch to speed-up")
                     : h == Hit.VoiceStart || h == Hit.VoiceEnd || h == Hit.VoiceBody ? L("讲解：拖中间挪位置，拖两头剪掉开头 / 结尾；选中后调音量、删除", "Voice-over: drag to move, drag the ends to trim; select it for volume / delete")
                     : h == Hit.CapStart || h == Hit.CapEnd || h == Hit.CapBody ? L("字幕：双击改字，拖两头改时间、拖中间挪", "Caption: double-click to edit, drag the ends or the middle")
+                    : h == Hit.LayStart || h == Hit.LayEnd || h == Hit.LayBody ? L("摄像头布局：拖两头改范围、拖中间挪；选中后换布局", "Camera layout: drag the ends or the middle; select it to change the layout")
                     : L("点选推近段来调整，空白处双击新加，两端黄条修剪；Ctrl + 滚轮缩放时间轴", "Click a zoom to edit it, double-click empty space to add one, drag the yellow bars to trim; Ctrl + scroll zooms the timeline");
                 if (t != tipText) { tipText = t; tip.SetToolTip(this, t); }
                 return;
@@ -403,6 +441,27 @@ namespace ScreenRecorder
                         else c.End = Math.Max(Math.Min(baseEnd + dt, ed.Duration), baseStart + 0.3);
                     });
                     break;
+                case Hit.LayBody:
+                    ed.DragBegin();
+                    ed.DragUpdate(p =>
+                    {
+                        var l = p.Layouts.FirstOrDefault(x => x.Id == id); if (l == null) return;
+                        var room = ed.LayoutRoom(id, p); double len = baseEnd - baseStart;
+                        double ns = Math.Min(Math.Max(baseStart + dt, room.lo), room.hi - len);
+                        l.Start = ns; l.End = ns + len;
+                    });
+                    break;
+                case Hit.LayStart: case Hit.LayEnd:
+                    bool ls = drag == Hit.LayStart;
+                    ed.DragBegin();
+                    ed.DragUpdate(p =>
+                    {
+                        var l = p.Layouts.FirstOrDefault(x => x.Id == id); if (l == null) return;
+                        var room = ed.LayoutRoom(id, p);
+                        if (ls) l.Start = Math.Min(Math.Max(baseStart + dt, room.lo), baseEnd - 0.3);
+                        else l.End = Math.Max(Math.Min(baseEnd + dt, room.hi), baseStart + 0.3);
+                    });
+                    break;
                 case Hit.SegStart: case Hit.SegEnd:
                     bool st = drag == Hit.SegStart;
                     ed.DragBegin();
@@ -440,6 +499,7 @@ namespace ScreenRecorder
                 if (e.Y >= CutY && e.Y <= CutY + CutH) ed.AddCut(T(e.X));          // 剪辑轨上双击 = 加一段剪掉
                 else if (e.Y >= CapY && e.Y <= CapY + CapH) ed.AddCaption(T(e.X)); // 字幕轨上双击 = 加一句
                 else if (e.Y >= VoiceY && e.Y <= VoiceY + VoiceH) return;           // 讲解只能录
+                else if (ed.HasCamera && e.Y >= LayY && e.Y <= LayY + LayH) ed.AddLayout(T(e.X));   // 布局轨上双击 = 加一段
                 else ed.AddSegment(T(e.X));
                 justAdded = true;
             }

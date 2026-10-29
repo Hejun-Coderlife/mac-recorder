@@ -578,6 +578,57 @@ jobs:
           $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
           foreach ($k in "EDITOR", "EDITORSHOT", "APP_LANG") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
 
+      - name: W3 - shortcut keycaps, camera picture-in-picture (bubble / layouts / zoom / cuts; CPU and GPU), editor layout lane + bubble drag; screenshots
+        run: |
+          foreach ($k in "AUTOTEST", "AUTOSTUDIO", "AUTOINPUT", "AUTOAUDIO", "AUTOOUT", "STUDIO_COMPOSE", "STUDIO_ENCODER", "STUDIO") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $work = Join-Path $env:RUNNER_TEMP "studio/w3"; New-Item -ItemType Directory -Force $work | Out-Null
+          $env:W3TEST = $work
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          Remove-Item env:W3TEST
+          $txt = Get-Content "$env:TEMP\w3_test.txt" -Raw
+          Write-Host "exit=$($p.ExitCode)`n$txt"
+          if ($p.ExitCode -ne 0 -or -not $txt.StartsWith("OK")) { throw "W3 tests failed" }
+          # 截图：快捷键分组 + 键帽、选中的分屏布局段 + 摄像头分组、摄像头小窗（中文 / 英文）
+          $shots = Join-Path $env:RUNNER_TEMP "studio/editor"; New-Item -ItemType Directory -Force $shots | Out-Null
+          foreach ($lang in "zh", "en") {
+            foreach ($demo in "keys", "split", "camera") {
+              $env:EDITOR = (Join-Path $work "demo"); $env:EDITOR_W3DEMO = $demo; $env:APP_LANG = $lang; $env:EDITORSHOT = (Join-Path $shots "w3-$demo-$lang.png")
+              $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+              Write-Host "[$lang/$demo] exit=$($p.ExitCode) $(Get-Content "$env:TEMP\editorshot.txt" -Raw)"
+              if ($p.ExitCode -ne 0) { throw "W3 screenshot $demo $lang failed" }
+            }
+          }
+          foreach ($k in "EDITOR", "EDITOR_W3DEMO", "APP_LANG", "EDITORSHOT") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+
+      - name: W3 - camera capture (a video file stands in for the camera) + do not disturb (banners off, restored, also after a crash)
+        run: |
+          $cam = Join-Path $env:RUNNER_TEMP "studio/w3cam"; New-Item -ItemType Directory -Force $cam | Out-Null
+          $vid = Join-Path $cam "fake-camera.mp4"
+          ffmpeg -v error -y -f lavfi -i "testsrc=size=640x480:rate=30:duration=6" -c:v libx264 -pix_fmt yuv420p $vid
+          $env:CAMTEST = (Join-Path $cam "rec"); $env:CAMERA_INJECT = $vid; $env:CAMSHOT = (Join-Path $env:RUNNER_TEMP "studio/editor/w3-bubble.png")
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          foreach ($k in "CAMTEST", "CAMERA_INJECT", "CAMSHOT") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $txt = Get-Content "$env:TEMP\cam_test.txt" -Raw
+          Write-Host "camera exit=$($p.ExitCode)`n$txt"
+          if ($p.ExitCode -ne 0 -or -not $txt.StartsWith("OK")) { throw "camera capture test failed" }
+          # 勿扰：测试键上走一遍（开 / 关 / 本来没有这个值）
+          $env:DNDTEST = "all"; $env:DND_KEY = "Software\ScreenRecorderTest\PushNotifications"
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          $txt = Get-Content "$env:TEMP\dnd_test.txt" -Raw; Write-Host "dnd all exit=$($p.ExitCode)`n$txt"
+          if ($p.ExitCode -ne 0 -or -not $txt.StartsWith("OK")) { throw "dnd test failed" }
+          Remove-Item env:DND_KEY
+          # 真的系统键：开录后「崩了」（没换回来）→ 下次打开换回原值
+          $orig = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications" -Name ToastEnabled -ErrorAction SilentlyContinue).ToastEnabled
+          $expect = if ($null -eq $orig) { "absent" } else { "$orig" }
+          Write-Host "original ToastEnabled = $expect"
+          $env:DNDTEST = "begin"; $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          $txt = Get-Content "$env:TEMP\dnd_test.txt" -Raw; Write-Host "dnd begin exit=$($p.ExitCode)`n$txt"
+          if ($p.ExitCode -ne 0) { throw "dnd begin failed" }
+          $env:DNDTEST = "restored"; $env:DND_EXPECT = $expect; $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          $txt = Get-Content "$env:TEMP\dnd_test.txt" -Raw; Write-Host "dnd restored exit=$($p.ExitCode)`n$txt"
+          foreach ($k in "DNDTEST", "DND_EXPECT") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          if ($p.ExitCode -ne 0 -or -not $txt.StartsWith("OK")) { throw "dnd crash restore failed" }
+
       - name: Main window - recent Studio footage list
         run: |
           $videos = [Environment]::GetFolderPath("MyVideos")

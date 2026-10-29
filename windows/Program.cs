@@ -89,7 +89,11 @@ namespace ScreenRecorder
             Application.SetCompatibleTextRenderingDefault(false);
             // Studio 合成用显卡（StudioGpu.cs）；建不起来自动回到 CPU。STUDIO_COMPOSE=gpu 时没有真显卡也用软件渲染（自测）
             Studio.GpuFactory = (lay, cpu, info) => GpuComposer.TryCreate(lay, cpu, info, Environment.GetEnvironmentVariable("STUDIO_COMPOSE") == "gpu");
+            KeyLayer.Renderer = KeyCapsGdi.Render;   // 键帽用 GDI+ 画真字
             if (Environment.GetEnvironmentVariable("STUDIO") != null) return SelfTest.RenderOnly();
+            if (Environment.GetEnvironmentVariable("W3TEST") != null) return SelfTestW3.Run();
+            if (Environment.GetEnvironmentVariable("DNDTEST") != null) return SelfTestW3.DndTest();
+            if (Environment.GetEnvironmentVariable("CAMTEST") != null) return SelfTestW3.CameraRecord();
             if (Environment.GetEnvironmentVariable("STUDIOTESTS") != null) return SelfTestEditor.Core();
             if (Environment.GetEnvironmentVariable("W2TEST") != null) return SelfTestW2.Run();
             if (Environment.GetEnvironmentVariable("VOICEUITEST") != null) return SelfTestW2.VoiceUi();
@@ -110,6 +114,7 @@ namespace ScreenRecorder
             if (Environment.GetEnvironmentVariable("HOTKEY_HOG") != null) return SelfTest.Hog();
             if (Environment.GetEnvironmentVariable("HOTKEYTEST") != null) return SelfTest.Hotkeys();
             Shots.CleanTemp();
+            Dnd.Restore();            // 上次录制时关了通知横幅、没来得及换回来：先换回来
             DesktopIcons.Restore();   // 上次录制时藏了桌面图标、没来得及换回来（比如崩了）：先换回来
             // 上次后台下好了新版、却没等到正常退出就被结束了：先换上，再打开新版
             if (Updater.StagedVersion != null && Updater.ApplyStaged(true)) return 0;

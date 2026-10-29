@@ -473,8 +473,11 @@ namespace ScreenRecorder
         public readonly KeyLayer Keys;
         readonly byte[] plainBgra;            // 不带卡片阴影的背景（分屏时屏幕画面缩小，露出来的地方）
         byte[] plainNv12, tmp;
+        readonly bool ownsCamera = true;
 
-        Canvas(int cw, int ch, CameraLayer cam, KeyLayer keys, byte[] plainBg) { CW = cw; CH = ch; Camera = cam; Keys = keys; plainBgra = plainBg; }
+        Canvas(int cw, int ch, CameraLayer cam, KeyLayer keys, byte[] plainBg, bool owns = true) { CW = cw; CH = ch; Camera = cam; Keys = keys; plainBgra = plainBg; ownsCamera = owns; }
+        // 预览用：摄像头帧读取器由剪辑窗口自己留着（一直开着一个），这里不关它
+        public static Canvas Shared(int cw, int ch, CameraLayer cam, KeyLayer keys, byte[] plainBg) => new Canvas(cw, ch, cam, keys, plainBg, false);
 
         // 没有要叠的就返回 null（导出、预览照旧）
         public static Canvas Make(string dir, Track track, StudioProject p, TimeMap map, int cw, int ch, bool captionsShown, Func<byte[]> plainBackground)
@@ -678,6 +681,6 @@ namespace ScreenRecorder
             return x >= 0 ? y : 2 - y;
         }
 
-        public void Dispose() => Camera?.Dispose();
+        public void Dispose() { if (ownsCamera) Camera?.Dispose(); }
     }
 }

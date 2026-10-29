@@ -37,6 +37,8 @@ namespace ScreenRecorder
                 Slider(L("阴影", "Shadow"), 0, 1, l => l.Shadow, (l, v) => l.Shadow = v, v => $"{Math.Round(v * 100)}%"),
                 Slider(L("阴影虚化", "Softness"), 0, 1, l => l.ShadowBlur, (l, v) => l.ShadowBlur = v, v => $"{Math.Round(v * 100)}%")));
             Section(L("鼠标", "Cursor"), CursorBox());
+            Section(L("快捷键", "Shortcuts"), KeysBox());
+            if (ed.HasCamera) Section(L("摄像头", "Camera"), CameraBox());
             Section(L("声音", "Sound"), SoundBox());
             Section(L("字幕", "Captions"), CaptionBox());
             Section(L("运动模糊", "Motion Blur"), Box(
@@ -422,6 +424,57 @@ namespace ScreenRecorder
             return Box(items.ToArray());
         }
 
+        // ---- 快捷键键帽：显示、位置、大小、深浅（同 Mac 版） ----
+        Control KeysBox()
+        {
+            var items = new List<Control>
+            {
+                Check(L("在画面上显示按的快捷键", "Show shortcuts on screen"), l => l.ShowKeys, (l, v) => l.ShowKeys = v),
+                Chips(new[] { ("bottomLeft", L("左下", "Left")), ("bottom", L("底部居中", "Centre")), ("bottomRight", L("右下", "Right")) }, 3, l => l.KeysAt, (l, v) => l.KeysAt = v),
+                Slider(L("大小", "Size"), 0.03, 0.08, l => l.KeysSize, (l, v) => l.KeysSize = v, v => $"{Math.Round(v * 100)}%"),
+                Chips(new[] { ("dark", L("深色键帽", "Dark")), ("light", L("浅色键帽", "Light")) }, 2, l => l.KeysDark ? "dark" : "light", (l, v) => l.KeysDark = v == "dark"),
+                Caption(ed.Track.Shortcuts == null
+                    ? L("这段素材录的时候还没有记快捷键（新录的才有）", "This recording has no shortcut data (new recordings do)")
+                    : L($"录的时候按过 {ed.Track.Shortcuts.Count} 次快捷键（只记 Ctrl / Alt / Win 组合和 Esc、方向键这类功能键，不记打的字）",
+                        $"{ed.Track.Shortcuts.Count} shortcuts recorded (only Ctrl / Alt / Win combos and keys like Esc or arrows; normal typing isn't recorded)")),
+            };
+            return Box(items.ToArray());
+        }
+
+        // ---- 摄像头：显示、形状、大小、位置、边框、阴影、镜像（同 Mac 版）；在预览上按住小窗也能拖 ----
+        Control CameraBox()
+        {
+            CameraSettings C(StudioProject p) => p.Camera ?? (p.Camera = ed.Track.Camera != null ? CameraSettings.From(ed.Track.Camera) : new CameraSettings());
+            var corners = new[] { ("tl", L("左上", "Top left"), 0.14, 0.2), ("tr", L("右上", "Top right"), 0.86, 0.2), ("bl", L("左下", "Bottom left"), 0.14, 0.8), ("br", L("右下", "Bottom right"), 0.86, 0.8) };
+            var colorRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0), Padding = new Padding(0) };
+            var swatch = new Button { Width = 44, Height = 24, FlatStyle = FlatStyle.Flat, Margin = new Padding(0, 0, 12, 0), TabStop = false };
+            swatch.FlatAppearance.BorderColor = Theme.Line;
+            swatch.Click += (s, e) =>
+            {
+                var c = C(ed.Project).BorderColor;
+                using (var dlg = new ColorDialog { FullOpen = true, Color = Color.FromArgb((int)Math.Round(c.R * 255), (int)Math.Round(c.G * 255), (int)Math.Round(c.B * 255)) })
+                    if (dlg.ShowDialog(this) == DialogResult.OK) ed.EditCamera(cs => cs.BorderColor = new RGB(dlg.Color.R / 255.0, dlg.Color.G / 255.0, dlg.Color.B / 255.0));
+            };
+            colorRow.Controls.Add(new Label { Text = L("边框颜色", "Border color"), AutoSize = true, Margin = new Padding(0, 6, 6, 0) }); colorRow.Controls.Add(swatch);
+            syncs.Add(() => { var c = C(ed.Project).BorderColor; swatch.BackColor = Color.FromArgb((int)Math.Round(c.R * 255), (int)Math.Round(c.G * 255), (int)Math.Round(c.B * 255)); });
+            var items = new List<Control>
+            {
+                CheckP(L("显示摄像头画面", "Show camera"), p => C(p).Show, (p, v) => C(p).Show = v),
+                ChipsP(new[] { ("round", L("圆形", "Circle")), ("square", L("圆角方形", "Rounded")) }, 2, p => C(p).Round ? "round" : "square", (p, v) => C(p).Round = v == "round"),
+                SliderP(L("大小", "Size"), 0.1, 0.5, p => C(p).Size, (p, v) => C(p).Size = v, v => $"{Math.Round(v * 100)}%"),
+                ChipsP(corners.Select(c => (c.Item1, c.Item2)).ToList(), 2,
+                       p => corners.FirstOrDefault(c => Math.Abs(C(p).X - c.Item3) < 0.02 && Math.Abs(C(p).Y - c.Item4) < 0.02).Item1 ?? "",
+                       (p, v) => { var c = corners.First(x => x.Item1 == v); C(p).X = c.Item3; C(p).Y = c.Item4; }),
+                SliderP(L("边框", "Border"), 0, 12, p => C(p).Border, (p, v) => C(p).Border = v, v => $"{Math.Round(v)}"),
+                colorRow,
+                SliderP(L("阴影", "Shadow"), 0, 1, p => C(p).Shadow, (p, v) => C(p).Shadow = v, v => $"{Math.Round(v * 100)}%"),
+                CheckP(L("镜像（像照镜子）", "Mirror"), p => C(p).Mirror, (p, v) => C(p).Mirror = v),
+                Caption(L("在预览上按住小窗可以拖到任意位置；时间轴「布局」轨上双击加一段，可以切换全屏 / 分屏 / 隐藏；推近时人像不跟着放大",
+                          "Drag the bubble in the preview to move it; double-click the Layout lane to switch to full / split / hidden; the camera isn't magnified when zooming")),
+            };
+            return Box(items.ToArray());
+        }
+
         // 勾选框：改工程里样式以外的东西（声音、字幕样式），能撤销
         CheckBox CheckP(string text, Func<StudioProject, bool> get, Action<StudioProject, bool> set)
         {
@@ -498,7 +551,8 @@ namespace ScreenRecorder
         // 工程或预设变了：把各个控件的值对上（只在样式真变了时才做）
         public void Sync()
         {
-            var sig = Look.ToJson() + "|" + ed.Project.Audio.ToJson() + "|" + ed.Project.CaptionStyle.ToJson() + "|" + ed.Presets.DefaultKey + "|" + string.Join(",", ed.Presets.Presets.Select(p => p.Name));
+            var cw = new JsonW(); if (ed.Project.Camera != null) ed.Project.Camera.Write(cw);
+            var sig = Look.ToJson() + "|" + cw + "|" + ed.Project.Audio.ToJson() + "|" + ed.Project.CaptionStyle.ToJson() + "|" + ed.Presets.DefaultKey + "|" + string.Join(",", ed.Presets.Presets.Select(p => p.Name));
             if (sig == lastSig) return;
             lastSig = sig;
             syncing = true;

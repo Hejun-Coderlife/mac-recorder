@@ -25,6 +25,7 @@ namespace ScreenRecorder
         readonly List<double[]> samples = new List<double[]>();   // [秒, u, v（占录制范围的比例）, 图案, 左键]
         readonly List<double[]> clicks = new List<double[]>();    // [秒, u, v]
         readonly List<double> keys = new List<double>();
+        readonly List<KeyStroke> shortcuts = new List<KeyStroke>();   // 快捷键（只记带 Ctrl / Alt / Win 的组合和功能键，不记打的字）
         readonly Dictionary<IntPtr, int> shapeOf = new Dictionary<IntPtr, int>();
         readonly List<CursorShape> shapes = new List<CursorShape>();
         readonly List<byte[]> pngs = new List<byte[]>();
@@ -142,7 +143,20 @@ namespace ScreenRecorder
             };
             keyProc = (code, w, l) =>
             {
-                if (code >= 0 && (w.ToInt32() == 0x0100 || w.ToInt32() == 0x0104)) { double now = Clock.Now; lock (gate) keys.Add(now); }   // WM_KEYDOWN / WM_SYSKEYDOWN
+                if (code >= 0 && (w.ToInt32() == 0x0100 || w.ToInt32() == 0x0104))   // WM_KEYDOWN / WM_SYSKEYDOWN
+                {
+                    double now = Clock.Now;
+                    int vk = Marshal.ReadInt32(l);   // KBDLLHOOKSTRUCT.vkCode
+                    bool Down(int k) => (GetAsyncKeyState(k) & 0x8000) != 0;
+                    var label = KeyLabel.Label(vk, Down(0x11), Down(0x12) || w.ToInt32() == 0x0104, Down(0x10), Down(0x5B) || Down(0x5C));
+                    lock (gate)
+                    {
+                        keys.Add(now);
+                        // 按住不放的自动重复只记第一下
+                        if (label != null && !(shortcuts.Count > 0 && now - shortcuts[shortcuts.Count - 1].T < 0.25 && string.Join("+", shortcuts[shortcuts.Count - 1].Keys) == string.Join("+", label)))
+                            shortcuts.Add(new KeyStroke { T = now, Keys = label });
+                    }
+                }
                 return CallNextHookEx(IntPtr.Zero, code, w, l);
             };
             var mod = GetModuleHandle(null);
@@ -153,8 +167,10 @@ namespace ScreenRecorder
             if (hk != IntPtr.Zero) UnhookWindowsHookEx(hk);
         }
 
+        public void Inject(double at, string[] k) { lock (gate) shortcuts.Add(new KeyStroke { T = at, Keys = k }); }
+
         // 写 track.json 和指针图案；start = 原始画面第一帧的时间（同一时钟），width/height = 原始画面像素
-        public void Save(string dir, double start, int width, int height)
+        public void Save(string dir, double start, int width, int height, CameraTrack camera = null)
         {
             double R(double v, double k) => Math.Round(v * k) / k;
             var t = new Track { Width = width, Height = height, PixelsPerPoint = ppp };
@@ -163,7 +179,9 @@ namespace ScreenRecorder
                 t.Moves = samples.Select(s => new[] { R(s[0] - start, 1000), R(s[1] * width, 10), R(s[2] * height, 10), s[3], s[4] }).ToList();
                 t.Clicks = clicks.Select(c => new[] { R(c[0] - start, 1000), R(c[1] * width, 10), R(c[2] * height, 10) }).ToList();
                 t.Keys = keys.Select(k => R(k - start, 1000)).ToList();
+                t.Shortcuts = shortcuts.Select(k => new KeyStroke { T = R(k.T - start, 1000), Keys = k.Keys }).ToList();
             }
+            t.Camera = camera;
             t.Cursors = shapes;
             for (int i = 0; i < shapes.Count; i++) if (pngs[i] != null) File.WriteAllBytes(Path.Combine(dir, shapes[i].File), pngs[i]);
             File.WriteAllText(Path.Combine(dir, "track.json"), t.ToJson());
@@ -253,6 +271,7 @@ namespace ScreenRecorder
     {
         public string Dir, Raw, Out;
         public CursorTracker Tracker;
+        public CameraTrack Camera;            // 开了摄像头：camera.mp4 和它跟原始画面差几秒、录的时候小窗在哪
 
         public static string Folder
         {
@@ -271,10 +290,13 @@ namespace ScreenRecorder
         {
             Tracker.Stop();
             var info = Studio.Probe(Raw);
-            Tracker.Save(Dir, firstFrameAt, info.Width, info.Height);
+            Tracker.Save(Dir, firstFrameAt, info.Width, info.Height, Camera);
         }
 
         // 自测用：存轨迹后直接按自动规则 + 默认样式生成成片
+        // 自测用：注入合成按键（快捷键）
+        public void InjectShortcut(double at, string[] keys) => Tracker.Inject(at, keys);
+
         public RenderStats Finish(double firstFrameAt, Action<double> progress, Action<string> log = null)
         {
             SaveTrack(firstFrameAt);

@@ -10,7 +10,7 @@ using static ScreenRecorder.App;
 
 namespace ScreenRecorder
 {
-    sealed class MainForm : Form
+    sealed partial class MainForm : Form
     {
         readonly ListView list = new ListView();
         readonly CheckBox sysAudio = new CheckBox(), mic = new CheckBox(), cursor = new CheckBox(), studio = new CheckBox(), hideIcons = new CheckBox();
@@ -107,11 +107,13 @@ namespace ScreenRecorder
             tips.SetToolTip(hideIcons, L("录的时候先把桌面上的图标藏起来，录完自动恢复", "Hides the icons on your desktop while recording, and brings them back afterwards"));
             var opts2 = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0, 6, 0, 4), WrapContents = true };
             opts2.Controls.AddRange(new Control[] { cdLabel, countdown, hideIcons });
+            var opts3 = BuildW3Options();
             root.RowCount = 8;
             root.RowStyles.Insert(2, new RowStyle(SizeType.AutoSize));
             root.RowStyles.Insert(3, new RowStyle(SizeType.AutoSize));
             root.Controls.Add(opts);
             root.Controls.Add(opts2);
+            root.Controls.Add(opts3);
 
             // 录制按钮 + 计时 + 快捷键提示
             var rec = Row();
@@ -270,6 +272,7 @@ namespace ScreenRecorder
             list.Enabled = !rec && !busy;
             regionBtn.Enabled = refreshBtn.Enabled = !rec && !busy;
             sysAudio.Enabled = mic.Enabled = studio.Enabled = hideIcons.Enabled = countdown.Enabled = !rec && !busy && !counting;
+            camera.Enabled = camDevice.Enabled = dnd.Enabled = !rec && !busy && !counting;
             cursor.Enabled = !rec && !busy && !studio.Checked;   // Studio 模式鼠标后期再画
             recordBtn.Enabled = !busy && (rec || selectedId != null);   // 后台在下新版也照样能录
             recordBtn.Text = rec ? "■  " + L("停止", "Stop") : counting ? L("取消倒计时", "Cancel") : "●  " + L("开始录制", "Record");
@@ -402,13 +405,15 @@ namespace ScreenRecorder
                 s.Completed += path => BeginInvoke((Action)(() => Finished(path, null)));
                 s.Failed += err => BeginInvoke((Action)(() => Finished(null, err)));
                 if (hideIcons.Checked && src.Kind != SourceKind.Window) DesktopIcons.Hide();   // 只录某个窗口时桌面本来就不在画面里
+                if (dnd.Checked) Dnd.Begin();
+                StartCameraRecording(proj);
                 proj?.Tracker.Start();   // 比画面早一点开始记，第一帧前后都有鼠标位置
                 s.Start();
             }
             catch (Exception e)
             {
                 proj?.Tracker.Stop();
-                DesktopIcons.Restore();
+                DesktopIcons.Restore(); Dnd.Restore(); AbortCameraRecording();
                 if (proj != null) try { Directory.Delete(proj.Dir, true); } catch { }
                 Say(L("开始录制失败：", "Couldn't start recording: ") + e.Message, true);
                 return;
@@ -438,7 +443,8 @@ namespace ScreenRecorder
             bool wasStopping = busy;
             var s = session; var proj = project;
             session = null; project = null; busy = false; timer.Stop();
-            DesktopIcons.Restore();
+            DesktopIcons.Restore(); Dnd.Restore();
+            StopCameraRecording(proj, s.Source, s.FirstFrameAt);
             UpdateUi();
             if (error != null)
             {
@@ -632,7 +638,8 @@ namespace ScreenRecorder
             }
             UnregisterHotKey(Handle, HotkeyId);
             UnregisterHotKey(Handle, ShotHotkeyId);
-            DesktopIcons.Restore();
+            DesktopIcons.Restore(); Dnd.Restore();
+            CloseCamera();
             base.OnFormClosing(e);
         }
 

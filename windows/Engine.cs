@@ -85,8 +85,10 @@ namespace ScreenRecorder
         public double FirstFrameAt => firstFrame > 0 ? firstFrame : started;
         double firstFrame, started;
 
+        public Source Source { get; }
         public Session(Source src, bool systemAudio, bool microphone, bool cursor, string path)
         {
+            Source = src;
             Path = path;
             RecordingSourceBase source;
             switch (src.Kind)
