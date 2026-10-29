@@ -386,12 +386,14 @@ struct CutSegment: Codable, Equatable, Identifiable {
     var rate = 4.0                       // 快放几倍：2 / 4 / 8
 }
 
-// 声音：录到的电脑声音 / 麦克风各自的音量（0–2），点击声音量，一键静音
+// 声音：录到的电脑声音 / 麦克风各自的音量（0–2），点击声音量，一键静音；讲解总音量、讲解时压低原声音
 struct AudioSettings: Codable, Equatable {
     var system = 1.0
     var mic = 1.0
     var clicks = 1.0
     var muted = false
+    var voice = 1.0                     // 后来录的讲解：总音量
+    var duck = true                     // 有讲解的地方把原声音压低（约 -12 dB）
     init() {}
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self), z = AudioSettings()
@@ -399,6 +401,49 @@ struct AudioSettings: Codable, Equatable {
         mic = (try? c.decodeIfPresent(Double.self, forKey: .mic)) ?? z.mic
         clicks = (try? c.decodeIfPresent(Double.self, forKey: .clicks)) ?? z.clicks
         muted = (try? c.decodeIfPresent(Bool.self, forKey: .muted)) ?? z.muted
+        voice = (try? c.decodeIfPresent(Double.self, forKey: .voice)) ?? z.voice
+        duck = (try? c.decodeIfPresent(Bool.self, forKey: .duck)) ?? z.duck
+    }
+}
+
+// 剪辑时另外录的一段讲解（素材夹 voice/ 下的 m4a）。
+// 锚点 start 是素材时间：讲解「从素材这一刻开始」，之后按成片时间（真实时间）一直往后放 length 秒——
+// 录的时候本来就是看着剪过的预览边看边说的。之后在讲解前面加 / 改剪掉、快放，讲解跟着它开头那一刻的画面一起挪；
+// 讲解中间那段画面再被剪掉 / 快放，讲解本身不剪不变速，照样连着放完
+struct VoiceClip: Codable, Equatable, Identifiable {
+    var id = UUID()
+    var file: String                    // 相对素材夹：voice/xxx.m4a
+    var start: Double                   // 素材时间
+    var trimIn = 0.0                    // 从录音的第几秒开始用
+    var trimOut: Double                 // 用到录音的第几秒
+    var fileLength: Double              // 录音文件总长（拖两头时别超出）
+    var volume = 1.0                    // 这一段的音量 0–2
+    var length: Double { max(0, trimOut - trimIn) }
+
+    // 成片里从哪到哪（成片时间）
+    func outRange(_ m: TimeMap) -> (start: Double, end: Double) { let s = m.out(start); return (s, s + length) }
+    // 时间轴上画到哪（素材时间）：讲解结尾那一刻对应素材的哪儿
+    func srcEnd(_ m: TimeMap) -> Double { m.src(m.out(start) + length) }
+
+    // 新录的一段放进来：和旧的重叠的部分以新的为准（旧段被剪短、剪成两段或整段去掉），按成片时间算
+    static func place(_ n: VoiceClip, into list: [VoiceClip], map m: TimeMap) -> [VoiceClip] {
+        let (ns, ne) = n.outRange(m)
+        var out: [VoiceClip] = []
+        for o in list {
+            let (os, oe) = o.outRange(m)
+            if oe <= ns + 1e-6 || os >= ne - 1e-6 { out.append(o); continue }        // 不重叠
+            if os < ns {                                                             // 前面露出来的一截
+                var a = o; a.trimOut = o.trimIn + (ns - os)
+                if a.length >= 0.05 { out.append(a) }
+            }
+            if oe > ne {                                                             // 后面露出来的一截
+                var b = o; b.id = os < ns ? UUID() : o.id   // 被剪成两段时后一截换个新 id
+                b.trimIn = o.trimIn + (ne - os); b.start = m.src(ne)
+                if b.length >= 0.05 { out.append(b) }
+            }
+        }
+        out.append(n)
+        return out.sorted { $0.outRange(m).start < $1.outRange(m).start }
     }
 }
 
@@ -410,11 +455,12 @@ struct StudioProject: Codable, Equatable {
     var segmentsEdited = false          // 推近段手动改过：以后自动规则变了也不重算；没改过的打开时按最新规则重排
     var cuts: [CutSegment] = []         // 中间剪掉 / 快放的段（Windows 版还没有，打开后会原样留着）
     var audio = AudioSettings()
+    var voiceovers: [VoiceClip] = []    // 后来录的讲解（Windows 版还没有，打开后会原样留着）
 
     init(segments: [ZoomSegment] = [], trimStart: Double = 0, trimEnd: Double = 0, look: StudioLook = StudioLook()) {
         self.segments = segments; self.trimStart = trimStart; self.trimEnd = trimEnd; self.look = look
     }
-    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look, segmentsEdited, cuts, audio }
+    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look, segmentsEdited, cuts, audio, voiceovers }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         segments = try c.decodeIfPresent([ZoomSegment].self, forKey: .segments) ?? []
@@ -424,6 +470,7 @@ struct StudioProject: Codable, Equatable {
         segmentsEdited = try c.decodeIfPresent(Bool.self, forKey: .segmentsEdited) ?? false   // 旧工程没有这个标记：当作没改过
         cuts = (try? c.decodeIfPresent([CutSegment].self, forKey: .cuts)) ?? []
         audio = (try? c.decodeIfPresent(AudioSettings.self, forKey: .audio)) ?? AudioSettings()
+        voiceovers = (try? c.decodeIfPresent([VoiceClip].self, forKey: .voiceovers)) ?? []
     }
 
     static func url(_ dir: URL) -> URL { dir.appendingPathComponent("project.json") }
@@ -940,6 +987,7 @@ final class StudioJob: @unchecked Sendable {
     private let srcEnd: Double                 // 素材里读到哪（修剪终点，素材时间）
     private let audio: AudioSettings
     private let trackVolumes: [Double]         // 每条音轨的音量（按声道数认：双声道 = 电脑声音，单声道 = 麦克风）
+    private let voice: VoiceMix?               // 后来录的讲解（GIF 不要声音）
     private let progress: @Sendable (Double) -> Void
 
     init(project dir: URL, out: URL, style: StudioStyle, project: StudioProject? = nil, progress: @escaping @Sendable (Double) -> Void) async throws {
@@ -971,6 +1019,7 @@ final class StudioJob: @unchecked Sendable {
             vols.append(ch == 1 ? p.audio.mic : p.audio.system)
         }
         trackVolumes = vols
+        voice = style.gif ? nil : try await VoiceMix.load(dir: dir, project: p, map: map)
     }
 
     private let lock = NSLock()
@@ -1035,7 +1084,7 @@ final class StudioJob: @unchecked Sendable {
         ])
         writer.add(vIn)
         var aIn: AVAssetWriterInput?
-        if aOut != nil || !clickTimes.isEmpty {
+        if aOut != nil || !clickTimes.isEmpty || voice != nil {
             let a = AVAssetWriterInput(mediaType: .audio, outputSettings: [
                 AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48000, AVNumberOfChannelsKey: 2, AVEncoderBitRateKey: 192_000,
             ])
@@ -1125,20 +1174,22 @@ final class StudioJob: @unchecked Sendable {
             group.enter()
             var audioDone = false
             let clicks = ClickSound(times: clickTimes, style: clickStyle, volume: audio.clicks)
-            let warp = AudioWarp(map: map, gain: Float(maxVol), clicks: clicks)
-            // 没有原声音只有点击声：自己按 0.1 秒一块生成静音 + 点击
+            let warp = AudioWarp(map: map, gain: Float(maxVol), clicks: clicks, voice: voice)
+            // 没有原声音（或原声音先读完了）：自己按 0.1 秒一块生成静音 + 点击 + 讲解，一直到成片结尾
             var genAt = Int64((range.start.seconds * 48000).rounded()), genEnd = Int64((range.end.seconds * 48000).rounded())
+            var origDone = aOut == nil
             aIn.requestMediaDataWhenReady(on: DispatchQueue(label: "studio.audio")) { [self] in
                 while aIn.isReadyForMoreMediaData && !audioDone {
                     var end = false
                     var sb: CMSampleBuffer?
                     if failed() { end = true }
-                    else if let aOut {
-                        // 原声音：剪掉的扔掉、快放的压短，再调音量、混点击声、软限幅
-                        if let raw = aOut.copyNextSampleBuffer() { sb = warp.process(raw) } else { end = true }
+                    else if !origDone, let aOut {
+                        // 原声音：剪掉的扔掉、快放的压短，再调音量、压低（有讲解时）、混讲解和点击声、软限幅
+                        if let raw = aOut.copyNextSampleBuffer() { sb = warp.process(raw) }
+                        else { origDone = true; if let at = warp.outAt { genAt = max(genAt, at) }; if voice == nil { end = true } }
                     } else if genAt < genEnd {
                         let n = Int(min(4800, genEnd - genAt))
-                        sb = clicks.silence(frames: n, at: genAt); genAt += Int64(n)
+                        sb = clicks.silence(frames: n, at: genAt, voice: voice); genAt += Int64(n)
                     } else { end = true }
                     if end { audioDone = true; aIn.markAsFinished(); group.leave(); return }
                     if let sb { aIn.append(sb) }
@@ -1284,9 +1335,10 @@ final class ClickSound: @unchecked Sendable {
         return make(data, frames: n, at: a0, format: fmt)
     }
 
-    func silence(frames n: Int, at a0: Int64) -> CMSampleBuffer? {
+    func silence(frames n: Int, at a0: Int64, voice: VoiceMix? = nil) -> CMSampleBuffer? {
         var data = [Float](repeating: 0, count: n * 2)
         _ = add(&data, frames: n, at: a0)
+        voice?.add(into: &data, frames: n, at: a0)
         for k in data.indices { data[k] = Self.softLimit(data[k]) }
         if format == nil {
             var asbd = AudioStreamBasicDescription(mSampleRate: 48000, mFormatID: kAudioFormatLinearPCM, mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
@@ -1329,12 +1381,12 @@ final class ClickSound: @unchecked Sendable {
 // 导出时的声音：按素材时间读进来的一块块 PCM → 剪掉段扔掉、快放段每 rate 个采样取平均压短 → 乘音量 → 混点击声 → 软限幅，
 // 时间戳按成片时间连续往后排
 final class AudioWarp: @unchecked Sendable {
-    private let map: TimeMap, gain: Float, clicks: ClickSound
-    private var outAt: Int64?                  // 下一个输出采样在成片里的位置
+    private let map: TimeMap, gain: Float, clicks: ClickSound, voice: VoiceMix?
+    private(set) var outAt: Int64?             // 下一个输出采样在成片里的位置
     private var pi = 0                         // 当前看到第几个剪辑段
     private var sumL: Float = 0, sumR: Float = 0, cnt = 0
 
-    init(map: TimeMap, gain: Float, clicks: ClickSound) { self.map = map; self.gain = gain; self.clicks = clicks }
+    init(map: TimeMap, gain: Float, clicks: ClickSound, voice: VoiceMix? = nil) { self.map = map; self.gain = gain; self.clicks = clicks; self.voice = voice }
 
     func process(_ sb: CMSampleBuffer) -> CMSampleBuffer? {
         let n = CMSampleBufferGetNumSamples(sb)
@@ -1365,9 +1417,102 @@ final class AudioWarp: @unchecked Sendable {
         let frames = out.count / 2
         guard frames > 0, let at = outAt else { return nil }
         if gain != 1 { for k in out.indices { out[k] *= gain } }
+        if let voice {
+            voice.duck(&out, frames: frames, at: at)          // 有讲解的地方原声音压低
+            voice.add(into: &out, frames: frames, at: at)
+        }
         clicks.add(into: &out, frames: frames, at: at)
         for k in out.indices { out[k] = ClickSound.softLimit(out[k]) }
         outAt = at + Int64(frames)
         return clicks.make(out, frames: frames, at: at, format: fmt)
     }
 }
+
+// 导出时的讲解：每段解成 48k 浮点、按成片时间放好，和原声音、点击声一起混；
+// 有讲解的地方把原声音压低约 -12 dB（讲解开始前 0.15 秒慢慢压下去，结束后 0.35 秒慢慢回来）
+final class VoiceMix: @unchecked Sendable {
+    private struct Piece { let at: Int64; let pcm: [Float] }   // 单声道，起点 = 成片第 at 个采样
+    private let pieces: [Piece]
+    private let spans: [(Int64, Int64)]        // 讲解占的范围（成片采样，左闭右开）
+    let duckTo: Float                          // 压到多少：1 = 不压
+    static let attack = 0.15, release = 0.35
+    static let duckLevel: Float = 0.25         // -12 dB
+
+    private init(pieces: [Piece], spans: [(Int64, Int64)]? = nil, duck: Bool) {
+        self.pieces = pieces
+        self.spans = spans ?? pieces.map { ($0.at, $0.at + Int64($0.pcm.count)) }
+        duckTo = duck ? Self.duckLevel : 1
+    }
+
+    static func load(dir: URL, project p: StudioProject, map: TimeMap) async throws -> VoiceMix? {
+        var pcs: [Piece] = []
+        for c in p.voiceovers where c.length > 0.01 && c.volume > 0.001 && p.audio.voice > 0.001 {
+            let url = dir.appendingPathComponent(c.file)
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            let all = try await decode(url)
+            let a = min(all.count, max(0, Int((c.trimIn * 48000).rounded()))), b = min(all.count, max(a, Int((c.trimOut * 48000).rounded())))
+            let g = Float(c.volume * p.audio.voice)
+            pcs.append(Piece(at: Int64((c.outRange(map).start * 48000).rounded()), pcm: all[a..<b].map { $0 * g }))
+        }
+        return pcs.isEmpty ? nil : VoiceMix(pieces: pcs, duck: p.audio.duck)
+    }
+    // 只给时间段（不读文件）：自测压低曲线用
+    static func spansOnly(_ r: [(Double, Double)], duck: Bool) -> VoiceMix {
+        VoiceMix(pieces: [], spans: r.map { (Int64(($0.0 * 48000).rounded()), Int64(($0.1 * 48000).rounded())) }, duck: duck)
+    }
+
+    // 整个录音文件解成 48k 单声道浮点
+    static func decode(_ url: URL) async throws -> [Float] {
+        let asset = AVURLAsset(url: url)
+        guard let t = try await asset.loadTracks(withMediaType: .audio).first else { return [] }
+        let r = try AVAssetReader(asset: asset)
+        let o = AVAssetReaderTrackOutput(track: t, outputSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 48000, AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 32, AVLinearPCMIsFloatKey: true, AVLinearPCMIsBigEndianKey: false, AVLinearPCMIsNonInterleaved: false,
+        ])
+        r.add(o)
+        guard r.startReading() else { throw r.error ?? Studio.failure("voice") }
+        var out: [Float] = []
+        while let sb = o.copyNextSampleBuffer() {
+            guard let block = CMSampleBufferGetDataBuffer(sb) else { continue }
+            let n = CMBlockBufferGetDataLength(block) / 4
+            var buf = [Float](repeating: 0, count: n)
+            _ = buf.withUnsafeMutableBytes { CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: n * 4, destination: $0.baseAddress!) }
+            out += buf
+        }
+        return out
+    }
+
+    // 第 s 个采样（成片）原声音该乘多少
+    func duckGain(_ s: Int64) -> Float {
+        guard duckTo < 1 else { return 1 }
+        var w = 0.0
+        for (a, b) in spans {
+            if s >= a && s < b { return duckTo }
+            if s < a { let t = Double(a - s) / 48000; if t < Self.attack { w = max(w, 1 - t / Self.attack) } }
+            else { let t = Double(s - b) / 48000; if t < Self.release { w = max(w, 1 - t / Self.release) } }
+        }
+        return 1 - (1 - duckTo) * Float(w)
+    }
+    // 一块立体声交错 PCM（起点 = 成片第 a0 个采样）：原声音按压低曲线乘上去
+    func duck(_ data: inout [Float], frames n: Int, at a0: Int64) {
+        guard duckTo < 1 else { return }
+        let pad = Int64(Self.release * 48000) + 1
+        guard spans.contains(where: { $0.0 - pad < a0 + Int64(n) && $0.1 + pad > a0 }) else { return }
+        for f in 0..<n {
+            let g = duckGain(a0 + Int64(f))
+            if g < 1 { data[f * 2] *= g; data[f * 2 + 1] *= g }
+        }
+    }
+    // 把落在这一块里的讲解加进去
+    func add(into data: inout [Float], frames n: Int, at a0: Int64) {
+        for p in pieces where p.at < a0 + Int64(n) && p.at + Int64(p.pcm.count) > a0 {
+            let from = max(0, Int(a0 - p.at)), to = min(p.pcm.count, Int(a0 + Int64(n) - p.at))
+            for k in from..<to {
+                let j = Int(p.at + Int64(k) - a0), v = p.pcm[k]
+                data[j * 2] += v; data[j * 2 + 1] += v
+            }
+        }
+    }
+}
+

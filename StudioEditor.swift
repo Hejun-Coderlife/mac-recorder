@@ -62,6 +62,17 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     @Published var timelineOffset = 0.0        // 时间轴滚出左边的像素（滚动条同步过来）
     @Published var timelineScrollSeq = 0       // 程序改了滚动位置 → 让 ScrollView 跟着滚
     var timelineViewW = 0.0                    // 时间轴可见宽度
+    // 录讲解
+    struct VoiceRec { var start: Double; var file: String; var offset = 0.0; var elapsed = 0.0; var level: Float = 0 }
+    @Published var voiceRec: VoiceRec?         // 正在录：从素材哪一刻开始、录了多久、音量
+    @Published var countdown: Int?             // 录之前倒数 3-2-1
+    @Published var voicePeaks: [String: [Float]] = [:]   // 每个录音文件的波形（每秒 100 个点）
+    private var recorder: AVAudioRecorder?
+    private var countdownTask: Task<Void, Never>?
+    private let voicePlayer = VoicePreview()
+    private var duckNow: Float = 1             // 预览里原声音现在压到多少（有讲解时 0.25）
+    static var countdownOn: Bool { UserDefaults.standard.object(forKey: "voiceCountdown") as? Bool ?? true }
+    static var muteWhileRecording: Bool { UserDefaults.standard.object(forKey: "voiceMuteOriginal") as? Bool ?? true }
     private var undoStack: [StudioProject] = [], redoStack: [StudioProject] = []
     private var dragBase: StudioProject?
     private var scrubber = Scrubber()          // 拖动时的 seek 排队：同时只有一个在路上，只留最新目标；拖动中不让播放器回调改播放头
@@ -132,9 +143,11 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
                 let rate = self.player.rate
                 if self.playing && rate == 0 { self.playing = false }
                 self.syncPlayback()
+                self.voiceTick()
             }
         }
         resetBoundaries()
+        for c in project.voiceovers { loadPeaks(c.file) }
         // 播到结尾（或修剪的终点）时间就不走了，上面的回调不再来：另外听「播完」和播放状态，把图标换回播放
         endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.playing = false; self.map { $0.time = $0.player.currentTime().seconds } }
@@ -181,6 +194,24 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
                     project.look.clickSound = true
                     selected = project.cuts[1].id
                 }
+                // EDITOR_VOICEDEMO=1：合成一段测试录音，放两段讲解（第二段 70% 音量）并选中第一段，看讲解轨和属性条
+                if ProcessInfo.processInfo.environment["EDITOR_VOICEDEMO"] != nil {
+                    let f = dir.appendingPathComponent("voice/demo.m4a")
+                    try? FileManager.default.createDirectory(at: f.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try? StudioTests.writeTestVoice(f, length: 6, bursts: stride(from: 0.2, to: 5.8, by: 0.23).map { $0 })
+                    let d = duration
+                    var b = VoiceClip(file: "voice/demo.m4a", start: d * 0.1, trimIn: 0, trimOut: 5, fileLength: 6)
+                    project.voiceovers = [b]
+                    b = VoiceClip(file: "voice/demo.m4a", start: d * 0.62, trimIn: 0.5, trimOut: 4.5, fileLength: 6, volume: 0.7)
+                    project.voiceovers.append(b)
+                    selected = project.voiceovers[0].id
+                    loadPeaks("voice/demo.m4a")
+                }
+                // EDITOR_VOICEREC=1：假装正在录讲解（不开麦克风），看录音中的按钮、提示条和实时长出的那块
+                if ProcessInfo.processInfo.environment["EDITOR_VOICEREC"] != nil {
+                    voiceRec = VoiceRec(start: duration * 0.35, file: "voice/x.m4a", offset: 0.05, elapsed: 3.4, level: 0.62)
+                    selected = nil
+                }
                 await renderStill(at: project.segments.first.map { ($0.start + $0.end) / 2 } ?? 1)
                 // EDITOR_AT_TRIM=1：把结尾修剪到 80% 处、播放头压在修剪点上，看两者重叠时分不分得清
                 if ProcessInfo.processInfo.environment["EDITOR_AT_TRIM"] != nil { project.trimEnd = duration * 0.8; time = project.trimEnd }
@@ -207,6 +238,9 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        if voiceRec != nil { stopVoice() }
+        countdownTask?.cancel(); countdown = nil
+        voicePlayer.stopAll()
         player.pause()
         if let timeObserver { player.removeTimeObserver(timeObserver) }
         if let boundaryObserver { player.removeTimeObserver(boundaryObserver) }
@@ -218,6 +252,8 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     // 空格 播放/暂停，←/→ 逐帧，Delete 删选中的段，⌘Z / ⌘⇧Z 撤销重做
     private func key(_ e: NSEvent) -> Bool {
         let cmd = e.modifierFlags.contains(.command), shift = e.modifierFlags.contains(.shift)
+        // 录讲解 / 倒数中：空格或 Esc 停下
+        if (voiceRec != nil || countdown != nil) && (e.keyCode == 49 || e.keyCode == 53) { toggleVoice(); return true }
         switch e.keyCode {
         case 49 where !cmd: togglePlay(); return true
         case 123 where !cmd: step(-1); return true
@@ -316,7 +352,8 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         timelineOffset = o; timelineScrollSeq += 1
     }
     func togglePlay() {
-        if playing { player.pause(); playing = false; return }
+        if voiceRec != nil { stopVoice(); return }
+        if playing { player.pause(); playing = false; voiceTick(); return }
         let now = player.currentTime().seconds   // 播到头时 time 可能没跟上，按播放器实际位置判断
         if now >= project.trimEnd - 0.05 || now < project.trimStart - 0.01 { seek(project.trimStart) }
         player.play(); playing = true
@@ -358,9 +395,118 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     // 预览的音量：每条音轨按声道数认电脑声音 / 麦克风，静音就是 0
     private func updateGains() {
         let a = project.audio
+        let k: Float = voiceRec != nil && Self.muteWhileRecording ? 0 : duckNow   // 录讲解时原声音静音；有讲解的地方压低
         for (i, g) in gains.enumerated() {
             let v = a.muted ? 0 : (audioChannels.indices.contains(i) && audioChannels[i] == 1 ? a.mic : a.system)
-            g.gain = Float(v)
+            g.gain = Float(v) * k
+        }
+    }
+
+    // ---- 录讲解 ----
+    // 每次播放器报时间（每秒 30 次）：讲解跟着画面放、原声音按讲解压低；录音中更新时长和音量、播到头就停
+    func voiceTick() {
+        let map = timeMap, o = map.out(player.currentTime().seconds)
+        let mute = voiceRec != nil && Self.muteWhileRecording
+        let active = voicePlayer.sync(dir: dir, clips: project.voiceovers, map: map, outTime: o,
+                                      playing: playing && Self.testShot == nil, master: mute ? 0 : project.audio.voice)
+        var d: Float = 1
+        if project.audio.duck, !project.voiceovers.isEmpty {
+            d = VoicePreview.duckGain(outTime: o, clips: project.voiceovers, map: map)
+        }
+        if !active && !playing { d = 1 }
+        if abs(d - duckNow) > 0.001 { duckNow = d; updateGains() }
+        if var r = voiceRec, let rec = recorder {
+            rec.updateMeters()
+            r.elapsed = max(0, rec.currentTime - r.offset)
+            r.level = max(0, min(1, (rec.averagePower(forChannel: 0) + 50) / 50))
+            voiceRec = r
+            if !playing || player.currentTime().seconds >= project.trimEnd - 0.02 { stopVoice() }
+        }
+    }
+
+    func toggleVoice() {
+        if countdown != nil { countdownTask?.cancel(); countdownTask = nil; countdown = nil; return }
+        if voiceRec != nil { stopVoice(); return }
+        Task { await startVoice() }
+    }
+
+    private func startVoice() async {
+        // 第一次用：要麦克风权限
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: break
+        case .notDetermined:
+            guard await AVCaptureDevice.requestAccess(for: .audio) else { return }
+        default:
+            let a = NSAlert()
+            a.messageText = L("没有麦克风权限", "No microphone access")
+            a.informativeText = L("到「系统设置 → 隐私与安全性 → 麦克风」里打开「录屏」，再来录讲解。", "Turn on Screen Recorder under System Settings → Privacy & Security → Microphone, then try again.")
+            a.runModal(); return
+        }
+        if playing { player.pause(); playing = false }
+        if Self.countdownOn {
+            countdownTask = Task { @MainActor in
+                for n in [3, 2, 1] {
+                    countdown = n
+                    try? await Task.sleep(for: .seconds(1))
+                    if Task.isCancelled { return }
+                }
+                countdown = nil
+                await beginVoice()
+            }
+        } else { await beginVoice() }
+    }
+
+    private func beginVoice() async {
+        // 从播放头开始（落在剪掉的段里就从段尾开始；在结尾附近就从头开始）
+        var s0 = time
+        if s0 < project.trimStart || s0 >= project.trimEnd - 0.3 { s0 = project.trimStart }
+        if let pc = timeMap.piece(at: s0), pc.rate == 0 { s0 = pc.end }
+        let vdir = dir.appendingPathComponent("voice", isDirectory: true)
+        try? FileManager.default.createDirectory(at: vdir, withIntermediateDirectories: true)
+        let name = "voice/" + UUID().uuidString.prefix(8).lowercased() + ".m4a"
+        guard let rec = try? AVAudioRecorder(url: dir.appendingPathComponent(name), settings: [
+            AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48000, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 128_000,
+        ]) else { NSSound.beep(); return }
+        rec.isMeteringEnabled = true
+        await player.seek(to: CMTime(seconds: s0, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        time = s0
+        guard rec.record() else { NSSound.beep(); return }
+        recorder = rec
+        // 录音先开、画面紧接着开始播：开播那一刻录音已经录了多久 = 讲解从录音的第几秒开始用，两边就对齐了
+        player.play(); playing = true
+        voiceRec = VoiceRec(start: s0, file: name, offset: rec.currentTime)
+        updateGains()
+        syncPlayback()
+    }
+
+    func stopVoice() {
+        guard let r = voiceRec, let rec = recorder else { voiceRec = nil; return }
+        let len = max(0, rec.currentTime - r.offset), total = rec.currentTime
+        rec.stop(); recorder = nil
+        player.pause(); playing = false
+        voiceRec = nil
+        updateGains()
+        guard len >= 0.3 else { try? FileManager.default.removeItem(at: dir.appendingPathComponent(r.file)); return }
+        addVoice(VoiceClip(file: r.file, start: r.start, trimIn: r.offset, trimOut: r.offset + len, fileLength: total))
+    }
+    // 一段讲解放进工程（新录的盖住重叠的旧讲解；能撤销）
+    func addVoice(_ c: VoiceClip) {
+        edit { $0.voiceovers = VoiceClip.place(c, into: $0.voiceovers, map: TimeMap($0)) }
+        selected = c.id
+        loadPeaks(c.file)
+    }
+    func voiceIndex(_ id: UUID?) -> Int? { project.voiceovers.firstIndex { $0.id == id } }
+    // 波形：每秒 100 个点（取绝对值最大）
+    func loadPeaks(_ file: String) {
+        guard voicePeaks[file] == nil else { return }
+        voicePeaks[file] = []
+        let url = dir.appendingPathComponent(file)
+        Task.detached {
+            let pcm = (try? await VoiceMix.decode(url)) ?? []
+            var pk: [Float] = []
+            stride(from: 0, to: pcm.count, by: 480).forEach { i in pk.append(pcm[i..<min(pcm.count, i + 480)].reduce(0) { max($0, abs($1)) }) }
+            let done = pk
+            await MainActor.run { self.voicePeaks[file] = done }
         }
     }
     func step(_ n: Int) {
@@ -429,6 +575,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     }
     func deleteSelected() {
         if let i = cutIndex(selected) { edit { $0.cuts.remove(at: i) }; selected = nil; return }
+        if let i = voiceIndex(selected) { edit { $0.voiceovers.remove(at: i) }; selected = nil; return }
         guard let i = index(selected) else { return }
         edit { $0.segments.remove(at: i) }
         selected = nil
@@ -566,10 +713,11 @@ struct EditorView: View {
                     Divider()
                     VStack(alignment: .leading, spacing: 10) {
                         if ed.cutIndex(ed.selected) != nil { cutInspector.frame(height: 30) }   // 选中剪辑段
+                        else if ed.voiceIndex(ed.selected) != nil { voiceInspector.frame(height: 30) }   // 选中讲解
                         else if ed.selected != nil { inspector.frame(height: 30) }   // 选中推近段才出现
-                        timeline.frame(height: 120)
-                            .help(L("上面一条是剪掉 / 快放的段，下面是推近段；点选来调整，空白处双击新加推近，两端黄条修剪",
-                                   "Top lane: cut / speed-up parts; below: zooms. Click to edit, double-click empty space to add a zoom, drag the yellow bars to trim"))
+                        timeline.frame(height: 146)
+                            .help(L("上面一条是剪掉 / 快放的段，中间是推近段，最下面是讲解；点选来调整，空白处双击新加推近，两端黄条修剪",
+                                   "Top lane: cut / speed-up parts; middle: zooms; bottom: voiceovers. Click to edit, double-click empty space to add a zoom, drag the yellow bars to trim"))
                     }
                     .padding(14)
                 }
@@ -610,6 +758,7 @@ struct EditorView: View {
                     .help(L("在播放头处新加一段推近（镜头放大凑近看）；也可以在时间轴空白处双击", "Add a zoom-in at the playhead; you can also double-click empty space on the timeline"))
                 Button { ed.addCut(at: ed.time) } label: { Label(L("剪掉", "Cut"), systemImage: "scissors") }
                     .help(L("在播放头处放一段「剪掉」（红色），拖两头盖住不要的部分；选中后也能改成「加速」快放", "Mark a part to cut out at the playhead (red); drag its ends over what you don't want. Select it to switch to speed-up instead"))
+                voiceButton
                 Button { ed.regenerate() } label: { Label(L("重新自动生成", "Auto-Generate"), systemImage: "wand.and.stars") }
                     .help(L("按录制时的点击和打字重新排推近段（会替换现在的段，可以撤销 ⌘Z）", "Rebuild zooms from your clicks and typing (replaces the current zooms; undo with ⌘Z)"))
                 Button { ed.undo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!ed.canUndo).help(L("撤销上一步（⌘Z）", "Undo the last change (⌘Z)"))
@@ -684,6 +833,24 @@ struct EditorView: View {
                     Spacer()
                 }.padding(10).allowsHitTesting(false)
             }
+            // 录讲解：倒数大数字；录音中左上角红点 + 时长 + 音量
+            if let n = ed.countdown {
+                Text("\(n)").font(.system(size: 96, weight: .bold, design: .rounded)).foregroundStyle(.white)
+                    .frame(width: 170, height: 170).background(Circle().fill(.black.opacity(0.45)))
+                    .allowsHitTesting(false)
+            }
+            if let r = ed.voiceRec {
+                VStack {
+                    HStack(spacing: 8) {
+                        Circle().fill(Color.red).frame(width: 10, height: 10)
+                        Text(L("正在录讲解", "Recording voiceover") + "  " + clock(r.elapsed)).font(.callout.monospacedDigit().weight(.medium))
+                        LevelMeter(level: r.level).frame(width: 70, height: 6)
+                        Text(L("空格 / Esc 停止", "Space / Esc to stop")).font(.caption).foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 6).background(.regularMaterial, in: Capsule())
+                    Spacer()
+                }.padding(10).allowsHitTesting(false)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -716,6 +883,41 @@ struct EditorView: View {
 }
 
 extension EditorView {
+    // 录讲解：没在录 = 麦克风按钮；倒数中 / 录音中 = 红色「停止」，旁边是时长和音量
+    @ViewBuilder var voiceButton: some View {
+        if ed.voiceRec != nil || ed.countdown != nil {
+            Button { ed.toggleVoice() } label: {
+                Label(L("停止", "Stop") + (ed.voiceRec.map { " " + clock($0.elapsed) } ?? ""), systemImage: "stop.circle.fill")
+                    .monospacedDigit()
+            }
+            .tint(.red).buttonStyle(.borderedProminent)
+            .help(L("停止录讲解（空格 / Esc）", "Stop recording (Space / Esc)"))
+        } else {
+            Button { ed.toggleVoice() } label: { Label(L("录讲解", "Voiceover"), systemImage: "mic") }
+                .help(L("从播放头开始边播边录你的讲解（麦克风）；录好的在时间轴最下面一条，可以挪、剪两头、调音量", "Record your narration with the microphone while the video plays from the playhead; it appears on the bottom lane where you can move it, trim its ends and set its volume"))
+        }
+    }
+
+    // 选中讲解：时间、音量、删除
+    @ViewBuilder var voiceInspector: some View {
+        if let i = ed.voiceIndex(ed.selected) {
+            let c = ed.project.voiceovers[i], m = ed.timeMap
+            HStack(spacing: 14) {
+                Text(L("讲解", "Voiceover")).font(.callout.weight(.semibold))
+                Text(clock(c.start) + " – " + clock(c.srcEnd(m)) + "  ·  " + String(format: L("%.1f 秒", "%.1fs"), c.length))
+                    .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                Divider().frame(height: 16)
+                Text(L("音量", "Volume")).font(.callout)
+                Slider(value: Binding(get: { c.volume }, set: { v in ed.dragBegin(); ed.dragUpdate { $0.voiceovers[i].volume = v } }),
+                       in: 0...2, onEditingChanged: { if !$0 { ed.dragEnd() } })
+                    .frame(width: 160)
+                Text(c.volume < 0.005 ? L("静音", "Off") : "\(Int((c.volume * 100).rounded()))%").font(.callout.monospacedDigit()).frame(width: 44, alignment: .leading)
+                Spacer()
+                Button(role: .destructive) { ed.deleteSelected() } label: { Label(L("删除", "Delete"), systemImage: "trash") }
+            }
+        }
+    }
+
     // 选中剪辑段：剪掉 / 加速几倍，原来多长、成片里多长
     @ViewBuilder var cutInspector: some View {
         if let i = ed.cutIndex(ed.selected) {
@@ -821,7 +1023,7 @@ struct TimelineGestures: NSViewRepresentable {
 
 struct TimelineStrip: View {
     @ObservedObject var ed: StudioEditor
-    private let rulerH = 22.0, cutY = 38.0, cutH = 20.0, segY = 64.0, segH = 40.0
+    private let rulerH = 22.0, cutY = 38.0, cutH = 20.0, segY = 64.0, segH = 40.0, voiceY = 112.0, voiceH = 26.0
     private let accent = Color(red: 0.42, green: 0.36, blue: 0.95)
 
     var body: some View {
@@ -853,6 +1055,24 @@ struct TimelineStrip: View {
                 ForEach(ed.project.segments) { seg in
                     SegmentBlock(ed: ed, seg: seg, w: w, d: d, accent: accent).frame(width: max(6, x(seg.end) - x(seg.start)), height: segH)
                         .offset(x: x(seg.start), y: segY)
+                }
+                // 讲解轨：每段一块（带波形）；录音中那段实时长出来
+                RoundedRectangle(cornerRadius: 5).fill(Color.secondary.opacity(0.07)).frame(width: w - 4, height: voiceH)
+                    .offset(x: 2, y: voiceY).allowsHitTesting(false)
+                let m = ed.timeMap
+                ForEach(ed.project.voiceovers) { c in
+                    VoiceBlock(ed: ed, clip: c, w: w, d: d, peaks: ed.voicePeaks[c.file] ?? [])
+                        .frame(width: max(6, x(c.srcEnd(m)) - x(c.start)), height: voiceH)
+                        .offset(x: x(c.start), y: voiceY)
+                }
+                if let r = ed.voiceRec {
+                    let e = m.src(m.out(r.start) + r.elapsed)
+                    RoundedRectangle(cornerRadius: 5).fill(Color.red.opacity(0.75))
+                        .overlay(HStack(spacing: 4) { Image(systemName: "mic.fill"); Text(clock(r.elapsed)).monospacedDigit() }
+                            .font(.system(size: 10, weight: .bold)).foregroundStyle(.white).padding(.horizontal, 6), alignment: .leading)
+                        .clipped()
+                        .frame(width: max(6, x(e) - x(r.start)), height: voiceH)
+                        .offset(x: x(r.start), y: voiceY).allowsHitTesting(false)
                 }
                 // 修剪范围外压暗
                 Rectangle().fill(Color.black.opacity(0.28)).frame(width: max(0, x(ed.project.trimStart)), height: g.size.height).allowsHitTesting(false)
@@ -1115,11 +1335,128 @@ struct SegmentBlock: View {
     }
 }
 
+// 讲解轨上的一段：拖中间挪、拖两头剪掉讲解的开头 / 结尾（按成片时间换算），单击选中
+struct VoiceBlock: View {
+    @ObservedObject var ed: StudioEditor
+    let clip: VoiceClip
+    let w: Double, d: Double
+    let peaks: [Float]
+    private let minLen = 0.2
+    private let tint = Color(red: 0.13, green: 0.62, blue: 0.52)
+
+    var body: some View {
+        let sel = ed.selected == clip.id
+        ZStack {
+            RoundedRectangle(cornerRadius: 5).fill(tint.opacity(sel ? 0.95 : 0.7))
+            // 波形：只画用到的那一截（trimIn…trimOut）
+            Canvas { ctx, size in
+                guard !peaks.isEmpty else { return }
+                let a = Int(clip.trimIn * 100), b = min(peaks.count, Int(clip.trimOut * 100))
+                guard b > a else { return }
+                let n = Int(size.width / 2), mid = size.height / 2
+                var p = Path()
+                for k in 0..<max(1, n) {
+                    let i0 = a + (b - a) * k / max(1, n), i1 = max(i0 + 1, a + (b - a) * (k + 1) / max(1, n))
+                    let v = Double(peaks[i0..<min(b, i1)].max() ?? 0)
+                    let hh = max(0.5, min(1, v * 1.6) * (size.height / 2 - 3))
+                    p.addRect(CGRect(x: Double(k) * 2, y: mid - hh, width: 1.2, height: hh * 2))
+                }
+                ctx.fill(p, with: .color(.white.opacity(0.75)))
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            RoundedRectangle(cornerRadius: 5).stroke(sel ? Color.white : Color.clear, lineWidth: 2)
+            HStack(spacing: 3) {
+                HStack(spacing: 2) {
+                    Image(systemName: "mic.fill").font(.system(size: 9, weight: .bold))
+                    if abs(clip.volume - 1) > 0.01 { Text("\(Int((clip.volume * 100).rounded()))%").font(.system(size: 9, weight: .bold).monospacedDigit()) }
+                }
+                .padding(.horizontal, 4).padding(.vertical, 1).background(Capsule().fill(tint))   // 压在波形上也看得清
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(.white).lineLimit(1).padding(.horizontal, 10)
+            HStack {
+                edge(isStart: true)
+                Spacer(minLength: 0)
+                edge(isStart: false)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { ed.selected = clip.id; ed.picking = false }
+        .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .named(TimelineStrip.space))
+            .onChanged { v in
+                ed.selected = clip.id
+                ed.dragBegin()
+                let dt = v.translation.width / w * d
+                ed.dragUpdate { p in
+                    guard let i = p.voiceovers.firstIndex(where: { $0.id == clip.id }) else { return }
+                    p.voiceovers[i].start = VoiceDrag.move(clip, dt: dt, duration: d)
+                }
+            }
+            .onEnded { _ in ed.dragEnd() })
+        .help(L("讲解：拖动挪位置，拖两头剪掉不要的开头结尾", "Voiceover: drag to move, drag the ends to trim"))
+    }
+
+    private func edge(isStart: Bool) -> some View {
+        Rectangle().fill(Color.white.opacity(0.001)).frame(width: 8)
+            .overlay(Capsule().fill(Color.white.opacity(0.9)).frame(width: 2.5, height: 12))
+            .contentShape(Rectangle())
+            .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
+            .onTapGesture { ed.selected = clip.id; ed.picking = false }
+            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named(TimelineStrip.space))
+                .onChanged { v in
+                    ed.selected = clip.id
+                    ed.dragBegin()
+                    let dt = v.translation.width / w * d
+                    ed.dragUpdate { p in
+                        guard let i = p.voiceovers.firstIndex(where: { $0.id == clip.id }) else { return }
+                        p.voiceovers[i] = VoiceDrag.trim(p.voiceovers[i], isStart: isStart, dt: dt, map: TimeMap(p), minLen: minLen)
+                    }
+                }
+                .onEnded { _ in ed.dragEnd() })
+    }
+}
+
+// 拖讲解（纯函数，好测）：dt 是时间轴上拖过的素材时间
+enum VoiceDrag {
+    static func move(_ c: VoiceClip, dt: Double, duration d: Double) -> Double { min(max(0, c.start + dt), max(0, d - 0.05)) }
+    // 拖开头：讲解前面那截不要了（锚点跟着往后挪）；拖结尾：后面那截不要了。按成片时间算，夹在录音文件范围里
+    static func trim(_ c: VoiceClip, isStart: Bool, dt: Double, map m: TimeMap, minLen: Double) -> VoiceClip {
+        var r = c
+        if isStart {
+            let newStart = max(0, c.start + dt)
+            var dIn = m.out(newStart) - m.out(c.start)
+            dIn = min(max(dIn, -c.trimIn), c.length - minLen)
+            r.trimIn = c.trimIn + dIn
+            r.start = m.src(m.out(c.start) + dIn)
+        } else {
+            let e = c.srcEnd(m) + dt
+            let len = min(max(m.out(e) - m.out(c.start), minLen), c.fileLength - c.trimIn)
+            r.trimOut = c.trimIn + len
+        }
+        return r
+    }
+}
+
+// 录音音量条
+struct LevelMeter: View {
+    let level: Float
+    var body: some View {
+        GeometryReader { g in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.secondary.opacity(0.25))
+                Capsule().fill(level > 0.9 ? Color.red : Color.green).frame(width: g.size.width * Double(level))
+            }
+        }
+    }
+}
+
 // ---- 右边的「样式」面板：预设、画面比例、背景、画面、鼠标、运动模糊 ----
 struct StylePanel: View {
     @ObservedObject var ed: StudioEditor
     @State private var naming = false
     @State private var newName = ""
+    @AppStorage("voiceCountdown") private var voiceCountdown = true
+    @AppStorage("voiceMuteOriginal") private var voiceMuteOriginal = true
     @State private var open: Set<String> = ProcessInfo.processInfo.environment["EDITOR_OPEN"].map { Set($0.split(separator: ",").map(String.init)) }
         ?? ["preset", "aspect", "bg", "frame", "cursor", "audio", "blur"]
 
@@ -1333,6 +1670,14 @@ struct StylePanel: View {
             if ed.project.look.clickSound {
                 audioSlider(L("点击声", "Clicks"), \.clicks, pct)
             }
+            if !ed.project.voiceovers.isEmpty {
+                audioSlider(L("讲解", "Voiceover"), \.voice, pct)
+                Toggle(L("讲解时自动压低原声音", "Lower recorded sound under voiceover"), isOn: ed.audioToggle(\.duck))
+                    .help(L("有讲解的地方，原来录到的声音压低到约四分之一（-12 dB），讲解更清楚", "Where there's narration, the recorded sound drops to about a quarter (-12 dB) so your voice is clear"))
+            }
+            Toggle(L("录讲解前倒数 3 秒", "Count down 3 s before voiceover"), isOn: $voiceCountdown)
+            Toggle(L("录讲解时原声音静音", "Mute recorded sound while recording voiceover"), isOn: $voiceMuteOriginal)
+                .help(L("录的时候不放原来的声音，免得被麦克风录进去（播放和导出不受影响）", "Silences the recorded sound while you narrate so the mic doesn't pick it up (playback and export are unaffected)"))
             Text(L("最大 200%，太响会自动压住、不会爆音", "Up to 200%; loud parts are softened so they don't distort"))
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }.toggleStyle(.checkbox).font(.callout)
@@ -1415,6 +1760,147 @@ enum StudioTests {
         check("cuts 存了再读一样", rt?.cuts == p.cuts)
         print(ok ? "CUTTEST OK" : "CUTTEST FAIL")
         exit(ok ? 0 : 1)
+    }
+
+    // VOICETEST=素材夹（raw.mp4 的声音最好是一段持续的测试音，用来量压低）→ 讲解的规则 + 真导出：
+    // 放置 / 覆盖、锚点跟着剪辑走、拖两头、压低曲线、旧工程兼容；再合成一段测试录音（2 kHz 短促音），导出后量出现的时刻、音量、压低
+    @MainActor static func voiceTest() -> Bool {
+        guard let path = ProcessInfo.processInfo.environment["VOICETEST"] else { return false }
+        Task { @MainActor in
+            var ok = true
+            func check(_ n: String, _ c: Bool, _ info: String = "") { print(c ? "PASS" : "FAIL", n, info); ok = ok && c }
+            func near(_ a: Double, _ b: Double, _ e: Double = 1e-6) -> Bool { abs(a - b) < e }
+            // ---- 规则 ----
+            let id0 = StudioProject(trimStart: 0, trimEnd: 30), m0 = TimeMap(id0)
+            let A = VoiceClip(file: "a", start: 2, trimIn: 0, trimOut: 4, fileLength: 4)
+            func cl(_ s: Double, _ len: Double) -> VoiceClip { VoiceClip(file: "n", start: s, trimIn: 0, trimOut: len, fileLength: 10) }
+            var r = VoiceClip.place(cl(3, 1), into: [A], map: m0)
+            check("新录的在中间：旧的剪成两段", r.count == 3 && near(r[0].trimOut, 1) && near(r[2].start, 4) && near(r[2].trimIn, 2) && near(r[2].trimOut, 4) && r[0].id != r[2].id,
+                  "\(r.map { ($0.file, $0.start, $0.trimIn, $0.trimOut) })")
+            r = VoiceClip.place(cl(1, 2), into: [A], map: m0)
+            check("盖住旧的开头", r.count == 2 && near(r[1].start, 3) && near(r[1].trimIn, 1) && r[1].id == A.id, "\(r.map { ($0.file, $0.start, $0.trimIn) })")
+            r = VoiceClip.place(cl(5, 3), into: [A], map: m0)
+            check("盖住旧的结尾", r.count == 2 && near(r[0].trimOut, 3) && r[0].id == A.id)
+            r = VoiceClip.place(cl(1, 6), into: [A], map: m0)
+            check("整段盖住：旧的去掉", r.count == 1 && r[0].file == "n")
+            r = VoiceClip.place(cl(7, 1), into: [A], map: m0)
+            check("不重叠：都留着", r.count == 2)
+            var pc = StudioProject(trimStart: 0, trimEnd: 30)
+            pc.cuts = [CutSegment(start: 4, end: 6), CutSegment(start: 11, end: 12)]
+            let mc = TimeMap(pc), B = VoiceClip(file: "b", start: 10, trimIn: 0, trimOut: 3, fileLength: 3)
+            check("讲解前面剪掉 2 秒：讲解跟着开头的画面往前挪", near(B.outRange(mc).start, 8) && near(B.outRange(mc).end, 11))
+            check("讲解中间的画面被剪：讲解照样连着放（长度不变）、时间轴上块变长", near(B.outRange(mc).end - B.outRange(mc).start, 3) && near(B.srcEnd(mc), 14), "\(B.srcEnd(mc))")
+            let t1 = VoiceDrag.trim(B, isStart: true, dt: 0.5, map: mc, minLen: 0.2)
+            check("拖开头：去掉前面 0.5 秒", near(t1.trimIn, 0.5) && near(t1.start, 10.5) && near(t1.outRange(mc).end, 11))
+            let t2 = VoiceDrag.trim(B, isStart: false, dt: -3.5, map: mc, minLen: 0.2)   // 14 → 10.5，跨过剪掉的 11–12：成片里只剩 0.5 秒
+            check("拖结尾（跨过剪掉段）按成片时间算", near(t2.trimOut, 0.5), "\(t2.trimOut)")
+            let t2b = VoiceDrag.trim(B, isStart: false, dt: -2.5, map: mc, minLen: 0.2)  // 停在剪掉段里：按剪掉段的起点算
+            check("拖结尾停在剪掉段里", near(t2b.trimOut, 1.0), "\(t2b.trimOut)")
+            let t3 = VoiceDrag.trim(B, isStart: false, dt: 9, map: mc, minLen: 0.2)
+            check("拖结尾不超出录音长度", near(t3.trimOut, 3))
+            let t4 = VoiceDrag.trim(B, isStart: true, dt: -5, map: mc, minLen: 0.2)
+            check("拖开头不早于录音开头", near(t4.trimIn, 0) && near(t4.start, 10))
+            let dm = VoiceMix.spansOnly([(2, 4)], duck: true)
+            check("压低曲线", dm.duckGain(Int64(3 * 48000)) == VoiceMix.duckLevel && dm.duckGain(Int64(1 * 48000)) == 1 && dm.duckGain(Int64(5 * 48000)) == 1
+                  && abs(dm.duckGain(Int64(1.925 * 48000)) - 0.625) < 0.02 && dm.duckGain(Int64(4.1 * 48000)) < 0.6 && dm.duckGain(Int64(4.1 * 48000)) > 0.25)
+            check("不压低时恒为 1", VoiceMix.spansOnly([(2, 4)], duck: false).duckGain(Int64(3 * 48000)) == 1)
+            let old = #"{"segments":[],"trimStart":0,"trimEnd":10,"audio":{"system":1,"mic":1,"clicks":1,"muted":false}}"#.data(using: .utf8)!
+            let po = try? JSONDecoder().decode(StudioProject.self, from: old)
+            check("旧工程兼容", po?.voiceovers == [] && po?.audio.voice == 1 && po?.audio.duck == true)
+            var pr = id0; pr.voiceovers = [B]; pr.audio.duck = false; pr.audio.voice = 1.5
+            let rt = try? JSONDecoder().decode(StudioProject.self, from: JSONEncoder().encode(pr))
+            check("存了再读一样", rt?.voiceovers == pr.voiceovers && rt?.audio == pr.audio)
+
+            // ---- 真导出 ----
+            let dir = URL(fileURLWithPath: path)
+            let vdir = dir.appendingPathComponent("voice"); try? FileManager.default.createDirectory(at: vdir, withIntermediateDirectories: true)
+            let burstAt = [0.5, 1.5, 2.5, 3.5]
+            do {
+                try writeTestVoice(vdir.appendingPathComponent("t.m4a"), length: 4.0, bursts: burstAt)
+            } catch { check("写测试录音", false, "\(error)"); print("VOICETEST FAIL"); exit(1) }
+            guard let track = try? JSONDecoder().decode(Track.self, from: Data(contentsOf: dir.appendingPathComponent("track.json"))) else { print("VOICETEST FAIL no track"); exit(1) }
+            let dur = (try? await AVURLAsset(url: dir.appendingPathComponent("raw.mp4")).load(.duration).seconds) ?? 0
+            var base = StudioProject.load(dir, track: track, duration: dur)
+            base.trimStart = 0; base.trimEnd = dur; base.cuts = []; base.look.clickSound = false
+            base.look.background = .color; base.look.blur = .off
+            var o = ExportOptions(); o.res = .sd; o.fps = 30; o.quality = .small
+            let clip = VoiceClip(file: "voice/t.m4a", start: 3.0, trimIn: 0.2, trimOut: 4.0, fileLength: 4.0)
+            func export(_ p: StudioProject, _ name: String) async -> [Float] {
+                let out = URL(fileURLWithPath: "/tmp/voicetest-\(name).mp4")
+                do {
+                    let u = try await Studio.render(project: dir, to: out, style: StudioStyle(o), edits: p) { _ in }
+                    return (try? await VoiceMix.decode(u)) ?? []
+                } catch { print("export", name, error); return [] }
+            }
+            // 讲解（2 kHz、0.5 振幅、60 毫秒）的起点：安静 0.2 秒以上后第一次超过 0.12
+            func onsets(_ a: [Float], from: Double = 0) -> [Double] {
+                var res: [Double] = [], quiet = 0
+                for (i, v) in a.enumerated() where Double(i) / 48000 >= from {
+                    if abs(v) > 0.12 { if quiet > 9600 { res.append(Double(i) / 48000) }; quiet = 0 } else { quiet += 1 }
+                }
+                return res
+            }
+            func peak(_ a: [Float], _ t: Double) -> Float { let i = Int(t * 48000); return a[max(0, i - 480)..<min(a.count, i + 4800)].map(abs).max() ?? 0 }
+            func rms(_ a: [Float], _ t0: Double, _ t1: Double) -> Double {
+                let s = a[Int(t0 * 48000)..<min(a.count, Int(t1 * 48000))]; return (s.reduce(0) { $0 + Double($1 * $1) } / Double(max(1, s.count))).squareRoot()
+            }
+            func times(_ got: [Double], _ want: [Double]) -> (Bool, String) {
+                let err = zip(got, want).map { abs($0 - $1) }.max() ?? 99
+                return (got.count == want.count && err < 0.02, "got \(got.map { String(format: "%.3f", $0) }) want \(want) maxErr \(String(format: "%.1f", err * 1000))ms")
+            }
+            // 1) 只有讲解（原声音静音）：出现时刻
+            var p1 = base; p1.audio.muted = true; p1.voiceovers = [clip]
+            let a1 = await export(p1, "plain")
+            let want1 = burstAt.filter { $0 >= 0.2 }.map { 3.0 + $0 - 0.2 }
+            var (c, info) = times(onsets(a1, from: 1), want1); check("讲解出现在成片正确时刻", c, info)
+            // 2) 讲解前面剪掉 1 秒 + 讲解中间的画面剪掉 1 秒：整体前移 1 秒、中间不受影响
+            var p2 = p1; p2.cuts = [CutSegment(start: 1.0, end: 2.0), CutSegment(start: 4.0, end: 5.0)]
+            let a2 = await export(p2, "cuts")
+            (c, info) = times(onsets(a2, from: 1), want1.map { $0 - 1 }); check("剪辑后讲解按锚点前移、中间连着放", c, info)
+            // 3) 音量：这段 50%
+            var p3 = p1; p3.voiceovers[0].volume = 0.5
+            let a3 = await export(p3, "vol")
+            let r3 = peak(a3, want1[1]) / max(1e-6, peak(a1, want1[1]))
+            check("音量 50%", abs(r3 - 0.5) < 0.06, String(format: "ratio %.3f", r3))
+            // 4) 重叠：新录一段盖住 4.0–5.0（成片时间），旧的那一声 4.3 消失、新的 4.5 出现
+            var p4 = p1
+            p4.voiceovers = VoiceClip.place(VoiceClip(file: "voice/t.m4a", start: 4.0, trimIn: 0, trimOut: 1.0, fileLength: 4.0), into: p4.voiceovers, map: TimeMap(p4))
+            let a4 = await export(p4, "overlap")
+            (c, info) = times(onsets(a4, from: 1), [3.3, 4.5, 5.3, 6.3]); check("重叠部分以新录的为准", c && p4.voiceovers.count == 3, info)
+            // 5) 压低：原声音是持续测试音时，讲解范围里（两声之间）是外面的约 1/4；关掉压低就一样
+            var p5 = base; p5.audio.muted = false; p5.audio.system = 1; p5.voiceovers = [clip]; p5.audio.duck = true
+            let a5 = await export(p5, "duck")
+            var p6 = p5; p6.audio.duck = false
+            let a6 = await export(p6, "noduck")
+            let outside = rms(a5, 9.0, 9.5)
+            if outside > 0.01 {
+                let rIn = rms(a5, 3.7, 4.1) / outside, rOff = rms(a6, 3.7, 4.1) / max(1e-6, rms(a6, 9.0, 9.5))
+                check("讲解时原声音压低约 -12 dB", abs(rIn - Double(VoiceMix.duckLevel)) < 0.05, String(format: "in/out %.3f", rIn))
+                check("关掉压低：原声音不变", abs(rOff - 1) < 0.1, String(format: "in/out %.3f", rOff))
+                check("压低时讲解本身照常", abs(peak(a5, want1[1]) - peak(a1, want1[1])) < 0.12)
+            } else { print("SKIP 压低（素材原声音太小，用带测试音的 raw.mp4 再测）", outside) }
+            check("导出都有声音", !a1.isEmpty && !a2.isEmpty && !a3.isEmpty && !a4.isEmpty)
+            print(ok ? "VOICETEST OK" : "VOICETEST FAIL")
+            exit(ok ? 0 : 1)
+        }
+        return true
+    }
+
+    // 合成一段测试录音（像 AVAudioRecorder 录出来的一样：AAC m4a、48k 单声道）：几声 2 kHz、60 毫秒的短促音，其余安静
+    static func writeTestVoice(_ url: URL, length: Double, bursts: [Double]) throws {
+        try? FileManager.default.removeItem(at: url)
+        let f = try AVAudioFile(forWriting: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48000, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 128_000],
+                                commonFormat: .pcmFormatFloat32, interleaved: false)
+        let n = AVAudioFrameCount(length * 48000)
+        guard let buf = AVAudioPCMBuffer(pcmFormat: f.processingFormat, frameCapacity: n) else { throw Studio.failure("buffer") }
+        buf.frameLength = n
+        let d = buf.floatChannelData![0]
+        for i in 0..<Int(n) {
+            let t = Double(i) / 48000
+            d[i] = bursts.contains { t >= $0 && t < $0 + 0.06 } ? Float(0.5 * sin(2 * .pi * 2000 * t)) : 0
+        }
+        try f.write(from: buf)
+        f.close()
     }
 
     // SCRUBTEST=1 → 拖动逻辑（不碰界面）：修剪把手按「起点值 + 拖动距离」算、拖动中播放头不被播放器的旧时间拉回、seek 不堆积只追最新
@@ -1713,7 +2199,7 @@ enum StudioTests {
 }
 
 // 预览音量：每条音轨挂一个处理器，按 GainBox 的音量放大 / 缩小（超过 100% 也行，带软限幅）；拖滑块只改数字，不用重建播放器
-final class GainBox: @unchecked Sendable { var gain: Float = 1 }
+final class GainBox: @unchecked Sendable { var gain: Float = 1; var cur: Float = 1 }   // gain = 目标，cur = 处理器里正在用的（慢慢追过去，压低 / 恢复不咔嗒）
 enum PreviewAudio {
     static func mix(tracks: [AVAssetTrack], gains: [GainBox]) -> AVAudioMix {
         let m = AVMutableAudioMix()
@@ -1727,11 +2213,14 @@ enum PreviewAudio {
                 prepare: nil, unprepare: nil,
                 process: { tap, frames, _, buffers, framesOut, flagsOut in
                     guard MTAudioProcessingTapGetSourceAudio(tap, frames, buffers, flagsOut, nil, framesOut) == noErr else { return }
-                    let g = Unmanaged<GainBox>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue().gain
-                    guard abs(g - 1) > 0.001 else { return }
+                    let box = Unmanaged<GainBox>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue()
+                    let g0 = box.cur, g1 = g0 + max(-0.12, min(0.12, box.gain - g0))   // 每块最多变 0.12：压低 / 恢复约 0.15 秒
+                    box.cur = g1
+                    guard abs(g0 - 1) > 0.001 || abs(g1 - 1) > 0.001 else { return }
                     for b in UnsafeMutableAudioBufferListPointer(buffers) {
                         guard let p = b.mData?.assumingMemoryBound(to: Float.self) else { continue }
-                        for k in 0..<Int(b.mDataByteSize) / 4 { p[k] = ClickSound.softLimit(p[k] * g) }
+                        let n = Int(b.mDataByteSize) / 4
+                        for k in 0..<n { p[k] = ClickSound.softLimit(p[k] * (g0 + (g1 - g0) * Float(k) / Float(max(1, n)))) }
                     }
                 })
             var tap: MTAudioProcessingTap?
@@ -1825,3 +2314,39 @@ struct ExportOptionsPanel: View {
         return true
     }
 }
+
+// 预览里放讲解：每段一个 AVAudioPlayer，按成片时间对齐画面（落后 / 超前 80 毫秒以上就校正一下）
+@MainActor final class VoicePreview {
+    private var players: [UUID: (file: String, p: AVAudioPlayer)] = [:]
+
+    // 返回：现在有没有讲解在响
+    @discardableResult
+    func sync(dir: URL, clips: [VoiceClip], map: TimeMap, outTime o: Double, playing: Bool, master: Double) -> Bool {
+        var any = false
+        let ids = Set(clips.map(\.id))
+        for (id, e) in players where !ids.contains(id) { e.p.stop(); players[id] = nil }
+        for c in clips {
+            let (os, oe) = c.outRange(map)
+            let on = playing && master > 0.001 && o >= os && o < oe
+            if !on { if let e = players[c.id], e.p.isPlaying { e.p.pause() }; continue }
+            any = true
+            if players[c.id]?.file != c.file {
+                guard let p = try? AVAudioPlayer(contentsOf: dir.appendingPathComponent(c.file)) else { continue }
+                p.prepareToPlay(); players[c.id] = (c.file, p)
+            }
+            guard let p = players[c.id]?.p else { continue }
+            p.volume = Float(min(1, c.volume * master))
+            let pos = c.trimIn + (o - os)
+            if !p.isPlaying { p.currentTime = pos; p.play() }
+            else if abs(p.currentTime - pos) > 0.08 { p.currentTime = pos }
+        }
+        return any
+    }
+    func stopAll() { for e in players.values { e.p.stop() }; players.removeAll() }
+
+    // 预览里原声音压多少（和导出同一条曲线，只是按每秒 30 次取样）
+    static func duckGain(outTime o: Double, clips: [VoiceClip], map: TimeMap) -> Float {
+        VoiceMix.spansOnly(clips.map { $0.outRange(map) }, duck: true).duckGain(Int64(o * 48000))
+    }
+}
+
