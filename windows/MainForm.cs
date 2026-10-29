@@ -17,6 +17,9 @@ namespace ScreenRecorder
         readonly Button recordBtn = new Button(), regionBtn = new Button(), refreshBtn = new Button(), folderBtn = new Button();
         readonly Label timeLabel = new Label(), status = new Label(), hint = new Label();
         readonly Timer timer = new Timer { Interval = 250 };
+        readonly LinkLabel updateLink = new LinkLabel(), checkLink = new LinkLabel();
+        Updater.Release pending;    // 查到的新版本，还没装
+        bool updating;              // 正在下载新版本
 
         List<Source> sources = new List<Source>();
         Source region;
@@ -39,9 +42,10 @@ namespace ScreenRecorder
             MinimumSize = new Size(560, 440);
             StartPosition = FormStartPosition.CenterScreen;
 
-            var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(16), ColumnCount = 1, RowCount = 5 };
+            var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(16), ColumnCount = 1, RowCount = 6 };
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -112,6 +116,18 @@ namespace ScreenRecorder
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             bottom.Controls.Add(status, 0, 0); bottom.Controls.Add(folderBtn, 1, 0);
             root.Controls.Add(bottom);
+
+            // 更新：有新版本时左边出「有新版本 vX.Y · 更新」，右边常驻「检查更新」
+            var upd = Row();
+            updateLink.AutoSize = true; updateLink.Anchor = AnchorStyles.Left; updateLink.Visible = false;
+            updateLink.LinkClicked += (s, e) => InstallUpdate();
+            checkLink.AutoSize = true; checkLink.Anchor = AnchorStyles.Right; checkLink.Text = L("检查更新", "Check for Updates");
+            checkLink.LinkClicked += (s, e) => CheckUpdates(true);
+            upd.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            upd.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            upd.Controls.Add(updateLink, 0, 0); upd.Controls.Add(checkLink, 1, 0);
+            upd.Margin = new Padding(0, 4, 0, 0);
+            root.Controls.Add(upd);
 
             timer.Tick += (s, e) => { if (session != null) timeLabel.Text = "● " + (DateTime.Now - startedAt).ToString(@"mm\:ss"); };
             Say("");
@@ -190,10 +206,76 @@ namespace ScreenRecorder
             regionBtn.Enabled = refreshBtn.Enabled = !rec && !busy;
             sysAudio.Enabled = mic.Enabled = studio.Enabled = !rec && !busy;
             cursor.Enabled = !rec && !busy && !studio.Checked;   // Studio 模式鼠标后期再画
-            recordBtn.Enabled = !busy && (rec || selectedId != null);
+            recordBtn.Enabled = !busy && !updating && (rec || selectedId != null);
             recordBtn.Text = rec ? "■  " + L("停止", "Stop") : "●  " + L("开始录制", "Record");
             recordBtn.BackColor = rec ? Color.FromArgb(220, 50, 50) : (recordBtn.Enabled ? Color.FromArgb(0, 103, 192) : Color.FromArgb(160, 170, 180));
             timeLabel.Visible = rec;
+            checkLink.Enabled = !updating;
+            // 录制中 / 生成 Studio 中不提示更新，空下来再显示
+            updateLink.Visible = !rec && !busy && updateLink.Text != "";
+        }
+
+        // ---- 自动更新（见 Updater.cs）----
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            // 打开几秒后在后台查一次；离上次查不到 6 小时就不查
+            var t = new Timer { Interval = 3000 };
+            t.Tick += (s, a) => { t.Stop(); t.Dispose(); if (Updater.Due) CheckUpdates(false); };
+            t.Start();
+        }
+
+        // 一行字，withLink = 最后的「更新」两个字可以点
+        void ShowUpdate(string text, bool withLink)
+        {
+            updateLink.Text = text;
+            var word = L("更新", "Update");
+            updateLink.LinkArea = withLink && text.EndsWith(word) ? new LinkArea(text.Length - word.Length, word.Length) : new LinkArea(0, 0);
+            updateLink.Visible = session == null && !busy;
+        }
+
+        async void CheckUpdates(bool manual)
+        {
+            if (updating) return;
+            if (manual) ShowUpdate(L("正在检查更新…", "Checking for updates…"), false);
+            try
+            {
+                var r = await Updater.CheckAsync();
+                if (r != null) { pending = r; ShowUpdate(L($"有新版本 {r.Tag} · 更新", $"New version {r.Tag} available · Update"), true); }
+                else if (manual) ShowUpdate(L($"已是最新版本（v{Updater.Show(Updater.Current)}）", $"You're up to date (v{Updater.Show(Updater.Current)})"), false);
+            }
+            catch (Exception e)
+            {
+                if (manual) ShowUpdate(L("检查更新失败：", "Couldn't check for updates: ") + e.Message, false);
+            }
+        }
+
+        async void InstallUpdate()
+        {
+            var r = pending;
+            if (r == null || updating) return;
+            if (session != null || busy) { Say(L("录完再更新", "Finish recording before updating"), true); return; }
+            if (!Updater.CanWriteAppDir())
+            {
+                // 装在 Program Files 之类没写权限的地方：只能手动下载
+                ShowUpdate(L("程序所在文件夹不能写入，请手动下载新版（已打开下载页）", "Can't write to the app folder; please download the new version manually (page opened)"), false);
+                Open(Updater.ReleasesPage);
+                return;
+            }
+            updating = true; UpdateUi();
+            ShowUpdate(L("正在下载新版本… 0%", "Downloading update… 0%"), false);
+            try
+            {
+                var dir = await Updater.DownloadAsync(r, p => BeginInvoke((Action)(() => ShowUpdate(L($"正在下载新版本… {p}%", $"Downloading update… {p}%"), false))));
+                ShowUpdate(L("正在安装新版本，马上重新打开…", "Installing, the app will reopen…"), false);
+                Updater.LaunchInstaller(dir, true);
+                Close();
+            }
+            catch (Exception e)
+            {
+                updating = false; UpdateUi();
+                ShowUpdate(L("更新失败：", "Update failed: ") + e.Message, false);
+            }
         }
 
         void Say(string msg, bool error = false)
@@ -204,7 +286,7 @@ namespace ScreenRecorder
 
         void Toggle()
         {
-            if (busy) return;
+            if (busy || updating) return;
             if (session != null) { Stop(); return; }
             var src = sources.FirstOrDefault(s => s.Id == selectedId);
             if (src == null) { Say(L("先选一个要录的屏幕或窗口", "Pick a screen or window to record first"), true); return; }

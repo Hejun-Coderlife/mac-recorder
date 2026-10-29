@@ -8,12 +8,15 @@
 - Studio 效果：打开开关正常录，录完自动生成——点击、打字的地方镜头自动推近，鼠标更顺滑、点击有波纹，白色背景加圆角阴影，出 mp4。
   原始素材在「视频\录屏\Studio 素材」；生成要一会儿，状态栏有进度，做完自动打开
 
+- 会自动检查更新：有新版本时窗口底部出现「有新版本 vX.Y · 更新」，点一下自动下载、装好、重新打开（也可以点「检查更新」手动查）
+
 第一次打开如果出现「Windows 已保护你的电脑」，点「更多信息 → 仍要运行」（程序没有代码签名）。
 
 Double-click 录屏.exe (Windows 10/11, 64-bit). Keep all files in the same folder.
 Record a screen, a window or a selected area with system audio and/or microphone (mixed into one track).
 Ctrl+Alt+R starts / stops. Videos are saved to Videos\录屏.
 Studio effects: auto-zoom on clicks and typing, smoothed cursor, click ripples, white background with rounded corners and shadow (mp4).
+Checks for updates automatically; when a new version is out, click "Update" at the bottom of the window to download, install and reopen.
 If SmartScreen warns on first launch, click "More info → Run anyway" (the app is not code-signed).
 
 Recording engine: ScreenRecorderLib (MIT, https://github.com/sskodje/ScreenRecorderLib).

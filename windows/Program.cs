@@ -45,6 +45,7 @@ namespace ScreenRecorder
             Application.SetCompatibleTextRenderingDefault(false);
             if (Environment.GetEnvironmentVariable("STUDIO") != null) return SelfTest.RenderOnly();
             if (Environment.GetEnvironmentVariable("AUTOTEST") != null) return SelfTest.Run();
+            if (Environment.GetEnvironmentVariable("UPDATE_TEST") != null) return Updater.SelfTest();
             Application.Run(new MainForm());
             return 0;
         }
@@ -55,27 +56,31 @@ namespace ScreenRecorder
     {
         static readonly string file = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "录屏", "settings.txt");
 
-        public static bool Get(string key, bool def)
+        public static bool Get(string key, bool def) => GetString(key, def ? "1" : "0") == "1";
+
+        public static void Set(string key, bool value) => SetString(key, value ? "1" : "0");
+
+        public static string GetString(string key, string def)
         {
             try
             {
                 foreach (var line in File.ReadAllLines(file))
                 {
                     var p = line.Split(new[] { '=' }, 2);
-                    if (p.Length == 2 && p[0] == key) return p[1] == "1";
+                    if (p.Length == 2 && p[0] == key) return p[1];
                 }
             }
             catch { }
             return def;
         }
 
-        public static void Set(string key, bool value)
+        public static void SetString(string key, string value)
         {
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(file));
                 var lines = File.Exists(file) ? File.ReadAllLines(file).Where(l => !l.StartsWith(key + "=")).ToList() : new System.Collections.Generic.List<string>();
-                lines.Add(key + "=" + (value ? "1" : "0"));
+                lines.Add(key + "=" + value);
                 File.WriteAllLines(file, lines);
             }
             catch { }
