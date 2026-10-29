@@ -35,6 +35,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     let fps: Double
     let player: AVPlayer
     private let asset: AVURLAsset
+    private var previewAsset: AVAsset          // 预览播的：raw.mp4，开了降噪是「画面 + 降噪后的声音」
     private let box: PlanBox
     var renderer: StudioRenderer { box.renderer }
     // 成片路径：透明背景 .mov，其他 .mp4
@@ -83,6 +84,11 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     @Published var captionError: String?
     @Published var editingCaption: UUID?       // 双击字幕：弹出改字
     private var captionTask: Task<Void, Never>?
+    // 降噪：改了强度先在后台处理声音（有缓存很快），好了换预览
+    @Published var denoiseJob: Double?
+    @Published var denoiseError: String?
+    private var denoiseTask: Task<Void, Never>?
+    private var previewKey = "off"             // 预览现在用的是哪一版声音
     private var undoStack: [StudioProject] = [], redoStack: [StudioProject] = []
     private var dragBase: StudioProject?
     private var scrubber = Scrubber()          // 拖动时的 seek 排队：同时只有一个在路上，只留最新目标；拖动中不让播放器回调改播放头
@@ -113,6 +119,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         self.dir = dir
         track = try JSONDecoder().decode(Track.self, from: Data(contentsOf: dir.appendingPathComponent("track.json")))
         asset = AVURLAsset(url: dir.appendingPathComponent("raw.mp4"))
+        previewAsset = asset
         duration = try await asset.load(.duration).seconds
         fps = Double(StudioStyle().fps)
         let p = StudioProject.load(dir, track: track, duration: duration)
@@ -159,10 +166,9 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         }
         resetBoundaries()
         for c in project.voiceovers { loadPeaks(c.file) }
+        refreshDenoise()   // 工程里开着降噪：打开时就换成处理后的声音
         // 播到结尾（或修剪的终点）时间就不走了，上面的回调不再来：另外听「播完」和播放状态，把图标换回播放
-        endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.playing = false; self.map { $0.time = $0.player.currentTime().seconds } }
-        }
+        observeEnd(item)
         statusObserver = player.observe(\.timeControlStatus) { [weak self] p, _ in
             let paused = p.timeControlStatus == .paused
             Task { @MainActor in if paused, let self, self.playing { self.playing = false; self.time = p.currentTime().seconds } }
@@ -277,13 +283,69 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         }
     }
 
+    private func observeEnd(_ item: AVPlayerItem) {
+        if let o = endObserver { NotificationCenter.default.removeObserver(o) }
+        endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.playing = false; self.map { $0.time = $0.player.currentTime().seconds } }
+        }
+    }
+
+    // ---- 降噪：强度 / 「电脑声音也降噪」变了，或新录了讲解，后台算好声音再换预览 ----
+    private func refreshDenoise() {
+        let a = project.audio
+        let want = a.denoise == .off ? "off" : "\(a.denoise.rawValue)|\(a.denoiseSystem)"
+        let voiceMissing = a.denoise != .off && project.voiceovers.contains {
+            !FileManager.default.fileExists(atPath: Denoise.mixedURL(Denoise.voiceKey($0.file), a.denoise, dir: dir).path)
+        }
+        guard want != previewKey || voiceMissing else { return }
+        denoiseTask?.cancel(); denoiseError = nil
+        denoiseJob = a.denoise == .off ? nil : 0
+        let p = project
+        denoiseTask = Task { await self.runDenoise(p, want: want) }
+    }
+    private func runDenoise(_ p: StudioProject, want: String) async {
+        do {
+            if p.audio.denoise != .off {
+                let progress = DenoiseProgress(self)
+                try await Denoise.prepare(dir: dir, project: p, progress: progress.report)
+            }
+            if Task.isCancelled { return }
+            if want != previewKey { previewKey = want; await rebuildItem(p) }
+            denoiseJob = nil
+        } catch is CancellationError {
+        } catch {
+            denoiseJob = nil
+            denoiseError = L("降噪失败：", "Denoise failed: ") + error.localizedDescription
+        }
+    }
+    func setDenoiseProgress(_ v: Double) { if denoiseJob != nil { denoiseJob = v } }
+    // 换一个预览用的播放内容（画面合成、音量处理都跟着换）
+    private func rebuildItem(_ p: StudioProject) async {
+        guard let src = try? await Denoise.asset(dir: dir, project: p, raw: asset) else { return }
+        previewAsset = src
+        let aTracks = (try? await src.loadTracks(withMediaType: .audio)) ?? []
+        gains = aTracks.map { _ in GainBox() }
+        let item = AVPlayerItem(asset: src)
+        item.videoComposition = makeComposition()
+        item.audioMix = PreviewAudio.mix(tracks: aTracks, gains: gains)
+        item.audioTimePitchAlgorithm = .timeDomain
+        item.forwardPlaybackEndTime = CMTime(seconds: project.trimEnd, preferredTimescale: 600)
+        updateGains()
+        let t = player.currentTime()
+        if playing { player.pause(); playing = false }
+        player.replaceCurrentItem(with: item)
+        observeEnd(item)
+        await player.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
+        resetBoundaries()
+    }
+
     // ---- 预览 ----
     private func makeComposition() -> AVVideoComposition {
         let box = self.box, fps = self.fps
         let lay = box.renderer.lay, k = min(1, 1600 / max(lay.cw, lay.ch))          // 预览缩小一点，播放流畅
         let size = CGSize(width: (lay.cw * k / 2).rounded() * 2, height: (lay.ch * k / 2).rounded() * 2)
         let bg = CIImage(color: CIColor(red: 0.86, green: 0.86, blue: 0.88)).cropped(to: CGRect(origin: .zero, size: size))   // 透明的地方衬一层浅灰
-        let c = AVMutableVideoComposition(asset: asset) { req in
+        let c = AVMutableVideoComposition(asset: previewAsset) { req in
             let (r, plan) = box.both
             guard !plan.isEmpty else { req.finish(with: req.sourceImage, context: nil); return }
             let i = min(max(Int((req.compositionTime.seconds * fps).rounded()), 0), plan.count - 1)
@@ -312,6 +374,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
                 self.box.set(r.plan(self.project, duration: self.duration), renderer: r)
                 self.box.setCaptions(self.captionLayer(r))
                 self.player.currentItem?.videoComposition = self.makeComposition()
+                self.refreshDenoise()
                 self.updateGains()
                 self.resetBoundaries()
                 if !self.playing { self.seek(self.time) }
@@ -423,7 +486,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     func voiceTick() {
         let map = timeMap, o = map.out(player.currentTime().seconds)
         let mute = voiceRec != nil && Self.muteWhileRecording
-        let active = voicePlayer.sync(dir: dir, clips: project.voiceovers, map: map, outTime: o,
+        let active = voicePlayer.sync(dir: dir, clips: project.voiceovers, map: map, outTime: o, level: project.audio.denoise,
                                       playing: playing && Self.testShot == nil, master: mute ? 0 : project.audio.voice)
         var d: Float = 1
         if project.audio.duck, !project.voiceovers.isEmpty {
@@ -625,9 +688,13 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
 
     // ---- 字幕 ----
     func captionLayer(_ r: StudioRenderer) -> CaptionLayer {
-        CaptionLayer(captions: project.captions, style: project.captionStyle, map: timeMap, trim: (project.trimStart, project.trimEnd),
-                     canvas: CGSize(width: r.lay.cw, height: r.lay.ch))
+        let c = CaptionLayer(captions: project.captions, style: project.captionStyle, map: timeMap, trim: (project.trimStart, project.trimEnd),
+                             canvas: CGSize(width: r.lay.cw, height: r.lay.ch))
+        c.keys = KeyLayer(strokes: track.shortcuts, look: project.look, map: timeMap, trim: (project.trimStart, project.trimEnd),
+                          canvas: CGSize(width: r.lay.cw, height: r.lay.ch), captionsShown: !c.isEmpty)
+        return c
     }
+    var hasShortcuts: Bool { !(track.shortcuts ?? []).isEmpty }
     func captionIndex(_ id: UUID?) -> Int? { project.captions.firstIndex { $0.id == id } }
     // 一句字幕能占的范围（素材时间）：不压到前后两句、不出修剪范围
     func captionRoom(for id: UUID, in p: StudioProject) -> ClosedRange<Double> {
@@ -737,6 +804,9 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     // 声音设置（音量滑块拖一次算一步撤销）
     func audioSlider(_ kp: WritableKeyPath<AudioSettings, Double>) -> Binding<Double> {
         Binding(get: { self.project.audio[keyPath: kp] }, set: { v in self.dragBegin(); self.dragUpdate { $0.audio[keyPath: kp] = v } })
+    }
+    func audioPick<T: Equatable>(_ kp: WritableKeyPath<AudioSettings, T>) -> Binding<T> {
+        Binding(get: { self.project.audio[keyPath: kp] }, set: { v in self.edit { $0.audio[keyPath: kp] = v } })
     }
     func audioToggle(_ kp: WritableKeyPath<AudioSettings, Bool>) -> Binding<Bool> {
         Binding(get: { self.project.audio[keyPath: kp] }, set: { v in self.edit { $0.audio[keyPath: kp] = v } })
@@ -1722,7 +1792,7 @@ struct StylePanel: View {
     @AppStorage("voiceCountdown") private var voiceCountdown = true
     @AppStorage("voiceMuteOriginal") private var voiceMuteOriginal = true
     @State private var open: Set<String> = ProcessInfo.processInfo.environment["EDITOR_OPEN"].map { Set($0.split(separator: ",").map(String.init)) }
-        ?? ["preset", "aspect", "bg", "frame", "cursor", "audio", "caption", "blur"]
+        ?? ["preset", "aspect", "bg", "frame", "cursor", "keys", "audio", "caption", "blur"]
 
     var body: some View {
         ScrollView {
@@ -1732,6 +1802,7 @@ struct StylePanel: View {
                 section("bg", L("背景", "Background")) { backgroundBox }
                 section("frame", L("画面", "Frame")) { frameBox }
                 section("cursor", L("鼠标", "Cursor")) { cursorBox }
+                section("keys", L("快捷键", "Keystrokes")) { keysBox }
                 section("audio", L("声音", "Sound")) { audioBox }
                 section("caption", L("字幕", "Captions")) { captionBox }
                 section("blur", L("运动模糊", "Motion Blur")) { blurBox }
@@ -1896,6 +1967,25 @@ struct StylePanel: View {
         }
     }
 
+    // 显示快捷键：开关、位置、大小、深浅
+    private var keysBox: some View {
+        let look = ed.project.look
+        return VStack(alignment: .leading, spacing: 8) {
+            Toggle(L("显示按的快捷键", "Show keystrokes"), isOn: ed.look(\.showKeys))
+                .help(L("画面上浮出 ⌘ ⇧ C 这样的键帽，约 1.2 秒后淡出；只显示带 ⌘⌃⌥ 的组合和 Esc、方向键这类功能键，打的字不会显示",
+                        "Shows key caps like ⌘ ⇧ C for about 1.2 s; only combos with ⌘⌃⌥ and keys like Esc or arrows — typed text is never shown"))
+            if !ed.hasShortcuts {
+                Text(L("这段录制没有记到快捷键。新录的才会记；给录屏开「输入监控」权限会记得更全", "No keystrokes were recorded in this clip. New recordings capture them; allowing Input Monitoring makes it more complete"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if look.showKeys {
+                chips(ed.look(\.keysAt), [(.bottomLeft, L("左下", "Left")), (.bottom, L("底部居中", "Center")), (.bottomRight, L("右下", "Right"))], columns: 3)
+                slider(L("大小", "Size"), \.keysSize, 0.03...0.08) { "\(Int(($0 * 1000).rounded()))" }
+                chips(ed.look(\.keysDark), [(true, L("深色", "Dark")), (false, L("浅色", "Light"))], columns: 2)
+            }
+        }.toggleStyle(.checkbox).font(.callout)
+    }
+
     private var cursorBox: some View {
         let look = ed.project.look
         return VStack(alignment: .leading, spacing: 8) {
@@ -1932,6 +2022,25 @@ struct StylePanel: View {
                 if ed.hasSystemAudio { audioSlider(L("电脑声音", "Computer"), \.system, pct).disabled(a.muted).opacity(a.muted ? 0.45 : 1) }
                 if ed.hasMicAudio { audioSlider(L("麦克风", "Microphone"), \.mic, pct).disabled(a.muted).opacity(a.muted ? 0.45 : 1) }
             }
+            if ed.hasMicAudio || !ed.project.voiceovers.isEmpty || (ed.hasSystemAudio && a.denoiseSystem) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(L("降噪", "Noise reduction")).font(.callout)
+                    chips(ed.audioPick(\.denoise), [(.off, L("关", "Off")), (.light, L("轻", "Light")), (.medium, L("中", "Medium")), (.strong, L("强", "Strong"))], columns: 4)
+                }
+                .help(L("去掉键盘声、风扇、空调这类杂音，只留人声（麦克风和讲解；系统自带的声音隔离，在本机处理）",
+                        "Removes keyboard, fan and room noise and keeps your voice (microphone and voiceover; Apple's built-in voice isolation, on this Mac)"))
+            }
+            if ed.hasSystemAudio && a.denoise != .off {
+                Toggle(L("电脑声音也降噪", "Also denoise computer sound"), isOn: ed.audioToggle(\.denoiseSystem))
+                    .help(L("默认不处理电脑声音：里面的音乐、视频声音会被当成杂音削掉", "Off by default: music and video sound would be treated as noise"))
+            }
+            if let j = ed.denoiseJob {
+                HStack(spacing: 6) {
+                    ProgressView(value: j).controlSize(.small)
+                    Text(L("正在降噪…", "Denoising…")).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if let e = ed.denoiseError { Text(e).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
             if ed.project.look.clickSound {
                 audioSlider(L("点击声", "Clicks"), \.clicks, pct)
             }
@@ -2633,7 +2742,7 @@ struct ExportOptionsPanel: View {
 
     // 返回：现在有没有讲解在响
     @discardableResult
-    func sync(dir: URL, clips: [VoiceClip], map: TimeMap, outTime o: Double, playing: Bool, master: Double) -> Bool {
+    func sync(dir: URL, clips: [VoiceClip], map: TimeMap, outTime o: Double, level: Denoise.Level = .off, playing: Bool, master: Double) -> Bool {
         var any = false
         let ids = Set(clips.map(\.id))
         for (id, e) in players where !ids.contains(id) { e.p.stop(); players[id] = nil }
@@ -2642,9 +2751,11 @@ struct ExportOptionsPanel: View {
             let on = playing && master > 0.001 && o >= os && o < oe
             if !on { if let e = players[c.id], e.p.isPlaying { e.p.pause() }; continue }
             any = true
-            if players[c.id]?.file != c.file {
-                guard let p = try? AVAudioPlayer(contentsOf: dir.appendingPathComponent(c.file)) else { continue }
-                p.prepareToPlay(); players[c.id] = (c.file, p)
+            let url = Denoise.voiceURL(dir: dir, file: c.file, level: level)   // 降噪开着就放处理后的
+            if players[c.id]?.file != url.path {
+                players[c.id]?.p.stop()
+                guard let p = try? AVAudioPlayer(contentsOf: url) else { continue }
+                p.prepareToPlay(); players[c.id] = (url.path, p)
             }
             guard let p = players[c.id]?.p else { continue }
             p.volume = Float(min(1, c.volume * master))
@@ -2662,3 +2773,9 @@ struct ExportOptionsPanel: View {
     }
 }
 
+// 降噪进度：后台线程报上来，主线程更新进度条
+final class DenoiseProgress: @unchecked Sendable {
+    private weak var ed: StudioEditor?
+    @MainActor init(_ e: StudioEditor) { ed = e }
+    @Sendable func report(_ v: Double) { DispatchQueue.main.async { MainActor.assumeIsolated { self.ed?.setDenoiseProgress(v) } } }
+}

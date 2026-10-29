@@ -17,6 +17,7 @@ struct Track: Codable {
     var clicks: [[Double]] = []     // [秒, x, y]
     var keys: [Double] = []         // 按键的时刻（秒）
     var cursors: [CursorShape] = []
+    var shortcuts: [KeyStroke]?     // 按的快捷键（只记带 ⌘⌃⌥ 的组合和 Esc、方向键这类功能键，不记打的字）；旧素材没有
 }
 // 指针图案：热点（点下去的那个点）和大小按「点」；arrow = 标准箭头，导出时换成矢量画的高清箭头
 struct CursorShape: Codable { var file: String; var hotX: Double; var hotY: Double; var w: Double; var h: Double; var arrow: Bool }
@@ -41,6 +42,7 @@ final class CursorTracker: @unchecked Sendable {
     private let size: CGSize
     private let ppp: Double
     private let arrowPNG = CursorTracker.png(.arrow)
+    let keyCap = KeyCapture()                   // 快捷键（显示键帽用）
 
     init(size: CGSize, pixelsPerPoint: Double, area: @escaping () -> CGRect?) {
         self.size = size; ppp = pixelsPerPoint; areaOf = area
@@ -50,6 +52,7 @@ final class CursorTracker: @unchecked Sendable {
         sampleShape()
         shapeTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.sampleShape() }
         lastKeyAgo = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
+        keyCap.start()
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now(), repeating: .nanoseconds(1_000_000_000 / 120), leeway: .milliseconds(1))
         t.setEventHandler { [weak self] in self?.sample() }
@@ -59,6 +62,7 @@ final class CursorTracker: @unchecked Sendable {
         shapeTimer?.invalidate(); shapeTimer = nil
         timer?.cancel(); timer = nil
         queue.sync {}
+        keyCap.stop()
     }
 
     private func sample() {
@@ -74,7 +78,7 @@ final class CursorTracker: @unchecked Sendable {
         if down && !wasDown { clicks.append([now, x, y]) }
         wasDown = down
         let ago = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
-        if ago < lastKeyAgo - 0.001 { keys.append(now - ago) }   // 「距上次按键」变短了 = 又按了一下
+        if ago < lastKeyAgo - 0.001 { keys.append(now - ago); keyCap.poll() }   // 「距上次按键」变短了 = 又按了一下（没监听权限时顺便查是哪个组合键）
         lastKeyAgo = ago
     }
 
@@ -108,6 +112,7 @@ final class CursorTracker: @unchecked Sendable {
         t.moves = samples.map { [r($0[0] - start, 1000), r($0[1], 10), r($0[2], 10), $0[3], $0[4]] }
         t.clicks = clicks.map { [r($0[0] - start, 1000), r($0[1], 10), r($0[2], 10)] }
         t.keys = keys.map { r($0 - start, 1000) }
+        t.shortcuts = keyCap.strokes.map { KeyStroke(t: r($0.t - start, 1000), keys: $0.keys) }
         t.cursors = shapes
         for (i, png) in shapePNGs.enumerated() { try png.write(to: dir.appendingPathComponent(shapes[i].file)) }
         let enc = JSONEncoder(); enc.outputFormatting = [.sortedKeys]
@@ -211,11 +216,17 @@ struct StudioLook: Codable, Equatable {
     var clickStyle = Click.soft    // 哪种声音：轻点 / 鼠标咔哒 / 低沉 / 木头 / 气泡 / 清脆滴答
     var ripple = true              // 点击波纹
     var blur = Blur.light          // 运动模糊：只在镜头快速移动时有
+    enum KeysAt: String, Codable, CaseIterable { case bottom, bottomLeft, bottomRight }
+    var showKeys = false           // 画面上显示按的快捷键（⌘ ⇧ C 这种键帽）
+    var keysAt = KeysAt.bottom
+    var keysSize = 0.045           // 键帽高约占画布短边几成（0.03–0.08）
+    var keysDark = true            // 深色键帽（白字）/ 浅色键帽（黑字）
 
     init() {}
     enum CodingKeys: String, CodingKey {
         case aspect, background, color, gradient0, gradient1, gradientAngle, wallpaper, imagePath, imageBookmark, padding, cornerRadius,
-             shadow, shadowBlur, cursorScale, smoothing, hideIdleCursor, hideAfter, clickSound, clickStyle, ripple, blur
+             shadow, shadowBlur, cursorScale, smoothing, hideIdleCursor, hideAfter, clickSound, clickStyle, ripple, blur,
+             showKeys, keysAt, keysSize, keysDark
     }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self), z = StudioLook()
@@ -228,6 +239,7 @@ struct StudioLook: Codable, Equatable {
         hideIdleCursor = v(.hideIdleCursor, z.hideIdleCursor); hideAfter = v(.hideAfter, z.hideAfter); clickSound = v(.clickSound, z.clickSound)
         clickStyle = v(.clickStyle, z.clickStyle)
         ripple = v(.ripple, z.ripple); blur = v(.blur, z.blur)
+        showKeys = v(.showKeys, z.showKeys); keysAt = v(.keysAt, z.keysAt); keysSize = v(.keysSize, z.keysSize); keysDark = v(.keysDark, z.keysDark)
     }
 
     // 选了「图片 / 壁纸」但还没选到能用的图：按透明处理（预览、导出都一样）
@@ -394,6 +406,8 @@ struct AudioSettings: Codable, Equatable {
     var muted = false
     var voice = 1.0                     // 后来录的讲解：总音量
     var duck = true                     // 有讲解的地方把原声音压低（约 -12 dB）
+    var denoise = Denoise.Level.off     // 降噪：麦克风和讲解（系统自带的声音隔离，本机处理）
+    var denoiseSystem = false           // 电脑声音也降噪（默认不动：音乐、视频里的声音会被当成杂音削掉）
     init() {}
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self), z = AudioSettings()
@@ -403,6 +417,8 @@ struct AudioSettings: Codable, Equatable {
         muted = (try? c.decodeIfPresent(Bool.self, forKey: .muted)) ?? z.muted
         voice = (try? c.decodeIfPresent(Double.self, forKey: .voice)) ?? z.voice
         duck = (try? c.decodeIfPresent(Bool.self, forKey: .duck)) ?? z.duck
+        denoise = (try? c.decodeIfPresent(Denoise.Level.self, forKey: .denoise)) ?? z.denoise
+        denoiseSystem = (try? c.decodeIfPresent(Bool.self, forKey: .denoiseSystem)) ?? z.denoiseSystem
     }
 }
 
@@ -978,7 +994,7 @@ final class StudioRenderer: @unchecked Sendable {
 
 // ---- 导出成片：按工程的推近段、修剪和样式逐帧合成；透明背景写 HEVC .mov，其他背景写 H.264 .mp4 ----
 final class StudioJob: @unchecked Sendable {
-    private let asset: AVURLAsset
+    private let asset: AVAsset                 // raw.mp4；开了降噪时是「画面 + 降噪后的声音」的合成
     private let videoTrack: AVAssetTrack
     private let audioTracks: [AVAssetTrack]
     let outURL: URL
@@ -997,13 +1013,20 @@ final class StudioJob: @unchecked Sendable {
 
     init(project dir: URL, out: URL, style: StudioStyle, project: StudioProject? = nil, progress: @escaping @Sendable (Double) -> Void) async throws {
         let track = try JSONDecoder().decode(Track.self, from: Data(contentsOf: dir.appendingPathComponent("track.json")))
-        asset = AVURLAsset(url: dir.appendingPathComponent("raw.mp4"))
-        guard let vt = try await asset.loadTracks(withMediaType: .video).first else { throw Studio.failure(L("素材里没有画面", "No video in the recording")) }
-        videoTrack = vt
-        audioTracks = try await asset.loadTracks(withMediaType: .audio)
-        let duration = try await asset.load(.duration).seconds
+        let raw = AVURLAsset(url: dir.appendingPathComponent("raw.mp4"))
+        let duration = try await raw.load(.duration).seconds
         self.progress = progress
         let p = project ?? StudioProject.load(dir, track: track, duration: duration, zoom: style.zoom)
+        // 降噪：先把要用的声音处理好（有缓存就很快），再读「画面 + 处理后的声音」
+        var src: AVAsset = raw
+        if p.audio.denoise != .off && !style.gif {
+            try await Denoise.prepare(dir: dir, project: p)
+            src = try await Denoise.asset(dir: dir, project: p, raw: raw)
+        }
+        asset = src
+        guard let vt = try await src.loadTracks(withMediaType: .video).first else { throw Studio.failure(L("素材里没有画面", "No video in the recording")) }
+        videoTrack = vt
+        audioTracks = try await src.loadTracks(withMediaType: .audio)
         outURL = Studio.output(out, look: p.look, gif: style.gif)
         // 中间剪掉 / 快放：轨迹、推近段都换到成片时间再算镜头，镜头在剪切处照样顺着弹簧走，不会突然跳
         map = TimeMap(p)
@@ -1026,6 +1049,8 @@ final class StudioJob: @unchecked Sendable {
         trackVolumes = vols
         voice = style.gif ? nil : try await VoiceMix.load(dir: dir, project: p, map: map)
         captions = CaptionLayer(captions: p.captions, style: p.captionStyle, map: map, trim: (p.trimStart, p.trimEnd), canvas: CGSize(width: r.lay.cw, height: r.lay.ch))
+        captions.keys = KeyLayer(strokes: track.shortcuts, look: p.look, map: map, trim: (p.trimStart, p.trimEnd),
+                                 canvas: CGSize(width: r.lay.cw, height: r.lay.ch), captionsShown: !captions.isEmpty)
     }
     // 第 i 帧（成片时间）叠上字幕
     private func withCaption(_ img: CIImage, _ i: Int) -> CIImage {
@@ -1458,7 +1483,7 @@ final class VoiceMix: @unchecked Sendable {
     static func load(dir: URL, project p: StudioProject, map: TimeMap) async throws -> VoiceMix? {
         var pcs: [Piece] = []
         for c in p.voiceovers where c.length > 0.01 && c.volume > 0.001 && p.audio.voice > 0.001 {
-            let url = dir.appendingPathComponent(c.file)
+            let url = Denoise.voiceURL(dir: dir, file: c.file, level: p.audio.denoise)
             guard FileManager.default.fileExists(atPath: url.path) else { continue }
             let all = try await decode(url)
             let a = min(all.count, max(0, Int((c.trimIn * 48000).rounded()))), b = min(all.count, max(a, Int((c.trimOut * 48000).rounded())))

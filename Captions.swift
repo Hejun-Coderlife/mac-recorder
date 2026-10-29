@@ -78,11 +78,17 @@ final class CaptionLayer: @unchecked Sendable {
         }.sorted { $0.start < $1.start } : []
     }
     var isEmpty: Bool { items.isEmpty }
+    var keys: KeyLayer?                       // 快捷键键帽：和字幕一起叠上去
     var entries: [(start: Double, end: Double, text: String)] { items.map { ($0.start, $0.end, $0.text) } }
 
     // 成片时间 t 显示哪句：后开始的盖住先开始的
     func text(atOut t: Double) -> String? { items.last { t >= $0.start && t < $0.end }?.text }
     func image(atOut t: Double) -> CIImage? {
+        let k = keys?.image(atOut: t)
+        guard let cap = captionImage(atOut: t) else { return k }
+        return k.map { $0.composited(over: cap) } ?? cap
+    }
+    private func captionImage(atOut t: Double) -> CIImage? {
         guard let s = text(atOut: t), let img = Self.render(s, style: style, cw: cw, ch: ch) else { return nil }
         // 水平居中；放底部时离下边 edge，放顶部时离上边 edge（Core Image 左下为原点）
         let e = style.edge(canvas: cw, ch), w = Double(img.width), h = Double(img.height)

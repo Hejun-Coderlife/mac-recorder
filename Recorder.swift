@@ -321,6 +321,7 @@ final class Recorder: NSObject, ObservableObject {
         }
         stream = s; writer = w; lastFile = url; tracker = tr; project = dir
         recording = true; startedAt = Date(); elapsed = 0; say("")
+        Focus.begin()   // 开了「录制时开启勿扰」：不弹通知
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in if let self, let t = self.startedAt { self.elapsed = Date().timeIntervalSince(t) } }
         }
@@ -347,7 +348,9 @@ final class Recorder: NSObject, ObservableObject {
         if let s = stream { try? await s.stopCapture() }
         let w = writer, tr = tracker, dir = project
         stream = nil; writer = nil; tracker = nil; project = nil; recording = false
+        Focus.end()
         tr?.stop()
+        defer { RecentFootage.shared.refresh() }
         NSSound(named: "Pop")?.play()
         guard let w else { return }
         do { try await w.finish() } catch { finished(error); return }
@@ -729,6 +732,7 @@ struct ContentView: View {
                 }.pickerStyle(.segmented).frame(width: 220)
                 Toggle(L("隐藏桌面图标", "Hide desktop icons"), isOn: $rec.hideDesktopIcons)
                     .help(L("录整个屏幕或区域时，画面里不出现桌面上的图标（桌面本身不动）", "Desktop icons are left out of full-screen and area recordings (your desktop isn't changed)"))
+                FocusToggle()
             }.disabled(rec.recording || rec.busy)
 
             HStack(alignment: .center, spacing: 16) {
@@ -759,10 +763,20 @@ struct ContentView: View {
                 Button(L("打开文件夹", "Open Folder")) { NSWorkspace.shared.open(Recorder.folder) }
             }
             if !rec.recording && !rec.busy { UpdateBar(updater: updater) }
+            Divider()
+            RecentFootageView()
         }
         .padding(18)
-        .frame(minWidth: 560, minHeight: 440)
-        .task { await rec.refresh() }
+        .frame(minWidth: 640, minHeight: 600)
+        .task { await rec.refresh(); RecentFootage.shared.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in RecentFootage.shared.refresh() }
+        // 把 Studio 素材文件夹拖进窗口：打开剪辑
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            for pr in providers {
+                _ = pr.loadObject(ofClass: URL.self) { u, _ in if let u { Task { @MainActor in FootageOpener.open([u]) } } }
+            }
+            return true
+        }
     }
 }
 
@@ -805,6 +819,7 @@ struct UpdateBar: View {
 
 @main
 struct RecorderApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate   // 素材文件夹拖到程序坞图标上
     @StateObject private var rec = Recorder()
     private let hotKey = HotKey()
     var body: some Scene {
@@ -812,7 +827,7 @@ struct RecorderApp: App {
             ContentView(rec: rec)
                 .onAppear {
                     HotKey.action = { [weak rec] in rec?.toggle() }
-                    if Studio.selfTest() || Updater.selfTest() || ExportOptionsPanel.selfTest() || StudioTests.planTest() || StudioTests.scrubTest() || StudioTests.cutTest() || StudioTests.voiceTest() || StudioTests.captionTest() || StudioTests.editorShot() || StudioTests.blurTest() || StudioTests.presetTest() || Countdown.selfTest() || Recorder.iconsTest() { return }
+                    if Studio.selfTest() || Updater.selfTest() || ExportOptionsPanel.selfTest() || StudioTests.planTest() || StudioTests.scrubTest() || StudioTests.cutTest() || StudioTests.voiceTest() || StudioTests.captionTest() || StudioTests.batchATest() || MainShot.run() || StudioTests.editorShot() || StudioTests.blurTest() || StudioTests.presetTest() || Countdown.selfTest() || Recorder.iconsTest() { return }
                     if ProcessInfo.processInfo.environment["AUTOTEST"] == nil {
                         Updater.shared.isBusy = { [weak rec] in rec.map { $0.recording || $0.busy } ?? false }
                         Updater.shared.start()
