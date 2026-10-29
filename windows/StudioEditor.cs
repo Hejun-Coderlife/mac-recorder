@@ -100,7 +100,7 @@ namespace ScreenRecorder
             ptrack = Track.Scaled(pw, ph);
             Time = Project.TrimStart;
 
-            Text = Name + " · Studio — " + Path.GetFileName(dir.TrimEnd('\\', '/'));
+            Text = App.Name + " · Studio — " + Path.GetFileName(dir.TrimEnd('\\', '/'));
             Icon = App.Icon;
             Font = SystemFonts.MessageBoxFont;
             AutoScaleMode = AutoScaleMode.Dpi; AutoScaleDimensions = new SizeF(96, 96);

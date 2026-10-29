@@ -19,13 +19,14 @@ namespace ScreenRecorder
         readonly List<Action> syncs = new List<Action>();
         bool syncing;
         string lastSig;
-        const int W = 270;
+        const int W = 250;   // 面板 300 宽：左右各留 15、再给竖滚动条留 20，不会出横向滚动条
         public int ContentWidth => W;
 
         public StylePanel(StudioEditor ed)
         {
             this.ed = ed;
             AutoScroll = true; BackColor = Theme.Window;
+            HorizontalScroll.Enabled = false; HorizontalScroll.Visible = false;
             Controls.Add(stack);
             Section(L("预设", "Presets"), PresetsBox());
             Section(L("画面比例", "Aspect Ratio"), Chips(new[] { ("original", L("原始", "Original")), ("16:9", "16:9"), ("9:16", "9:16"), ("1:1", "1:1"), ("4:3", "4:3") }, 5, l => l.Aspect, (l, v) => l.Aspect = v));
