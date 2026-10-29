@@ -571,19 +571,39 @@ namespace ScreenRecorder
                 {
                     cancel.ThrowIfCancellationRequested();
                     var j = jobs[k]; int kk = k;
+                    var pcm = Studio.DecodePcm(j.wav, 16000) ?? new float[0];
+                    var voiced = WhisperParse.Voiced(pcm, 16000);
+                    // 开头有一大段没声音时，whisper 的 CPU 版常常听不出来、只吐出提示词里的几个字：
+                    // 把开头的静音（留 0.3 秒）切掉再识别，时间加回去
+                    int first = Array.IndexOf(voiced, true);
+                    double lead = first > 0 ? Math.Max(0, first / 100.0 - 0.3) : 0;
+                    if (lead > 0.5) { pcm = pcm.Skip((int)(lead * 16000)).ToArray(); voiced = voiced.Skip((int)Math.Round(lead * 100)).ToArray(); WriteWav(j.wav, pcm, 16000); }
+                    else lead = 0;
                     var json = transcribe(j.wav, f => stage?.Invoke(App2.L("正在识别说的话…", "Transcribing…"), (kk + f) / jobs.Count));
                     cancel.ThrowIfCancellationRequested();
-                    var pcm = Studio.DecodePcm(j.wav, 16000);
                     var segs = WhisperParse.Segments(json).Select(s => (s.start, s.end, WhisperParse.Simplify(s.text))).ToList();
-                    foreach (var t in WhisperParse.Tokens(segs, WhisperParse.Voiced(pcm ?? new float[0], 16000)))
+                    foreach (var t in WhisperParse.Tokens(segs, voiced))
                     {
-                        var s0 = j.map(t.Start); var e0 = j.map(Math.Max(t.Start, t.End));
+                        var s0 = j.map(t.Start + lead); var e0 = j.map(Math.Max(t.Start, t.End) + lead);
                         if (s0 is double s && e0 is double e) outL.Add(new CaptionSplit.Token(t.Text, s, Math.Max(s, e)));
                     }
                 }
             }
             finally { foreach (var j in jobs) if (j.temp) try { File.Delete(j.wav); } catch { } }
             return outL.OrderBy(t => t.Start).ToList();
+        }
+
+        // 16 位单声道 wav
+        static void WriteWav(string file, float[] pcm, int sr)
+        {
+            using (var w = new BinaryWriter(File.Create(file)))
+            {
+                int bytes = pcm.Length * 2;
+                w.Write(Encoding.ASCII.GetBytes("RIFF")); w.Write(36 + bytes); w.Write(Encoding.ASCII.GetBytes("WAVEfmt "));
+                w.Write(16); w.Write((short)1); w.Write((short)1); w.Write(sr); w.Write(sr * 2); w.Write((short)2); w.Write((short)16);
+                w.Write(Encoding.ASCII.GetBytes("data")); w.Write(bytes);
+                foreach (var v in pcm) w.Write((short)Math.Max(-32768, Math.Min(32767, Math.Round(v * 32767))));
+            }
         }
 
         // 生成字幕（素材时间）：成片时间里断好句，再换回素材时间存
