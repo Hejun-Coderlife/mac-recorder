@@ -164,7 +164,8 @@ namespace ScreenRecorder
         public readonly double W, H, cw, ch, s, radius;
         public readonly RectD card;
 
-        public StudioLayout(Track track, StudioLook look)
+        // extra：导出选了较小分辨率时整个画布再缩小这么多（导出时直接按目标尺寸画，不是先画大再缩）
+        public StudioLayout(Track track, StudioLook look, double extra = 1)
         {
             W = track.Width; H = track.Height;
             double f = Math.Min(Math.Max(look.Padding, 0), 0.2), a = look.Ratio ?? W / H;
@@ -173,8 +174,8 @@ namespace ScreenRecorder
             if (a >= 1) { ch = Math.Max(H / (1 - 2 * f), W / (a - 2 * f)); cw = ch * a; }
             else { cw = Math.Max(W / (1 - 2 * f), H / (1 / a - 2 * f)); ch = cw / a; }
             // 和 Mac 版一样限制在边长 4096、约 890 万像素以内（播放器、手机兼容）
-            double k = Math.Min(1, Math.Min(4096 / Math.Max(cw, ch), Math.Sqrt(8_800_000 / (cw * ch))));
-            cw = Math.Floor(cw * k / 2) * 2; ch = Math.Floor(ch * k / 2) * 2;
+            double k = Math.Min(1, Math.Min(4096 / Math.Max(cw, ch), Math.Sqrt(8_800_000 / (cw * ch)))) * extra;
+            cw = Math.Max(2, Math.Floor(cw * k / 2) * 2); ch = Math.Max(2, Math.Floor(ch * k / 2) * 2);
             this.cw = cw; this.ch = ch;
             double pad = f * Math.Min(cw, ch);
             s = Math.Min((cw - 2 * pad) / W, (ch - 2 * pad) / H);
@@ -807,10 +808,10 @@ namespace ScreenRecorder
         readonly Sprite arrow = Sprites.Arrow(), ring = Sprites.Ring();
         readonly Dictionary<int, Sprite> art = new Dictionary<int, Sprite>();
 
-        public StudioScene(string dir, Track track, StudioLook look, StudioStyle st, Func<string, CursorShape, double, Sprite> loadCursor = null, Func<string, int, int, byte[]> loadImage = null)
+        public StudioScene(string dir, Track track, StudioLook look, StudioStyle st, Func<string, CursorShape, double, Sprite> loadCursor = null, Func<string, int, int, byte[]> loadImage = null, StudioLayout layout = null)
         {
             Track = track; Look = look; St = st;
-            Lay = new StudioLayout(track, look);
+            Lay = layout ?? new StudioLayout(track, look);
             Cpu = new Compositor(Lay, look, loadImage);
             for (int i = 0; i < track.Cursors.Count; i++)
             {
@@ -858,7 +859,12 @@ namespace ScreenRecorder
     }
 
     // ---- 导出：ffmpeg 解码 → 合成 → ffmpeg 编码 ----
-    sealed class VideoInfo { public int Width, Height; public double Duration; public bool HasAudio; public string Matrix = "bt709"; }
+    sealed class VideoInfo
+    {
+        public int Width, Height; public double Duration; public bool HasAudio; public string Matrix = "bt709";
+        public List<int> AudioChannels = new List<int>();   // 每条音轨几个声道（Mac 录的：双声道 = 电脑声音、单声道 = 麦克风；Windows 录的只有一条，两样混在一起）
+        public VideoInfo With(int w, int h) { var c = (VideoInfo)MemberwiseClone(); c.Width = w; c.Height = h; return c; }
+    }
 
     // 一次生成的用时（写进素材文件夹的 render.log、状态栏显示「用时 N 秒（显卡）」）
     sealed class RenderStats
@@ -904,7 +910,12 @@ namespace ScreenRecorder
             var sz = Regex.Match(v.Groups[1].Value, @"\b(\d{2,5})x(\d{2,5})\b");
             info.Width = int.Parse(sz.Groups[1].Value); info.Height = int.Parse(sz.Groups[2].Value);
             if (Regex.IsMatch(v.Groups[1].Value, @"\((?:tv|pc), (?:bt470bg|smpte170m)")) info.Matrix = "bt601";
-            info.HasAudio = Regex.IsMatch(err, @"Stream #\d+:\d+.*?: Audio:");
+            foreach (Match a in Regex.Matches(err, @"Stream #\d+:\d+.*?: Audio: ([^\r\n]*)"))
+            {
+                var ch = a.Groups[1].Value;
+                info.AudioChannels.Add(Regex.IsMatch(ch, @"\bmono\b") ? 1 : Regex.Match(ch, @"\b(\d+) channels\b") is Match m && m.Success ? int.Parse(m.Groups[1].Value) : 2);
+            }
+            info.HasAudio = info.AudioChannels.Count > 0;
             return info;
         }
 
@@ -966,24 +977,37 @@ namespace ScreenRecorder
         public static bool ExtractAudio(string raw, string wav) =>
             RunQuiet($"-v error -y -i \"{raw}\" -vn -ac 2 -ar 48000 -c:a pcm_s16le \"{wav}\"", 120000) && File.Exists(wav);
 
-        // 导出（剪辑窗口的「导出」、自测都走这里）：按工程的推近段、修剪和样式逐帧合成 → H.264 mp4
-        // project = null：读素材夹里的 project.json（没有就按自动规则）
+        // 导出（剪辑窗口的「导出」、自测都走这里）：按工程的推近段、剪掉 / 快放、修剪、样式、声音逐帧合成 → H.264 mp4（或 GIF）
+        // project = null：读素材夹里的 project.json（没有就按自动规则）；opt = null：原始分辨率、60 帧、高画质（旧行为）
+        // cancel：中途取消，删掉写了一半的文件，抛 OperationCanceledException
         // 环境变量（自测用）：STUDIO_COMPOSE=cpu|gpu（gpu = 必须用显卡，失败就报错）；STUDIO_ENCODER=libx264|h264_nvenc|…；STUDIO_HWDEC=0
-        public static RenderStats Render(string dir, string outPath, StudioStyle st, Action<double> progress, Func<string, CursorShape, double, Sprite> loadCursor = null, Action<string> log = null, StudioProject project = null)
+        public static RenderStats Render(string dir, string outPath, StudioStyle st, Action<double> progress, Func<string, CursorShape, double, Sprite> loadCursor = null, Action<string> log = null, StudioProject project = null,
+                                         ExportOptions opt = null, CancellationToken cancel = default)
         {
+            if (opt != null && opt.Gif) return RenderGif(dir, outPath, st, progress, loadCursor, log, project, opt, cancel);
             var total = Stopwatch.StartNew();
             var stats = new RenderStats();
             string raw = Path.Combine(dir, "raw.mp4");
             var info = Probe(raw);
             var track = LoadTrack(dir, info);
             var proj = project ?? StudioProject.Load(dir, track, info.Duration, st.Zoom);
-            var scene = new StudioScene(dir, track, proj.Look, st, loadCursor);
-            var lay = scene.Lay;
-            int nAll = Math.Max(1, (int)(info.Duration * st.Fps));
-            var plan = scene.Plan(proj.Segments, info.Duration, nAll);
-            // 修剪：导出第 first..<last 帧（镜头按整段算，和预览一致）
+            if (opt != null) st = new StudioStyle { Zoom = st.Zoom, Fps = opt.Fps, BitsPerPixel = opt.BitsPerPixel };
+            // 分辨率：按原始画布算缩放 k；k 小于一半时先把原画面缩到「画布的 2 倍」再合成（推近 2 倍字也清楚，又不至于缩太狠起锯齿）
+            var lay0 = new StudioLayout(track, proj.Look);
+            double k = opt?.CanvasScale(lay0.cw, lay0.ch) ?? 1, kd = Math.Min(1, 2 * k);
+            int W = info.Width, H = info.Height;
+            if (kd < 0.999) { W = Math.Max(2, (int)Math.Round(info.Width * kd / 2) * 2); H = Math.Max(2, (int)Math.Round(info.Height * kd / 2) * 2); track = track.Scaled(W, H); }
+            // 剪掉 / 快放：轨迹和推近段都换到成片时间再算镜头（预览按素材时间，剪切处走法略有不同，成片更顺；同 Mac 版）
+            var map = new TimeMap(proj);
+            var wtrack = map.Warp(track); var wproj = map.Warp(proj);
+            double outDur = map.Out(info.Duration);
+            var lay = new StudioLayout(track, proj.Look, k / kd);
+            var scene = new StudioScene(dir, wtrack, proj.Look, st, loadCursor, null, lay);
+            int nAll = Math.Max(1, (int)(outDur * st.Fps));
+            var plan = scene.Plan(wproj.Segments, outDur, nAll);
+            // 修剪：导出成片第 first..<last 帧（镜头按整段算，和预览一致）
             int first = Math.Min(Math.Max(0, (int)Math.Round(proj.TrimStart * st.Fps)), nAll - 1);
-            int last = Math.Max(first + 1, Math.Min(nAll, proj.TrimEnd > proj.TrimStart ? (int)Math.Round(proj.TrimEnd * st.Fps) : nAll));
+            int last = Math.Max(first + 1, Math.Min(nAll, wproj.TrimEnd > proj.TrimStart ? (int)Math.Round(wproj.TrimEnd * st.Fps) : nAll));
             int n = last - first;
             double t0 = first / (double)st.Fps, len = n / (double)st.Fps;
             // 自测：STUDIO_PLANDUMP=文件 → 每帧写「秒,放大倍数,鼠标离画面中心多远（横、竖，按半个画面算）,镜头横 / 竖是否顶到画布边（1/0）」
@@ -997,16 +1021,17 @@ namespace ScreenRecorder
                         i / (double)st.Fps, f.z, (lay.card.X + f.mx * lay.s - f.sx) * f.z / (lay.cw / 2), (lay.card.Y + f.my * lay.s - f.sy) * f.z / (lay.ch / 2), edgeX ? 1 : 0, edgeY ? 1 : 0);
                 }));
             var cpu = scene.Cpu;
-            int W = info.Width, H = info.Height, CW = (int)lay.cw, CH = (int)lay.ch;
-            log?.Invoke(string.Format(CultureInfo.InvariantCulture, "source {0}x{1} {2:0.00}s audio={3} matrix={4} → canvas {5}x{6} frames {7} (trim {8:0.00}–{9:0.00}s) segments {10} clicks {11} keys {12} aspect={13} background={14} blur={15} clickSound={16}",
-                W, H, info.Duration, info.HasAudio, info.Matrix, CW, CH, n, t0, t0 + len, proj.Segments.Count, track.Clicks.Count, track.Keys.Count, proj.Look.Aspect, proj.Look.Background, proj.Look.Blur, proj.Look.ClickSound ? proj.Look.ClickStyle : "off"));
+            int CW = (int)lay.cw, CH = (int)lay.ch;
+            log?.Invoke(string.Format(CultureInfo.InvariantCulture, "source {0}x{1} {2:0.00}s audio={3} matrix={4} → canvas {5}x{6} frames {7} (trim {8:0.00}–{9:0.00}s) segments {10} clicks {11} keys {12} aspect={13} background={14} blur={15} clickSound={16} fps={17} res={18} decode={19}x{20} cuts={21} out={22:0.00}s",
+                info.Width, info.Height, info.Duration, info.HasAudio, info.Matrix, CW, CH, n, proj.TrimStart, proj.TrimEnd, wproj.Segments.Count, wtrack.Clicks.Count, wtrack.Keys.Count, proj.Look.Aspect, proj.Look.Background, proj.Look.Blur,
+                proj.Look.ClickSound ? proj.Look.ClickStyle : "off", st.Fps, opt?.Resolution ?? "original", W, H, map.Pieces.Count, len));
 
             // 合成用显卡还是 CPU
             string want = (Environment.GetEnvironmentVariable("STUDIO_COMPOSE") ?? "").ToLowerInvariant();
             IComposer comp = cpu;
             if (want != "cpu" && GpuFactory != null)
             {
-                try { comp = GpuFactory(lay, cpu, info) ?? cpu; }
+                try { comp = GpuFactory(lay, cpu, info.With(W, H)) ?? cpu; }
                 catch (Exception e) { if (want == "gpu") throw new Exception("GPU compositor failed: " + e.Message, e); log?.Invoke("gpu compositor unavailable: " + e.Message); }
             }
             else if (want == "gpu") throw new Exception("GPU compositor not available");
@@ -1022,26 +1047,20 @@ namespace ScreenRecorder
 
             string mat = info.Matrix;
             string hw = hwdec ? "-hwaccel auto " : "";
-            string ss = string.Format(CultureInfo.InvariantCulture, "-ss {0:0.######} ", t0);
+            // 原画面从修剪起点（素材时间）开始按帧率连续解；成片第 i 帧要素材的第 round((src(i) − 起点) × fps) 帧（剪掉的跳过、快放的隔几帧取一帧）
+            double s0 = proj.TrimStart;
+            string ss = string.Format(CultureInfo.InvariantCulture, "-ss {0:0.######} ", s0);
+            string scale = kd < 0.999 ? $"scale={W}:{H}:flags=lanczos," : "";
             var dec = comp.Nv12In
-                ? Start($"-v error {hw}{ss}-i \"{raw}\" -an -sn -vf \"setpts=PTS-STARTPTS,fps={st.Fps}\" -f rawvideo -pix_fmt nv12 pipe:1", false)
-                : Start($"-v error {hw}{ss}-i \"{raw}\" -an -sn -vf \"setpts=PTS-STARTPTS,fps={st.Fps},scale=in_color_matrix={mat}:in_range=tv:out_range=pc,format=bgra\" -f rawvideo -pix_fmt bgra pipe:1", false);
-            long rate = Math.Max(10_000_000, (long)(CW * (double)CH * st.Fps * st.BitsPerPixel));
-            // 声音：原声（按修剪截）+ 点击音效（合成好的 wav，按修剪后的时间）混成一条
-            string clickWav = null;
-            var clickTimes = proj.Look.ClickSound ? track.Clicks.Select(c => c[0] - t0).Where(t => t >= 0 && t < len).ToList() : new List<double>();
-            if (clickTimes.Count > 0)
-            {
-                clickWav = Path.Combine(Path.GetTempPath(), "studio-clicks-" + Guid.NewGuid().ToString("N") + ".wav");
-                File.WriteAllBytes(clickWav, ClickSound.Track(clickTimes, len, proj.Look.ClickStyle));
-            }
+                ? Start($"-v error {hw}{ss}-i \"{raw}\" -an -sn -vf \"setpts=PTS-STARTPTS,fps={st.Fps}{(scale.Length > 0 ? "," + scale.TrimEnd(',') : "")}\" -f rawvideo -pix_fmt nv12 pipe:1", false)
+                : Start($"-v error {hw}{ss}-i \"{raw}\" -an -sn -vf \"setpts=PTS-STARTPTS,fps={st.Fps},{scale}scale=in_color_matrix={mat}:in_range=tv:out_range=pc,format=bgra\" -f rawvideo -pix_fmt bgra pipe:1", false);
+            long rate = Math.Max(opt?.MinRate ?? 10_000_000, (long)(CW * (double)CH * st.Fps * st.BitsPerPixel));
+            // 声音：原声（剪掉 / 快放 / 修剪、按音量）+ 点击音效 混成一条，软限幅
+            var clickTimes = proj.Look.ClickSound && proj.Audio.Clicks > 0.001 ? wtrack.Clicks.Select(c => c[0] - t0).Where(t => t >= 0 && t < len).ToList() : new List<double>();
+            var aud = AudioGraph(raw, info, proj, map, clickTimes, len, 1);
             string lenS = len.ToString("0.######", CultureInfo.InvariantCulture);
-            string audio;
-            if (info.HasAudio && clickWav != null)
-                audio = $"{ss}-t {lenS} -i \"{raw}\" -i \"{clickWav}\" -filter_complex \"[1:a:0][2:a:0]amix=inputs=2:duration=longest:normalize=0[a]\" -map 0:v -map \"[a]\" -c:a aac -b:a 192k";
-            else if (info.HasAudio) audio = $"{ss}-t {lenS} -i \"{raw}\" -map 0:v -map 1:a:0 -c:a aac -b:a 192k";
-            else if (clickWav != null) audio = $"-i \"{clickWav}\" -map 0:v -map 1:a:0 -c:a aac -b:a 192k";
-            else audio = "-map 0:v";
+            if (aud != null) log?.Invoke("audio graph: " + File.ReadAllText(aud.Script).Replace("\n", " "));
+            string audio = aud == null ? "-map 0:v" : $"{aud.Inputs} -filter_complex_script \"{aud.Script}\" -map 0:v -map \"[aout]\" -c:a aac -b:a 192k";
             bool x264 = encoder == "libx264";
             string input = comp.Nv12Out
                 ? $"-f rawvideo -pix_fmt nv12 -s {CW}x{CH} -r {st.Fps} -color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709 -i pipe:0"
@@ -1060,10 +1079,10 @@ namespace ScreenRecorder
             for (int i = 0; i < 5; i++) srcFree.Add(new byte[frameBytes]);
             for (int i = 0; i < 4; i++) dstFree.Add(new byte[outBytes]);
             Exception failure = null;
-            var cts = new CancellationTokenSource();
+            var cts = CancellationTokenSource.CreateLinkedTokenSource(cancel);
             var swRead = new Stopwatch(); var swWrite = new Stopwatch();
 
-            // 读线程：解码出来的 60fps 原画面（从修剪起点开始）
+            // 读线程：解码出来的原画面（从修剪起点开始，按帧率）
             var reader = new Thread(() =>
             {
                 try
@@ -1074,7 +1093,7 @@ namespace ScreenRecorder
                         var buf = srcFree.Take(cts.Token);
                         int got = 0;
                         swRead.Start();
-                        while (got < frameBytes) { int k = stream.Read(buf, got, frameBytes - got); if (k <= 0) break; got += k; }
+                        while (got < frameBytes) { int kk = stream.Read(buf, got, frameBytes - got); if (kk <= 0) break; got += kk; }
                         swRead.Stop();
                         if (got < frameBytes) { srcFree.Add(buf); break; }
                         srcFull.Add(buf, cts.Token);
@@ -1097,30 +1116,37 @@ namespace ScreenRecorder
             }) { IsBackground = true, Name = "studio-write" };
             reader.Start(); writer.Start();
 
-            byte[] cur = null;
+            byte[] cur = null; int curIdx = -1;
             var sw = Stopwatch.StartNew();
             var swIn = new Stopwatch(); var swComp = new Stopwatch(); var swOut = new Stopwatch();
             int blurred = 0;
             try
             {
-                for (int k = 0; k < n; k++)
+                for (int kf = 0; kf < n; kf++)
                 {
                     if (failure != null) throw failure;
-                    int i = first + k;
-                    // 原画面不够就沿用最后一帧（录到最后画面没变化时，原始文件里最后一帧会早于结尾）
+                    cancel.ThrowIfCancellationRequested();
+                    int i = first + kf;
+                    // 这一帧要素材的第几帧（从修剪起点算）；原画面不够就沿用最后一帧
+                    int want_ = map.IsIdentity ? kf : (int)Math.Round((map.Src(i / (double)st.Fps) - s0) * st.Fps);
                     swIn.Start();
-                    if (srcFull.TryTake(out var next, Timeout.Infinite, cts.Token)) { if (cur != null) srcFree.Add(cur); cur = next; }
+                    while (curIdx < want_ || cur == null)
+                    {
+                        if (!srcFull.TryTake(out var next, Timeout.Infinite, cts.Token)) break;
+                        if (cur != null) srcFree.Add(cur);
+                        cur = next; curIdx++;
+                    }
                     swIn.Stop();
                     if (cur == null) throw new Exception("no frames decoded: " + decErr.ToString().Trim());
                     swOut.Start(); var dst = dstFree.Take(cts.Token); swOut.Stop();
                     swComp.Start(); if (scene.Frame(comp, cur, i, plan, dst)) blurred++; swComp.Stop();
                     swOut.Start(); dstFull.Add(dst, cts.Token); swOut.Stop();
-                    if (k % 30 == 0) progress?.Invoke(k / (double)n);
+                    if (kf % 30 == 0) progress?.Invoke(kf / (double)n);
                 }
                 dstFull.CompleteAdding();
                 swOut.Start(); writer.Join(); swOut.Stop();
                 if (failure != null) throw failure;
-                swOut.Start(); enc.WaitForExit(); swOut.Stop();
+                swOut.Start(); while (!enc.WaitForExit(200)) cancel.ThrowIfCancellationRequested(); swOut.Stop();
                 cts.Cancel();
                 try { if (!dec.HasExited) dec.Kill(); } catch { }
                 if (enc.ExitCode != 0) throw new Exception("encoder failed: " + encErr.ToString().Trim());
@@ -1128,17 +1154,18 @@ namespace ScreenRecorder
             catch
             {
                 cts.Cancel();
-                dstFull.CompleteAdding();
+                try { dstFull.CompleteAdding(); } catch { }
                 try { if (!dec.HasExited) dec.Kill(); } catch { }
-                try { if (!enc.HasExited) enc.Kill(); } catch { }
-                try { File.Delete(outPath); } catch { }
+                try { if (!enc.HasExited) enc.Kill(); enc.WaitForExit(3000); } catch { }
+                for (int tries = 0; tries < 10 && File.Exists(outPath); tries++) { try { File.Delete(outPath); } catch { Thread.Sleep(100); } }
+                if (cancel.IsCancellationRequested) throw new OperationCanceledException(cancel);
                 if (failure != null && !(failure is OperationCanceledException)) throw new Exception(failure.Message + " " + encErr.ToString().Trim(), failure);
                 throw;
             }
             finally
             {
                 if (comp != cpu) comp.Dispose();
-                if (clickWav != null) try { File.Delete(clickWav); } catch { }
+                aud?.Cleanup();
             }
             stats.Frames = n; stats.Width = CW; stats.Height = CH; stats.Duration = len;
             stats.RenderSeconds = sw.Elapsed.TotalSeconds; stats.TotalSeconds = total.Elapsed.TotalSeconds;
@@ -1149,6 +1176,122 @@ namespace ScreenRecorder
             try { File.AppendAllText(Path.Combine(dir, "render.log"), DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") + stats + Environment.NewLine); } catch { }
             progress?.Invoke(1);
             return stats;
+        }
+
+        // GIF：先按 720p / 30 帧出一份 mp4，再用 ffmpeg 两步调色板（palettegen / paletteuse）转成宽 ≤ 960、15 帧的 GIF；没有声音
+        static RenderStats RenderGif(string dir, string outPath, StudioStyle st, Action<double> progress, Func<string, CursorShape, double, Sprite> loadCursor, Action<string> log, StudioProject project, ExportOptions opt, CancellationToken cancel)
+        {
+            var mp4 = Path.Combine(Path.GetTempPath(), "studio-gif-" + Guid.NewGuid().ToString("N") + ".mp4");
+            var o = opt.Clone(); o.Gif = false; o.Resolution = "720"; o.Fps = 30; o.Quality = "standard";
+            try
+            {
+                var stats = Render(dir, mp4, st, v => progress?.Invoke(v * 0.85), loadCursor, log, project, o, cancel);
+                cancel.ThrowIfCancellationRequested();
+                var p = Start($"-v error -y -i \"{mp4}\" -vf \"fps=15,scale='min(960,iw)':-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle\" -loop 0 \"{outPath}\"", false);
+                var err = new StringBuilder();
+                p.ErrorDataReceived += (s, e) => { if (e.Data != null) lock (err) err.AppendLine(e.Data); }; p.BeginErrorReadLine();
+                p.OutputDataReceived += (s, e) => { }; p.BeginOutputReadLine();
+                while (!p.WaitForExit(200))
+                    if (cancel.IsCancellationRequested) { try { p.Kill(); p.WaitForExit(3000); } catch { } try { File.Delete(outPath); } catch { } throw new OperationCanceledException(cancel); }
+                if (p.ExitCode != 0) { try { File.Delete(outPath); } catch { } throw new Exception("gif failed: " + err.ToString().Trim()); }
+                progress?.Invoke(1);
+                return stats;
+            }
+            finally { try { File.Delete(mp4); } catch { } }
+        }
+
+        // ---- 声音（导出和剪辑窗口的预览共用，所以预览听到的就是成片的声音）----
+        // 原声每条音轨：按修剪 / 剪掉 / 快放切块（快放用 atempo，音调不变）→ 接起来 → 乘音量；再混上点击音效 → 软限幅（0.8 以上柔和压到 0.95 以内，同 Mac 版）
+        public sealed class AudioPlan
+        {
+            public string Inputs, Script; readonly List<string> temp = new List<string>();
+            public void Temp(string f) => temp.Add(f);
+            public void Cleanup() { foreach (var f in temp) try { File.Delete(f); } catch { } }
+        }
+
+        // firstInput：raw 在 ffmpeg 里是第几个输入（导出时 0 是画面管道，raw 是 1）；clickTimes 是成片里相对开头的秒数
+        public static AudioPlan AudioGraph(string raw, VideoInfo info, StudioProject proj, TimeMap map, List<double> clickTimes, double len, int firstInput)
+        {
+            var a = proj.Audio;
+            var spans = map.Spans(proj.TrimStart, proj.TrimEnd);
+            var streams = new List<(int idx, double vol)>();
+            if (!a.Muted)
+                for (int i = 0; i < info.AudioChannels.Count; i++)
+                {
+                    double v = TrackVolume(a, info, i);
+                    if (v > 0.001) streams.Add((i, v));
+                }
+            bool clicks = clickTimes != null && clickTimes.Count > 0;
+            if (streams.Count == 0 && !clicks) return null;
+            var plan = new AudioPlan();
+            var g = new StringBuilder(); var mix = new List<string>();
+            string F(double v) => v.ToString("0.######", CultureInfo.InvariantCulture);
+            const string fmt = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo";
+            foreach (var (idx, vol) in streams)
+            {
+                string src = $"[{firstInput}:a:{idx}]aresample=48000:async=1:first_pts=0,{fmt}";
+                if (spans.Count == 1) g.Append(src).Append(Piece(spans[0], "")).Append($",volume={F(vol)}[s{idx}];\n");
+                else
+                {
+                    g.Append(src).Append($",asplit={spans.Count}");
+                    for (int j = 0; j < spans.Count; j++) g.Append($"[s{idx}p{j}]");
+                    g.Append(";\n");
+                    for (int j = 0; j < spans.Count; j++) g.Append($"[s{idx}p{j}]").Append(Piece(spans[j], "").TrimStart(',')).Append($"[s{idx}q{j}];\n");
+                    for (int j = 0; j < spans.Count; j++) g.Append($"[s{idx}q{j}]");
+                    g.Append($"concat=n={spans.Count}:v=0:a=1,volume={F(vol)}[s{idx}];\n");
+                }
+                mix.Add($"[s{idx}]");
+            }
+            string inputs = $"-i \"{raw}\"";
+            if (clicks)
+            {
+                var wav = Path.Combine(Path.GetTempPath(), "studio-clicks-" + Guid.NewGuid().ToString("N") + ".wav");
+                File.WriteAllBytes(wav, ClickSound.Track(clickTimes, len, proj.Look.ClickStyle));
+                plan.Temp(wav);
+                int ci = streams.Count > 0 ? firstInput + 1 : firstInput;
+                if (streams.Count == 0) inputs = $"-i \"{wav}\""; else inputs += $" -i \"{wav}\"";
+                g.Append($"[{ci}:a:0]{fmt},volume={F(proj.Audio.Clicks)}[clk];\n");
+                mix.Add("[clk]");
+            }
+            // 软限幅：|x| ≤ 0.8 原样；以上 0.8 + 0.15·tanh((|x|−0.8)/0.15)
+            string lim(int ch) => $"if(gt(abs(val({ch}))\\,0.8)\\,(0.8+0.15*tanh((abs(val({ch}))-0.8)/0.15))*if(gte(val({ch})\\,0)\\,1\\,-1)\\,val({ch}))";
+            string soft = $"aeval=exprs={lim(0)}|{lim(1)}:channel_layout=stereo,{fmt}";
+            if (mix.Count == 1) g.Append(mix[0]).Append(soft).Append("[aout]");
+            else g.Append(string.Concat(mix)).Append($"amix=inputs={mix.Count}:duration=longest:normalize=0,{soft}[aout]");
+            var script = Path.Combine(Path.GetTempPath(), "studio-audio-" + Guid.NewGuid().ToString("N") + ".txt");
+            File.WriteAllText(script, g.ToString(), new UTF8Encoding(false));
+            plan.Temp(script);
+            plan.Inputs = inputs; plan.Script = script;
+            return plan;
+
+            string Piece((double start, double end, double rate) sp, string pre)
+            {
+                var t = $",atrim=start={F(sp.start)}:end={F(sp.end)},asetpts=PTS-STARTPTS";
+                if (sp.rate > 1.0001) t += $",atempo={F(Math.Min(100, sp.rate))}";
+                return t;
+            }
+        }
+
+        // 第 i 条音轨用哪个音量：Windows 录的只有一条（电脑声音和麦克风混在一起）→ 用「电脑声音」；Mac 录的单声道 = 麦克风
+        public static double TrackVolume(AudioSettings a, VideoInfo info, int i) =>
+            info.AudioChannels.Count > 1 && info.AudioChannels[i] == 1 ? a.Mic : a.System;
+
+        // 剪辑窗口预览用的整条声音（修剪范围、按成片时间，剪掉 / 快放 / 音量 / 点击声都已经做好），写成 wav
+        public static bool RenderAudio(string dir, VideoInfo info, Track track, StudioProject proj, string wav)
+        {
+            var raw = Path.Combine(dir, "raw.mp4");
+            var map = new TimeMap(proj);
+            double t0 = proj.TrimStart, len = Math.Max(0.05, map.Out(proj.TrimEnd) - t0);
+            var clickTimes = proj.Look.ClickSound && proj.Audio.Clicks > 0.001 ? map.Warp(track).Clicks.Select(c => c[0] - t0).Where(t => t >= 0 && t < len).ToList() : new List<double>();
+            var aud = AudioGraph(raw, info, proj, map, clickTimes, len, 0);
+            try
+            {
+                string args = aud == null
+                    ? $"-v error -y -f lavfi -i anullsrc=r=48000:cl=stereo -t {len.ToString("0.###", CultureInfo.InvariantCulture)} -c:a pcm_s16le \"{wav}\""
+                    : $"-v error -y {aud.Inputs} -filter_complex_script \"{aud.Script}\" -map \"[aout]\" -t {len.ToString("0.######", CultureInfo.InvariantCulture)} -ac 2 -ar 48000 -c:a pcm_s16le \"{wav}\"";
+                return RunQuiet(args, 180000) && File.Exists(wav);
+            }
+            finally { aud?.Cleanup(); }
         }
 
         // ---- 编码器 ----

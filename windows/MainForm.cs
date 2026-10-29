@@ -23,6 +23,7 @@ namespace ScreenRecorder
         readonly Timer timer = new Timer { Interval = 250 };
         readonly LinkLabel updateLink = new LinkLabel(), checkLink = new LinkLabel();
         bool updating;              // 正在查 / 下载新版本
+        public readonly RecentStrip Recents = new RecentStrip();
 
         List<Source> sources = new List<Source>();
         Source region;
@@ -44,8 +45,8 @@ namespace ScreenRecorder
             Font = SystemFonts.MessageBoxFont;
             AutoScaleMode = AutoScaleMode.Dpi;
             AutoScaleDimensions = new SizeF(96, 96);
-            ClientSize = new Size(640, 510);
-            MinimumSize = new Size(600, 470);
+            ClientSize = new Size(640, 650);
+            MinimumSize = new Size(600, 600);
             StartPosition = FormStartPosition.CenterScreen;
 
             var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(16), ColumnCount = 1, RowCount = 6 };
@@ -81,6 +82,11 @@ namespace ScreenRecorder
             list.SelectedIndexChanged += (s, e) => { if (list.SelectedItems.Count > 0) selectedId = (string)list.SelectedItems[0].Tag; UpdateUi(); };
             list.Resize += (s, e) => list.Columns[1].Width = Math.Max(100, list.ClientSize.Width - list.Columns[0].Width - 4);
             root.Controls.Add(list);
+            // 最近的 Studio 素材：单击就进剪辑窗口，不用去资源管理器里找
+            Recents.Dock = DockStyle.Fill; Recents.Margin = new Padding(0, 10, 0, 0);
+            Recents.OpenRequested += dir => ShowEditor(dir);
+            Recents.Message += m => Say(m);
+            root.Controls.Add(Recents);
 
             // 开关
             var opts = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0, 10, 0, 4), WrapContents = true };
@@ -101,7 +107,8 @@ namespace ScreenRecorder
             tips.SetToolTip(hideIcons, L("录的时候先把桌面上的图标藏起来，录完自动恢复", "Hides the icons on your desktop while recording, and brings them back afterwards"));
             var opts2 = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0, 6, 0, 4), WrapContents = true };
             opts2.Controls.AddRange(new Control[] { cdLabel, countdown, hideIcons });
-            root.RowCount = 7;
+            root.RowCount = 8;
+            root.RowStyles.Insert(2, new RowStyle(SizeType.AutoSize));
             root.RowStyles.Insert(3, new RowStyle(SizeType.AutoSize));
             root.Controls.Add(opts);
             root.Controls.Add(opts2);
@@ -177,7 +184,20 @@ namespace ScreenRecorder
             timer.Tick += (s, e) => { if (session != null) timeLabel.Text = "● " + (DateTime.Now - startedAt).ToString(@"mm\:ss"); };
             Say("");
             Refresh_();
+            Recents.Reload();
+            Activated += (s, e) => Recents.Reload();
+            // 把素材文件夹（或里面的文件）拖进窗口：打开剪辑窗口
+            AllowDrop = true;
+            DragEnter += (s, e) => e.Effect = DroppedFootage(e.Data) != null ? DragDropEffects.Link : DragDropEffects.None;
+            DragDrop += (s, e) =>
+            {
+                var dir = DroppedFootage(e.Data);
+                if (dir != null) ShowEditor(dir); else Say(L("拖进来的不是 Studio 素材（文件夹里要有 raw.mp4 和 track.json）", "That isn't Studio footage (the folder needs raw.mp4 and track.json)"), true);
+            };
         }
+
+        static string DroppedFootage(IDataObject d) =>
+            d.GetDataPresent(DataFormats.FileDrop) && d.GetData(DataFormats.FileDrop) is string[] f && f.Length > 0 ? RecentStrip.FootageOf(f[0]) : null;
 
         static TableLayoutPanel Row() => new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = new Padding(0) };
 
@@ -477,13 +497,14 @@ namespace ScreenRecorder
             try
             {
                 var ed = StudioEditor.Open(dir, outPath);
+                Recents.Reload();
                 ed.Exported -= OnExported; ed.Exported += OnExported;
                 Say(L("剪辑窗口已打开：调好后点右上角「导出」", "Editor opened: click Export (top right) when you're done"));
             }
             catch (Exception e) { Say(L("打开剪辑窗口失败：", "Couldn't open the editor: ") + e.Message, true); }
         }
 
-        void OnExported(string path) { if (!IsDisposed) BeginInvoke((Action)(() => Saved(path))); }
+        void OnExported(string path) { if (!IsDisposed) BeginInvoke((Action)(() => { Saved(path); Recents.Reload(); })); }
 
         // 「打开 Studio 素材…」：选一个素材文件夹（里面要有 raw.mp4 和 track.json）
         void OpenFootage()

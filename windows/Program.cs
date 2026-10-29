@@ -93,6 +93,7 @@ namespace ScreenRecorder
             if (Environment.GetEnvironmentVariable("EDITORSHOT") != null) return SelfTestEditor.Shot();
             if (Environment.GetEnvironmentVariable("EDITORTEST") != null) return SelfTestEditor.Interactive();
             if (Environment.GetEnvironmentVariable("COUNTDOWNSHOT") != null) return SelfTestEditor.Countdown();
+            if (Environment.GetEnvironmentVariable("MAINSHOT") != null) return SelfTestEditor.MainShot();
             if (Environment.GetEnvironmentVariable("ICONSTEST") != null) return SelfTestEditor.Icons();
             if (Environment.GetEnvironmentVariable("AUTOTEST") != null) return SelfTest.Run();
             if (Environment.GetEnvironmentVariable("UPDATE_TEST") != null) return Updater.SelfTest();
@@ -109,6 +110,9 @@ namespace ScreenRecorder
             DesktopIcons.Restore();   // 上次录制时藏了桌面图标、没来得及换回来（比如崩了）：先换回来
             // 上次后台下好了新版、却没等到正常退出就被结束了：先换上，再打开新版
             if (Updater.StagedVersion != null && Updater.ApplyStaged(true)) return 0;
+            // 把素材文件夹拖到 录屏.exe 上（或命令行带一个素材夹）：直接打开剪辑窗口，不开主窗口（免得和已经开着的那个抢快捷键）
+            var argDir = Environment.GetCommandLineArgs().Skip(1).Select(RecentStrip.FootageOf).FirstOrDefault(d => d != null);
+            if (argDir != null) { Application.Run(new StudioEditor(argDir)); Updater.ApplyStaged(Updater.RestartAfterExit); return 0; }
             Application.Run(new MainForm());
             // 正常退出：把后台下好的新版换上，下次打开就是新的（点了「现在重启」就顺便打开）
             Updater.ApplyStaged(Updater.RestartAfterExit);

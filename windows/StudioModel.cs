@@ -49,6 +49,9 @@ namespace ScreenRecorder
         public string ClickStyle = "soft";
         public bool Ripple = true;             // 点击波纹
         public string Blur = "light";          // 运动模糊：只在镜头快速移动时有
+        // Mac 版样式里 Windows 还不认识的键（快捷键显示、推近速度……）：原样留着，存回去不丢
+        public Dictionary<string, object> Extra = new Dictionary<string, object>();
+        public bool MacTransparent;            // 原来是 Mac 的透明背景：没改背景就照样存回 transparent（Windows 上按白色画）
 
         public StudioLook Clone() => FromJson(ToJson());
         public bool Same(StudioLook o) => o != null && ToJson() == o.ToJson();
@@ -102,7 +105,7 @@ namespace ScreenRecorder
         {
             var w = new JsonW();
             w.Begin();
-            w.Str("aspect", Aspect); w.Str("background", Background);
+            w.Str("aspect", Aspect); w.Str("background", MacTransparent && Background == "color" && Color.Same(RGB.White) ? "transparent" : Background);
             w.Str("blur", Blur); w.Bool("clickSound", ClickSound); w.Str("clickStyle", ClickStyle);
             w.Rgb("color", Color); w.Num("cornerRadius", CornerRadius); w.Num("cursorScale", CursorScale);
             w.Rgb("gradient0", Gradient0); w.Rgb("gradient1", Gradient1); w.Num("gradientAngle", GradientAngle);
@@ -110,11 +113,14 @@ namespace ScreenRecorder
             if (ImageBookmark != null) w.Str("imageBookmark", ImageBookmark);
             w.Str("imagePath", ImagePath); w.Num("padding", Padding); w.Bool("ripple", Ripple);
             w.Num("shadow", Shadow); w.Num("shadowBlur", ShadowBlur); w.Num("smoothing", Smoothing); w.Str("wallpaper", Wallpaper);
+            w.Extra(Extra);
             w.End();
             return w.ToString();
         }
 
         public static StudioLook FromJson(string json) => From(Json.Parse(json) as Dictionary<string, object>);
+        static readonly string[] Known = { "aspect", "background", "blur", "clickSound", "clickStyle", "color", "cornerRadius", "cursorScale", "gradient0", "gradient1", "gradientAngle",
+                                           "hideAfter", "hideIdleCursor", "imageBookmark", "imagePath", "padding", "ripple", "shadow", "shadowBlur", "smoothing", "wallpaper" };
 
         public static StudioLook From(Dictionary<string, object> o)
         {
@@ -136,6 +142,8 @@ namespace ScreenRecorder
             z.HideIdleCursor = j.Bool("hideIdleCursor", z.HideIdleCursor); z.HideAfter = j.Num("hideAfter", z.HideAfter);
             z.ClickSound = j.Bool("clickSound", z.ClickSound); z.ClickStyle = j.Str("clickStyle", z.ClickStyle, Clicks);
             z.Ripple = j.Bool("ripple", z.Ripple); z.Blur = j.Str("blur", z.Blur, Blurs);
+            z.MacTransparent = bg == "transparent";
+            z.Extra = JsonR.Unknown(o, Known);
             return z;
         }
     }
@@ -148,8 +156,38 @@ namespace ScreenRecorder
         public double Zoom = 2.0;
         public bool Fixed;                     // false = 跟着鼠标走，true = 盯住固定位置
         public double FixedX = 0.5, FixedY = 0.5;   // 固定位置：在原画面里的比例，左上角为原点
+        public Dictionary<string, object> Extra = new Dictionary<string, object>();   // Mac 版多的字段（这一段的推近速度……）原样留着
 
-        public ZoomSegment Clone() => (ZoomSegment)MemberwiseClone();
+        public ZoomSegment Clone() { var c = (ZoomSegment)MemberwiseClone(); c.Extra = new Dictionary<string, object>(Extra); return c; }
+    }
+
+    // 中间剪掉的一段 / 快放的一段（素材时间），格式同 Mac 版 CutSegment
+    sealed class CutSegment
+    {
+        public string Id = Guid.NewGuid().ToString().ToUpperInvariant();
+        public double Start, End;
+        public bool Speed;                     // false = 剪掉，true = 快放
+        public double Rate = 4;                // 快放几倍：2 / 4 / 8
+        public Dictionary<string, object> Extra = new Dictionary<string, object>();
+        public CutSegment Clone() { var c = (CutSegment)MemberwiseClone(); c.Extra = new Dictionary<string, object>(Extra); return c; }
+    }
+
+    // 声音：录到的电脑声音 / 麦克风各自的音量（0–2）、点击声音量、一键静音录到的声音；格式同 Mac 版 AudioSettings
+    sealed class AudioSettings
+    {
+        public double System = 1, Mic = 1, Clicks = 1;
+        public bool Muted;
+        public Dictionary<string, object> Extra = new Dictionary<string, object>();   // Mac 的讲解音量、压低、降噪……原样留着
+        public static AudioSettings From(Dictionary<string, object> o)
+        {
+            var a = new AudioSettings(); if (o == null) return a;
+            var j = new JsonR(o);
+            a.System = j.Num("system", 1); a.Mic = j.Num("mic", 1); a.Clicks = j.Num("clicks", 1); a.Muted = j.Bool("muted", false);
+            a.Extra = JsonR.Unknown(o, new[] { "system", "mic", "clicks", "muted" });
+            return a;
+        }
+        public void Write(JsonW w) { w.Begin(); w.Num("clicks", Clicks); w.Num("mic", Mic); w.Bool("muted", Muted); w.Num("system", System); w.Extra(Extra); w.End(); }
+        public string ToJson() { var w = new JsonW(); Write(w); return w.ToString(); }
     }
 
     // 工程文件 project.json（存在素材夹里），格式同 Mac 版
@@ -159,6 +197,11 @@ namespace ScreenRecorder
         public double TrimStart, TrimEnd;
         public StudioLook Look = new StudioLook();
         public bool SegmentsEdited;            // 推近段手动改过：以后自动规则变了也不重算；没改过的打开时按最新规则重排
+        public List<CutSegment> Cuts = new List<CutSegment>();   // 中间剪掉 / 快放
+        public AudioSettings Audio = new AudioSettings();
+        // Mac 版有、Windows 还没有的（讲解、字幕、摄像头、遮挡、标注、背景音乐……）：原样留着，存回去不丢
+        public Dictionary<string, object> Extra = new Dictionary<string, object>();
+        static readonly string[] Known = { "look", "segments", "segmentsEdited", "trimEnd", "trimStart", "cuts", "audio" };
 
         public StudioProject Clone() => FromJson(ToJson());
         public bool Same(StudioProject o) => o != null && ToJson() == o.ToJson();
@@ -171,10 +214,15 @@ namespace ScreenRecorder
         {
             var w = new JsonW(pretty: true);
             w.Begin();
+            w.Key_("audio"); Audio.Write(w);
+            w.BeginArray("cuts");
+            foreach (var c in Cuts) { w.BeginItem(); w.Num("end", c.End); w.Str("id", c.Id); w.Str("mode", c.Speed ? "speed" : "cut"); w.Num("rate", c.Rate); w.Num("start", c.Start); w.Extra(c.Extra); w.End(); }
+            w.EndArray();
             w.Raw("look", Look.ToJson());
             w.BeginArray("segments"); foreach (var s in Segments) WriteSeg(w, s); w.EndArray();
             w.Bool("segmentsEdited", SegmentsEdited);
             w.Num("trimEnd", TrimEnd); w.Num("trimStart", TrimStart);
+            w.Extra(Extra);
             w.End();
             return w.ToString();
         }
@@ -184,6 +232,7 @@ namespace ScreenRecorder
             w.BeginItem();
             w.Num("end", s.End); w.Num("fixedX", s.FixedX); w.Num("fixedY", s.FixedY); w.Str("id", s.Id);
             w.Str("mode", s.Fixed ? "fixed" : "follow"); w.Num("start", s.Start); w.Num("zoom", s.Zoom);
+            w.Extra(s.Extra);
             w.End();
         }
 
@@ -204,8 +253,22 @@ namespace ScreenRecorder
                     {
                         Id = r.Str("id", Guid.NewGuid().ToString().ToUpperInvariant()), Start = r.Num("start", 0), End = r.Num("end", 0), Zoom = r.Num("zoom", 2),
                         Fixed = r.Str("mode", "follow") == "fixed", FixedX = r.Num("fixedX", 0.5), FixedY = r.Num("fixedY", 0.5),
+                        Extra = JsonR.Unknown(x, new[] { "id", "start", "end", "zoom", "mode", "fixedX", "fixedY" }),
                     });
                 }
+            if (o.TryGetValue("cuts", out var cv) && cv is List<object> cuts)
+                foreach (var x in cuts.OfType<Dictionary<string, object>>())
+                {
+                    var r = new JsonR(x);
+                    p.Cuts.Add(new CutSegment
+                    {
+                        Id = r.Str("id", Guid.NewGuid().ToString().ToUpperInvariant()), Start = r.Num("start", 0), End = r.Num("end", 0),
+                        Speed = r.Str("mode", "cut") == "speed", Rate = Math.Max(1, r.Num("rate", 4)),
+                        Extra = JsonR.Unknown(x, new[] { "id", "start", "end", "mode", "rate" }),
+                    });
+                }
+            p.Audio = AudioSettings.From(o.TryGetValue("audio", out var av) ? av as Dictionary<string, object> : null);
+            p.Extra = JsonR.Unknown(o, Known);
             return p;
         }
 
@@ -239,6 +302,141 @@ namespace ScreenRecorder
             File.WriteAllText(tmp, ToJson(), new UTF8Encoding(false));
             if (File.Exists(file)) File.Replace(tmp, file, null); else File.Move(tmp, file);
         }
+    }
+
+    // ---- 素材时间 ↔ 成片时间（照 Mac 版 TimeMap）：剪掉的段压成 0 长，快放的段按倍数压短；第一处剪辑之前两边一样（修剪的起点也不变） ----
+    sealed class TimeMap
+    {
+        public struct Piece { public double Start, End, Rate; }   // Rate 0 = 剪掉
+        public readonly List<Piece> Pieces = new List<Piece>();
+        public bool IsIdentity => Pieces.Count == 0;
+
+        public TimeMap(StudioProject p)
+        {
+            double lastEnd = -1;
+            foreach (var c in p.Cuts.OrderBy(c => c.Start))
+            {
+                double s = Math.Max(Math.Max(c.Start, p.TrimStart), lastEnd), e = Math.Min(c.End, p.TrimEnd);
+                if (e - s <= 1.0 / 240) continue;
+                Pieces.Add(new Piece { Start = s, End = e, Rate = c.Speed ? Math.Max(1, c.Rate) : 0 });
+                lastEnd = e;
+            }
+        }
+        static double OutLen(Piece p) => p.Rate == 0 ? 0 : (p.End - p.Start) / p.Rate;
+
+        // 素材时间 → 成片时间
+        public double Out(double s)
+        {
+            double d = 0;
+            foreach (var p in Pieces)
+            {
+                if (s <= p.Start) break;
+                double e = Math.Min(s, p.End), len = e - p.Start;
+                d += len - (p.Rate == 0 ? 0 : len / p.Rate);
+            }
+            return s - d;
+        }
+        // 成片时间 → 素材时间（落在剪掉处时给剪掉段的终点）
+        public double Src(double o)
+        {
+            double d = 0;
+            foreach (var p in Pieces)
+            {
+                double os = p.Start - d, ol = OutLen(p);
+                if (o < os) return o + d;
+                if (o < os + ol) return p.Start + (o - os) * p.Rate;
+                d += (p.End - p.Start) - ol;
+            }
+            return o + d;
+        }
+        public Piece? At(double s) { foreach (var p in Pieces) if (s >= p.Start && s < p.End) return p; return null; }
+        public bool InCut(double s) => At(s) is Piece p && p.Rate == 0;
+
+        // 修剪范围按顺序切成要放的几块（剪掉的不要）：(素材起点, 终点, 倍数)
+        public List<(double start, double end, double rate)> Spans(double trimStart, double trimEnd)
+        {
+            var list = new List<(double, double, double)>();
+            double t = trimStart;
+            foreach (var p in Pieces)
+            {
+                if (p.End <= trimStart || p.Start >= trimEnd) continue;
+                if (p.Start > t + 1e-6) list.Add((t, p.Start, 1.0));
+                if (p.Rate > 0) list.Add((Math.Max(p.Start, trimStart), Math.Min(p.End, trimEnd), p.Rate));
+                t = Math.Max(t, p.End);
+            }
+            if (trimEnd > t + 1e-6) list.Add((t, trimEnd, 1.0));
+            return list;
+        }
+
+        // 轨迹换到成片时间：剪掉段里的鼠标、点击、按键去掉，其余按新时间
+        public Track Warp(Track t)
+        {
+            if (IsIdentity) return t;
+            return new Track
+            {
+                Width = t.Width, Height = t.Height, PixelsPerPoint = t.PixelsPerPoint, Cursors = t.Cursors,
+                Moves = t.Moves.Where(m => !InCut(m[0])).Select(m => { var c = (double[])m.Clone(); c[0] = Out(m[0]); return c; }).ToList(),
+                Clicks = t.Clicks.Where(m => !InCut(m[0])).Select(m => { var c = (double[])m.Clone(); c[0] = Out(m[0]); return c; }).ToList(),
+                Keys = t.Keys.Where(k => !InCut(k)).Select(Out).ToList(),
+            };
+        }
+        // 工程换到成片时间：推近段起止按新时间（整段被剪掉的去掉），修剪终点按新时间
+        public StudioProject Warp(StudioProject p)
+        {
+            if (IsIdentity) return p;
+            var w = p.Clone();
+            w.Segments = p.Segments.Select(g => { var c = g.Clone(); c.Start = Out(g.Start); c.End = Out(g.End); return c; }).Where(g => g.End - g.Start > 0.1).ToList();
+            w.TrimEnd = Out(p.TrimEnd);
+            w.Cuts = new List<CutSegment>();
+            return w;
+        }
+    }
+
+    // ---- 导出设置（照 Mac 版）：分辨率、帧率、画质、视频 / GIF、导出后复制到剪贴板；剪辑窗口记住上次的选择 ----
+    sealed class ExportOptions
+    {
+        public static readonly string[] Resolutions = { "original", "4k", "1440", "1080", "720" };
+        public static readonly string[] Qualities = { "high", "standard", "small" };
+        public string Resolution = "1440";     // 默认 1440p：推近 2 倍时字照样清楚，比原始快一倍、文件小一半
+        public int Fps = 60;
+        public string Quality = "high";
+        public bool Gif;
+        public bool CopyToClipboard;
+
+        public double BitsPerPixel => Quality == "small" ? 0.035 : Quality == "standard" ? 0.07 : 0.12;
+        public long MinRate => Quality == "small" ? 2_000_000 : Quality == "standard" ? 4_000_000 : 8_000_000;
+
+        // 画布缩放：按原始画布算出来的宽高 → 目标（原始 = 1；4K 看长边 3840；其余看短边），不放大
+        public double CanvasScale(double cw, double ch)
+        {
+            switch (Resolution)
+            {
+                case "4k": return Math.Min(1, 3840 / Math.Max(cw, ch));
+                case "1440": return Math.Min(1, 1440 / Math.Min(cw, ch));
+                case "1080": return Math.Min(1, 1080 / Math.Min(cw, ch));
+                case "720": return Math.Min(1, 720 / Math.Min(cw, ch));
+                default: return 1;
+            }
+        }
+
+        public string Summary(Func<string, string, string> L) =>
+            Gif ? "GIF" : (Resolution == "original" ? L("原始", "Original") : Resolution == "4k" ? "4K" : Resolution + "p") + " · " + Fps + L(" 帧", " fps");
+
+        public string Save() => string.Join(",", Resolution, Fps, Quality, Gif ? 1 : 0, CopyToClipboard ? 1 : 0);
+        public static ExportOptions Load(string s)
+        {
+            var o = new ExportOptions();
+            var p = (s ?? "").Split(',');
+            if (p.Length >= 5)
+            {
+                if (Resolutions.Contains(p[0])) o.Resolution = p[0];
+                if (p[1] == "30" || p[1] == "60") o.Fps = int.Parse(p[1]);
+                if (Qualities.Contains(p[2])) o.Quality = p[2];
+                o.Gif = p[3] == "1"; o.CopyToClipboard = p[4] == "1";
+            }
+            return o;
+        }
+        public ExportOptions Clone() => (ExportOptions)MemberwiseClone();
     }
 
     // ---- 预设：把一套样式存起来，下拉切换；「默认」用在新录的工程上（%APPDATA%\录屏\presets.json，格式同 Mac 版） ----
@@ -452,6 +650,15 @@ namespace ScreenRecorder
         readonly Dictionary<string, object> o;
         public JsonR(Dictionary<string, object> o) { this.o = o ?? new Dictionary<string, object>(); }
         public bool Has(string k) => o.ContainsKey(k) && o[k] != null;
+        // 不认识的键（原样留着，存回去不丢）
+        public static Dictionary<string, object> Unknown(Dictionary<string, object> o, IEnumerable<string> known)
+        {
+            var d = new Dictionary<string, object>();
+            if (o == null) return d;
+            var k = new HashSet<string>(known);
+            foreach (var kv in o) if (!k.Contains(kv.Key)) d[kv.Key] = kv.Value;
+            return d;
+        }
         public double Num(string k, double def) => o.TryGetValue(k, out var v) && v is double d && !double.IsNaN(d) ? d : def;
         public bool Bool(string k, bool def) => o.TryGetValue(k, out var v) && v is bool b ? b : def;
         public string Str(string k, string def, string[] allowed = null) => o.TryGetValue(k, out var v) && v is string s && (allowed == null || allowed.Contains(s)) ? s : def;
@@ -505,6 +712,30 @@ namespace ScreenRecorder
         public void Num(string k, double v) { Key(k); sb.Append(N(v)); }
         public void Bool(string k, bool v) { Key(k); sb.Append(v ? "true" : "false"); }
         public void Raw(string k, string json) { Key(k); sb.Append(json); }
+        public void Key_(string k) => Key(k);
+        // 原样写回不认识的键（值是解析出来的 Dictionary / List / string / double / bool / null）
+        public void Extra(Dictionary<string, object> extra)
+        {
+            if (extra == null) return;
+            foreach (var kv in extra.OrderBy(x => x.Key, StringComparer.Ordinal)) { Key(kv.Key); Value(kv.Value); }
+        }
+        void Value(object v)
+        {
+            switch (v)
+            {
+                case null: sb.Append("null"); break;
+                case string s: Quote(s); break;
+                case bool b: sb.Append(b ? "true" : "false"); break;
+                case double d: sb.Append(N(d)); break;
+                case Dictionary<string, object> d:
+                    sb.Append('{'); bool f = true;
+                    foreach (var kv in d.OrderBy(x => x.Key, StringComparer.Ordinal)) { if (!f) sb.Append(','); f = false; Quote(kv.Key); sb.Append(':'); Value(kv.Value); }
+                    sb.Append('}'); break;
+                case List<object> l:
+                    sb.Append('['); for (int i = 0; i < l.Count; i++) { if (i > 0) sb.Append(','); Value(l[i]); } sb.Append(']'); break;
+                default: sb.Append(Convert.ToString(v, CultureInfo.InvariantCulture)); break;
+            }
+        }
         public void Rgb(string k, RGB c) { Key(k); sb.Append("{\"b\":").Append(N(c.B)).Append(",\"g\":").Append(N(c.G)).Append(",\"r\":").Append(N(c.R)).Append('}'); }
         public static string N(double v) => double.IsNaN(v) || double.IsInfinity(v) ? "0" : v.ToString("R", CultureInfo.InvariantCulture);
     }
