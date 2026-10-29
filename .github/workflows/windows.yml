@@ -97,7 +97,7 @@ jobs:
             if ($dur -lt 2 -or $dur -gt 5) { throw "${name}: duration $dur not ~3s" }
             # 画面确实在动：抽两帧比较
             ffmpeg -v error -y -ss 0.5 -i $out -frames:v 1 "$env:RUNNER_TEMP\$name-a.png"
-            ffmpeg -v error -y -ss 2.5 -i $out -frames:v 1 "$env:RUNNER_TEMP\$name-b.png"
+            ffmpeg -v error -y -ss 2.0 -i $out -frames:v 1 "$env:RUNNER_TEMP\$name-b.png"
             $ha = (Get-FileHash "$env:RUNNER_TEMP\$name-a.png").Hash; $hb = (Get-FileHash "$env:RUNNER_TEMP\$name-b.png").Hash
             if ($ha -eq $hb) { throw "${name}: frames identical, picture not moving" }
             return $v
