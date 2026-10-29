@@ -220,6 +220,7 @@ float2 PSUV(float4 pos : SV_Position) : SV_Target
             ctx.IASetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
             ctx.PSSetSampler(0, sLin); ctx.PSSetSampler(1, sBorder);
             ctx.PSSetConstantBuffer(0, cb);
+            ctx.VSSetConstantBuffer(0, cb);   // 波纹、鼠标的方块位置在顶点着色器里算
         }
 
         static byte[] Compile(string entry, string profile)

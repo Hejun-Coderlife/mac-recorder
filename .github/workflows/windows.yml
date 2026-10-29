@@ -294,7 +294,8 @@ jobs:
           # 整段逐帧比：PSNR（同一个编码器，只差合成方式）
           $psnr = ffmpeg -hide_banner -i (Join-Path $env:RUNNER_TEMP "studio/gpu.mp4") -i (Join-Path $env:RUNNER_TEMP "studio/cpu.mp4") -lavfi "[0:v][1:v]psnr" -f null - 2>&1 | Select-String "PSNR"
           Write-Host $psnr
-          $avg = [double](($psnr -replace '.*average:([\d.inf]+).*', '$1') -replace 'inf', '99')
+          $line = ($psnr | Select-Object -Last 1).ToString()
+          $avg = [double](($line -replace '.*average:([\d.inf]+).*', '$1') -replace 'inf', '99')
           Write-Host "PSNR average = $avg dB"
           if ($avg -lt 38) { throw "GPU and CPU pictures differ too much ($avg dB)" }
           # 自动挑编码器：这台机器没有显卡编码器，应该挨个试过然后用 libx264；显卡合成在这里没有真显卡，自动模式应该回到 CPU
