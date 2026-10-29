@@ -134,8 +134,10 @@ jobs:
           $dir = Join-Path $env:RUNNER_TEMP "self"; New-Item -ItemType Directory -Force $dir | Out-Null
           Copy-Item pkg/录屏.exe $dir
           $before = (Get-FileHash "$dir\录屏.exe").Hash
-          Expand-Archive v12\ScreenRecorder-Windows-x64.zip v12x
-          $expected = (Get-FileHash "v12x\录屏.exe").Hash
+          # 线上最新版发的是什么就该换成什么：有单个 exe 就是它，没有（v1.2）就是 zip 里的 录屏.exe
+          gh release download --repo "${{ github.repository }}" --pattern ScreenRecorder.exe --dir latest 2>$null
+          if (Test-Path latest\ScreenRecorder.exe) { $expected = (Get-FileHash latest\ScreenRecorder.exe).Hash }
+          else { Expand-Archive v12\ScreenRecorder-Windows-x64.zip v12x; $expected = (Get-FileHash "v12x\录屏.exe").Hash }
           $env:UPDATE_TEST = "1"; $env:UPDATE_FAKE_VERSION = "1.0"; $env:UPDATE_NORELAUNCH = "1"; $env:UPDATE_TOKEN = "${{ github.token }}"
           $p = Start-Process -FilePath "$dir\录屏.exe" -Wait -PassThru
           $txt = Get-Content "$env:TEMP\update_test.txt" -Raw
