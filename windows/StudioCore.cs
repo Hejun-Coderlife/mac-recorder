@@ -34,19 +34,24 @@ namespace ScreenRecorder
         public List<double[]> Clicks = new List<double[]>();   // [秒, x, y]
         public List<double> Keys = new List<double>();         // 按键的时刻（秒）
         public List<CursorShape> Cursors = new List<CursorShape>();
+        public List<KeyStroke> Shortcuts;    // 按的快捷键（只记带 Ctrl / Alt / Win 的组合和 Esc、方向键这类功能键，不记打的字）；旧素材没有
+        public CameraTrack Camera;           // 单独录的摄像头（camera.mp4）；没开摄像头的素材没有
 
         static string N(double v) => v.ToString("0.###", CultureInfo.InvariantCulture);
 
         public string ToJson()
         {
             var sb = new StringBuilder();
-            sb.Append("{\"clicks\":[").Append(string.Join(",", Clicks.Select(c => "[" + string.Join(",", c.Select(N)) + "]"))).Append("],");
+            sb.Append("{");
+            if (Camera != null) sb.Append("\"camera\":").Append(Camera.ToJson()).Append(',');
+            sb.Append("\"clicks\":[").Append(string.Join(",", Clicks.Select(c => "[" + string.Join(",", c.Select(N)) + "]"))).Append("],");
             sb.Append("\"cursors\":[").Append(string.Join(",", Cursors.Select(c =>
                 $"{{\"arrow\":{(c.Arrow ? "true" : "false")},\"file\":\"{c.File}\",\"h\":{N(c.H)},\"hotX\":{N(c.HotX)},\"hotY\":{N(c.HotY)},\"w\":{N(c.W)}}}"))).Append("],");
             sb.Append("\"height\":").Append(Height).Append(',');
             sb.Append("\"keys\":[").Append(string.Join(",", Keys.Select(N))).Append("],");
             sb.Append("\"moves\":[").Append(string.Join(",", Moves.Select(m => "[" + string.Join(",", m.Select(N)) + "]"))).Append("],");
             sb.Append("\"pixelsPerPoint\":").Append(N(PixelsPerPoint)).Append(',');
+            if (Shortcuts != null) sb.Append("\"shortcuts\":[").Append(string.Join(",", Shortcuts.Select(k => k.ToJson()))).Append("],");
             sb.Append("\"width\":").Append(Width).Append('}');
             return sb.ToString();
         }
@@ -57,7 +62,7 @@ namespace ScreenRecorder
             double kx = w / (double)Width, ky = h / (double)Height;
             return new Track
             {
-                Width = w, Height = h, PixelsPerPoint = PixelsPerPoint * (kx + ky) / 2, Keys = Keys.ToList(), Cursors = Cursors,
+                Width = w, Height = h, PixelsPerPoint = PixelsPerPoint * (kx + ky) / 2, Keys = Keys.ToList(), Cursors = Cursors, Shortcuts = Shortcuts, Camera = Camera,
                 Moves = Moves.Select(m => new[] { m[0], m[1] * kx, m[2] * ky, m[3], m[4] }).ToList(),
                 Clicks = Clicks.Select(c => new[] { c[0], c[1] * kx, c[2] * ky }).ToList(),
             };
@@ -72,6 +77,8 @@ namespace ScreenRecorder
             t.Moves = A("moves").Select(m => ((List<object>)m).Select(D).ToArray()).ToList();
             t.Clicks = A("clicks").Select(m => ((List<object>)m).Select(D).ToArray()).ToList();
             t.Keys = A("keys").Select(D).ToList();
+            if (o.ContainsKey("shortcuts")) t.Shortcuts = A("shortcuts").OfType<Dictionary<string, object>>().Select(KeyStroke.From).Where(k => k != null).ToList();
+            if (o.TryGetValue("camera", out var cam) && cam is Dictionary<string, object> camd) t.Camera = CameraTrack.From(camd);
             t.Cursors = A("cursors").Select(x =>
             {
                 var c = (Dictionary<string, object>)x;
@@ -604,6 +611,15 @@ namespace ScreenRecorder
         readonly byte[] bg;                  // 背景 + 卡片阴影，每帧一样
         public readonly double cardL, cardT, cardW, cardH, ccx, ccy, r;
         readonly int[] ui; readonly float[] fu, qxs; readonly int[] bxs;   // 每列预算好的取样位置
+        readonly StudioLook look_; readonly Func<string, int, int, byte[]> loadImage_;
+        byte[] plain;
+        // 不带卡片阴影的背景（摄像头分屏时屏幕画面缩小，露出来的地方）
+        public byte[] PlainBackground()
+        {
+            if (plain != null) return plain;
+            var lk = look_.Clone(); lk.Shadow = 0;
+            return plain = MakeBackground(lk, loadImage_);
+        }
 
         // loadImage(路径, 宽, 高) → 铺满这么大的 BGRA（多出来的裁掉）；null = 读不了，按纯色画
         public Compositor(StudioLayout lay, StudioLook look, Func<string, int, int, byte[]> loadImage = null)
@@ -612,7 +628,8 @@ namespace ScreenRecorder
             cardL = lay.card.X; cardW = lay.card.W; cardH = lay.card.H; cardT = lay.ch - lay.card.Y - cardH;
             ccx = cardL + cardW / 2; ccy = cardT + cardH / 2; r = lay.radius;
             ui = new int[CW]; fu = new float[CW]; qxs = new float[CW]; bxs = new int[CW];
-            bg = MakeBackground(look ?? new StudioLook(), loadImage ?? Studio.LoadCover);
+            look_ = look ?? new StudioLook(); loadImage_ = loadImage ?? Studio.LoadCover;
+            bg = MakeBackground(look_, loadImage_);
         }
 
         // 背景（纯色 / 渐变 / 图片）上叠卡片阴影：圆角矩形往下挪一点、模糊、按深浅压暗（四分之一分辨率算再放大，阴影本来就是糊的）。参数同 Mac 版
@@ -1076,6 +1093,9 @@ namespace ScreenRecorder
                 assF = $"ass=filename='{CaptionAss.FilterPath(assFile)}':fontsdir='{CaptionAss.FilterPath(fontsDir)}',";
                 log?.Invoke($"captions {capTrack.Items.Count} → {assFile}");
             }
+            // 画布上的后期层：快捷键键帽、摄像头画中画（推近时不跟着放大）
+            var post = Canvas.Make(dir, track, proj, map, CW, CH, !capTrack.IsEmpty, () => cpu.PlainBackground());
+            if (post != null) log?.Invoke($"canvas layers: camera={(post.Camera != null)} keys={(post.Keys != null)}");
             string vf = comp.Nv12Out ? (x264 || assF.Length > 0 ? $"-vf \"{assF}format={(x264 ? "yuv420p" : "nv12")}\" " : "")
                                      : $"-vf \"scale=in_range=pc:out_range=tv:out_color_matrix=bt709,{assF}format={(x264 ? "yuv420p" : "nv12")}\" ";
             var enc = Start($"-v error -y {input} {audio} {vf}{EncoderArgs(encoder, rate, st.Fps, comp.Gpu)} " +
@@ -1150,7 +1170,8 @@ namespace ScreenRecorder
                     swIn.Stop();
                     if (cur == null) throw new Exception("no frames decoded: " + decErr.ToString().Trim());
                     swOut.Start(); var dst = dstFree.Take(cts.Token); swOut.Stop();
-                    swComp.Start(); if (scene.Frame(comp, cur, i, plan, dst)) blurred++; swComp.Stop();
+                    swComp.Start(); if (scene.Frame(comp, cur, i, plan, dst)) blurred++;
+                    post?.Apply(dst, comp.Nv12Out, map.Src(i / (double)st.Fps), i / (double)st.Fps); swComp.Stop();
                     swOut.Start(); dstFull.Add(dst, cts.Token); swOut.Stop();
                     if (kf % 30 == 0) progress?.Invoke(kf / (double)n);
                 }
@@ -1176,6 +1197,7 @@ namespace ScreenRecorder
             finally
             {
                 if (comp != cpu) comp.Dispose();
+                post?.Dispose();
                 aud?.Cleanup();
                 if (assFile != null) try { File.Delete(assFile); } catch { }
             }

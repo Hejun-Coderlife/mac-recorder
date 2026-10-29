@@ -126,6 +126,10 @@ function camAt(t) {
     const u = (i === CAM.length - 1 ? inout : out4)(seg(t, CAM[i - 1][0], CAM[i][0]));
     s = lerp(s, CAM[i][1], u); cx = lerp(cx, CAM[i][2], u); cy = lerp(cy, CAM[i][3], u);
   }
+  // 底下再叠一层一直不停的慢漂：缓缓推近 + 左右轻摆，任何时候画面都在动
+  s *= 1 + 0.011 * t;
+  cx += 26 * Math.sin(t * 0.9);
+  cy += 14 * Math.sin(t * 0.7 + 1);
   return [s, cx, cy];
 }
 function setCam(s, cx, cy) {
@@ -144,7 +148,7 @@ async function frame(t) {
   $('win').style.opacity = String(1 - out4(outro));
   const ic = seg(t, 9.0, 9.75);
   $('icon').style.opacity = String(out4(seg(t, 9.0, 9.3)));
-  $('icon').style.transform = `scale(${lerp(0.72, 1, spring(ic))})`;
+  $('icon').style.transform = `scale(${lerp(0.72, 1, spring(ic)) * (1 + 0.06 * seg(t, 9.3, 10))}) rotate(${-3 * (1 - out4(ic))}deg)`;
 
   // —— 样式面板：点了就换（真软件就是立刻变的）——
   const st8 = ['A', 'B', 'C', 'D', 'E', 'F'][CLICKS.filter(c => t >= c[0]).length];

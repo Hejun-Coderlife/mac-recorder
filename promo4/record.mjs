@@ -1,7 +1,7 @@
 /* 逐帧录「宣传片样片」：本地起个 http 服务 → 无界面 Chrome 2 倍像素截图（3840×2160）→ 缩到 1920×1080 60 帧 → 配乐
    用法：node record.mjs              出 ~/Desktop/宣传片样片.mp4（配乐）和 宣传片样片-无声.mp4
          node record.mjs --still 秒…  静帧到 /tmp/p4_秒.png（3840 宽，检查清晰度用）
-   配乐：GarageBand 自带 Apple Loops「Skyline」一组（Piano / Beat / Bass，90 拍/分），先由 ffmpeg 转成 /tmp/p4a/*.wav */
+   配乐：Apple Loops「07 Chillwave」120 拍/分（见文末），先由 ffmpeg 转成 /tmp/p4m/*.wav */
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -66,8 +66,8 @@ console.log(`\n截完 ${N} 帧，${((Date.now() - t0) / 1000).toFixed(0)}s`);
 execFileSync('ffmpeg', ['-v', 'error', '-y', '-framerate', String(FPS), '-i', join(DIR, 'f%05d.jpg'),
   '-vf', `scale=${W}:${H}:flags=lanczos,format=yuv420p`, '-c:v', 'libx264', '-preset', 'slow', '-crf', '14', '-movflags', '+faststart', OUT_SILENT]);
 
-// 配乐：钢琴从头；第 2 小节起进鼓和贝斯；结尾 0.7 秒淡出。点击处加一声很轻的「嗒」
-const BAR = 4 * 60 / 90;
+// 配乐：GarageBand 自带 Apple Loops「07 Chillwave」里 120 拍/分的「Landing in LA」一组（Synth 01 / Bass 01 / Guitar）+「Doubledown Beat 01」
+// 一开始就全进（不拖），9 秒出图标时撤掉鼓和贝斯，只留合成器尾音淡出；点击处加一声很轻的「嗒」
 const click = join(tmpdir(), 'p4_click.wav');
 { const sr = 48000, n = 1920, b = Buffer.alloc(44 + n * 2);
   b.write('RIFF', 0); b.writeUInt32LE(36 + n * 2, 4); b.write('WAVEfmt ', 8); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22);
@@ -76,15 +76,22 @@ const click = join(tmpdir(), 'p4_click.wav');
     b.writeInt16LE(Math.round(Math.max(-1, Math.min(1, v)) * 32767), 44 + k * 2); }
   writeFileSync(click, b); }
 const ms = s => Math.round(s * 1000);
-const inputs = ['-i', OUT_SILENT, '-i', `${A}/Skyline_Piano.wav`, '-stream_loop', '2', '-i', `${A}/Skyline_Beat.wav`, '-i', `${A}/Skyline_Bass.wav`];
+const M = '/tmp/p4m';
+const inputs = ['-i', OUT_SILENT,
+  '-stream_loop', '3', '-i', `${M}/Landing_in_LA_Synth_01.wav`,
+  '-stream_loop', '3', '-i', `${M}/Landing_in_LA_Bass_01.wav`,
+  '-stream_loop', '5', '-i', `${M}/Landing_in_LA_Guitar.wav`,
+  '-stream_loop', '3', '-i', `${M}/Doubledown_Beat_01.wav`];
 clicks.forEach(() => inputs.push('-i', click));
+const DROP = 9.0;
 const parts = [
-  `[1:a]atrim=0:${END},volume=0.9[p]`,
-  `[2:a]atrim=0:${END - BAR},adelay=${ms(BAR)}|${ms(BAR)},volume=0.55[b]`,
-  `[3:a]atrim=0:${END - BAR},adelay=${ms(BAR)}|${ms(BAR)},volume=0.7[s]`,
-  ...clicks.map((c, i) => `[${4 + i}:a]aformat=channel_layouts=stereo,adelay=${ms(c)}|${ms(c)},volume=0.35[c${i}]`),
-  `[p][b][s]${clicks.map((_, i) => `[c${i}]`).join('')}amix=inputs=${3 + clicks.length}:normalize=0,afade=t=out:st=${(END - 0.7).toFixed(2)}:d=0.7,loudnorm=I=-16:TP=-1.5[a]`,
+  `[1:a]atrim=0:${END},volume=0.85[syn]`,
+  `[2:a]atrim=0:${DROP + 0.05},afade=t=out:st=${DROP - 0.05}:d=0.1,volume=0.8[bas]`,
+  `[3:a]atrim=0:${DROP + 0.05},afade=t=out:st=${DROP - 0.05}:d=0.1,volume=0.45[gtr]`,
+  `[4:a]atrim=0:${DROP + 0.05},afade=t=out:st=${DROP - 0.05}:d=0.1,volume=0.7[bt]`,
+  ...clicks.map((c, i) => `[${5 + i}:a]aformat=channel_layouts=stereo,adelay=${ms(c)}|${ms(c)},volume=0.25[c${i}]`),
+  `[syn][bas][gtr][bt]${clicks.map((_, i) => `[c${i}]`).join('')}amix=inputs=${4 + clicks.length}:normalize=0,afade=t=in:st=0:d=0.08,afade=t=out:st=${(END - 0.8).toFixed(2)}:d=0.8,loudnorm=I=-15:TP=-1.5[a]`,
 ];
 execFileSync('ffmpeg', ['-v', 'error', '-y', ...inputs, '-filter_complex', parts.join(';'), '-map', '0:v', '-map', '[a]',
-  '-c:v', 'copy', '-c:a', 'aac', '-b:a', '256k', '-shortest', '-movflags', '+faststart', OUT]);
+  '-c:v', 'copy', '-c:a', 'aac', '-b:a', '256k', '-t', String(END), '-movflags', '+faststart', OUT]);
 console.log('OK', OUT, OUT_SILENT);

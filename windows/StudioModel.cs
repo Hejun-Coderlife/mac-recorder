@@ -49,6 +49,11 @@ namespace ScreenRecorder
         public string ClickStyle = "soft";
         public bool Ripple = true;             // 点击波纹
         public string Blur = "light";          // 运动模糊：只在镜头快速移动时有
+        public static readonly string[] KeyPositions = { "bottom", "bottomLeft", "bottomRight" };
+        public bool ShowKeys;                  // 画面上显示按的快捷键（Ctrl + Shift + C 这种键帽）
+        public string KeysAt = "bottom";       // 底部居中 / 左下 / 右下
+        public double KeysSize = 0.045;        // 键帽高约占画布短边几成（0.03–0.08）
+        public bool KeysDark = true;           // 深色键帽（白字）/ 浅色键帽（黑字）
         // Mac 版样式里 Windows 还不认识的键（快捷键显示、推近速度……）：原样留着，存回去不丢
         public Dictionary<string, object> Extra = new Dictionary<string, object>();
         public bool MacTransparent;            // 原来是 Mac 的透明背景：没改背景就照样存回 transparent（Windows 上按白色画）
@@ -111,8 +116,9 @@ namespace ScreenRecorder
             w.Rgb("gradient0", Gradient0); w.Rgb("gradient1", Gradient1); w.Num("gradientAngle", GradientAngle);
             w.Num("hideAfter", HideAfter); w.Bool("hideIdleCursor", HideIdleCursor);
             if (ImageBookmark != null) w.Str("imageBookmark", ImageBookmark);
-            w.Str("imagePath", ImagePath); w.Num("padding", Padding); w.Bool("ripple", Ripple);
-            w.Num("shadow", Shadow); w.Num("shadowBlur", ShadowBlur); w.Num("smoothing", Smoothing); w.Str("wallpaper", Wallpaper);
+            w.Str("imagePath", ImagePath); w.Str("keysAt", KeysAt); w.Bool("keysDark", KeysDark); w.Num("keysSize", KeysSize);
+            w.Num("padding", Padding); w.Bool("ripple", Ripple);
+            w.Num("shadow", Shadow); w.Num("shadowBlur", ShadowBlur); w.Bool("showKeys", ShowKeys); w.Num("smoothing", Smoothing); w.Str("wallpaper", Wallpaper);
             w.Extra(Extra);
             w.End();
             return w.ToString();
@@ -120,7 +126,8 @@ namespace ScreenRecorder
 
         public static StudioLook FromJson(string json) => From(Json.Parse(json) as Dictionary<string, object>);
         static readonly string[] Known = { "aspect", "background", "blur", "clickSound", "clickStyle", "color", "cornerRadius", "cursorScale", "gradient0", "gradient1", "gradientAngle",
-                                           "hideAfter", "hideIdleCursor", "imageBookmark", "imagePath", "padding", "ripple", "shadow", "shadowBlur", "smoothing", "wallpaper" };
+                                           "hideAfter", "hideIdleCursor", "imageBookmark", "imagePath", "padding", "ripple", "shadow", "shadowBlur", "smoothing", "wallpaper",
+                                           "showKeys", "keysAt", "keysSize", "keysDark" };
 
         public static StudioLook From(Dictionary<string, object> o)
         {
@@ -142,6 +149,8 @@ namespace ScreenRecorder
             z.HideIdleCursor = j.Bool("hideIdleCursor", z.HideIdleCursor); z.HideAfter = j.Num("hideAfter", z.HideAfter);
             z.ClickSound = j.Bool("clickSound", z.ClickSound); z.ClickStyle = j.Str("clickStyle", z.ClickStyle, Clicks);
             z.Ripple = j.Bool("ripple", z.Ripple); z.Blur = j.Str("blur", z.Blur, Blurs);
+            z.ShowKeys = j.Bool("showKeys", z.ShowKeys); z.KeysAt = j.Str("keysAt", z.KeysAt, KeyPositions);
+            z.KeysSize = j.Num("keysSize", z.KeysSize); z.KeysDark = j.Bool("keysDark", z.KeysDark);
             z.MacTransparent = bg == "transparent";
             z.Extra = JsonR.Unknown(o, Known);
             return z;
@@ -212,9 +221,11 @@ namespace ScreenRecorder
         public List<VoiceClip> Voiceovers = new List<VoiceClip>();   // 后来录的讲解
         public List<Caption> Captions = new List<Caption>();         // 字幕（素材时间）
         public CaptionStyle CaptionStyle = new CaptionStyle();
+        public CameraSettings Camera;                                // 摄像头样式（素材里有摄像头、工程里还没有时按录制时的小窗生成）
+        public List<CameraLayoutSeg> Layouts = new List<CameraLayoutSeg>();   // 布局轨：不在任何一段里 = 小窗
         // Mac 版有、Windows 还没有的（摄像头、遮挡、标注、背景音乐……）：原样留着，存回去不丢
         public Dictionary<string, object> Extra = new Dictionary<string, object>();
-        static readonly string[] Known = { "look", "segments", "segmentsEdited", "trimEnd", "trimStart", "cuts", "audio", "voiceovers", "captions", "captionStyle" };
+        static readonly string[] Known = { "look", "segments", "segmentsEdited", "trimEnd", "trimStart", "cuts", "audio", "voiceovers", "captions", "captionStyle", "camera", "layouts" };
 
         public StudioProject Clone() => FromJson(ToJson());
         public bool Same(StudioProject o) => o != null && ToJson() == o.ToJson();
@@ -229,10 +240,12 @@ namespace ScreenRecorder
             w.Begin();
             w.Key_("audio"); Audio.Write(w);
             w.BeginArray("captions"); foreach (var c in Captions) c.Write(w); w.EndArray();
+            if (Camera != null) { w.Key_("camera"); Camera.Write(w); }
             w.Raw("captionStyle", CaptionStyle.ToJson());
             w.BeginArray("cuts");
             foreach (var c in Cuts) { w.BeginItem(); w.Num("end", c.End); w.Str("id", c.Id); w.Str("mode", c.Speed ? "speed" : "cut"); w.Num("rate", c.Rate); w.Num("start", c.Start); w.Extra(c.Extra); w.End(); }
             w.EndArray();
+            w.BeginArray("layouts"); foreach (var l in Layouts) l.Write(w); w.EndArray();
             w.Raw("look", Look.ToJson());
             w.BeginArray("segments"); foreach (var s in Segments) WriteSeg(w, s); w.EndArray();
             w.Bool("segmentsEdited", SegmentsEdited);
@@ -287,6 +300,8 @@ namespace ScreenRecorder
             if (o.TryGetValue("voiceovers", out var vv) && vv is List<object> vs) p.Voiceovers = vs.OfType<Dictionary<string, object>>().Select(VoiceClip.From).ToList();
             if (o.TryGetValue("captions", out var cv2) && cv2 is List<object> cs) p.Captions = cs.OfType<Dictionary<string, object>>().Select(Caption.From).OrderBy(c => c.Start).ToList();
             p.CaptionStyle = CaptionStyle.From(o.TryGetValue("captionStyle", out var csv) ? csv as Dictionary<string, object> : null);
+            if (o.TryGetValue("camera", out var cam) && cam is Dictionary<string, object> camd) p.Camera = CameraSettings.From(camd);
+            if (o.TryGetValue("layouts", out var lv) && lv is List<object> ls) p.Layouts = ls.OfType<Dictionary<string, object>>().Select(CameraLayoutSeg.From).Where(x => x != null).OrderBy(x => x.Start).ToList();
             p.Extra = JsonR.Unknown(o, Known);
             return p;
         }
@@ -307,11 +322,13 @@ namespace ScreenRecorder
                     if (!o.ContainsKey("trimEnd")) p.TrimEnd = duration;
                     p.Segments = p.Segments.OrderBy(s => s.Start).ToList();
                     if (!o.ContainsKey("segments") || !p.SegmentsEdited) p.Segments = StudioPlan.AutoSegments(track, duration, zoom);
+                    if (p.Camera == null && track?.Camera != null) p.Camera = CameraSettings.From(track.Camera);
                     return p;
                 }
                 catch { }
             }
-            return new StudioProject { Segments = StudioPlan.AutoSegments(track, duration, zoom), TrimStart = 0, TrimEnd = duration, Look = (defaultLook ?? new StudioLook()).Clone() };
+            return new StudioProject { Segments = StudioPlan.AutoSegments(track, duration, zoom), TrimStart = 0, TrimEnd = duration, Look = (defaultLook ?? new StudioLook()).Clone(),
+                                       Camera = track?.Camera != null ? CameraSettings.From(track.Camera) : null };
         }
 
         public void Save(string dir)
