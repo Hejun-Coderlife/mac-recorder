@@ -909,11 +909,22 @@ struct StylePanel: View {
     }
 
     private func section<C: View>(_ id: String, _ title: String, @ViewBuilder _ content: () -> C) -> some View {
-        let body = content()
-        return DisclosureGroup(isExpanded: Binding(get: { open.contains(id) }, set: { if $0 { open.insert(id) } else { open.remove(id) } })) {
-            VStack(alignment: .leading, spacing: 10) { body }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8).padding(.bottom, 10)
-        } label: {
-            Text(title).font(.callout.weight(.semibold))
+        // 自己画标题行（不用 DisclosureGroup：里面放了下拉框时系统会把标题挤偏，几组对不齐）
+        let isOpen = open.contains(id)
+        return VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { if isOpen { open.remove(id) } else { open.insert(id) } }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right").font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isOpen ? 90 : 0)).frame(width: 10)
+                    Text(title).font(.callout.weight(.semibold))
+                    Spacer(minLength: 0)
+                }.padding(.vertical, 4).contentShape(Rectangle())
+            }.buttonStyle(.plain)
+            if isOpen {
+                VStack(alignment: .leading, spacing: 10) { content() }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8).padding(.bottom, 10)
+            }
         }
     }
 
@@ -957,7 +968,7 @@ struct StylePanel: View {
                     }
                     ForEach(ed.presets.presets) { p in Text(label(p)).tag(p.name) }
                 }
-            }.labelsHidden().fixedSize()
+            }.labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 8) {
                 Button(L("存成预设…", "Save as Preset…")) { newName = cur.flatMap { $0.hasPrefix("@") ? nil : $0 } ?? ""; naming = true }
                 if let n = cur, !n.hasPrefix("@") {
