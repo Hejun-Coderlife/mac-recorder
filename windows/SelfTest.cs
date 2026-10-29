@@ -13,6 +13,9 @@ namespace ScreenRecorder
     //   [AUTOTHUMB=1 录完照常弹出右下角缩略图，等它自己消失；SHOTOUT=文件夹 存一张缩略图的截屏]
     // 截图自测：SHOTTEST=1 [SHOTREGION=x,y,w,h（相对主屏幕）] [SHOTOUT=文件夹 存几张截屏] [THUMB_SECONDS=缩略图停留秒数] SHOT_VISIBLE=1
     //   → 结果写到 %TEMP%\shot_test.txt（第一行 OK 或 FAIL）
+    // 快捷键自测：HOTKEYTEST=1 [SHOTOUT=文件夹 存截屏] → 另起一个进程占住 Ctrl+Alt+X，验证检测到并弹通知；
+    //   点按钮按 Ctrl+Alt+Q 改截图快捷键、存进设置；再按被占的组合要被拒；按 Ctrl+Alt+Q 弹出截图选框。结果写 %TEMP%\hotkey_test.txt
+    // HOTKEY_HOG=秒 → 占住 Ctrl+Alt+X 这么久（自测里当「别的程序」用）
     // 结果写到 %TEMP%\recorder_test.txt：第一行 OK 路径 或 FAIL 原因
     static class SelfTest
     {
@@ -268,6 +271,123 @@ namespace ScreenRecorder
             [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
             [DllImport("user32.dll")] static extern uint SendInput(uint n, MINPUT[] inputs, int size);
         }
+
+        // ---- 快捷键自测 ----
+        public static int Hog()
+        {
+            var ready = Path.Combine(Path.GetTempPath(), "hotkey_hog.txt");
+            bool ok = RegisterHotKey(IntPtr.Zero, 77, Hotkey.Ctrl | Hotkey.Alt, (uint)Keys.X);
+            File.WriteAllText(ready, ok ? "HOG OK" : "HOG FAIL");
+            Thread.Sleep(TimeSpan.FromSeconds(double.Parse(Environment.GetEnvironmentVariable("HOTKEY_HOG"), System.Globalization.CultureInfo.InvariantCulture)));
+            return ok ? 0 : 1;
+        }
+
+        public static int Hotkeys()
+        {
+            string result = Path.Combine(Path.GetTempPath(), "hotkey_test.txt");
+            var log = new System.Text.StringBuilder();
+            string outDir = Environment.GetEnvironmentVariable("SHOTOUT");
+            void Check(bool ok, string what) { log.AppendLine((ok ? "pass " : "FAIL ") + what); if (!ok) throw new Exception(what); }
+            System.Diagnostics.Process hog = null;
+            try
+            {
+                // 老用户的设置：有别的项、没有快捷键这两项 → 截图用新默认 Ctrl+Alt+X
+                var settings = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "录屏", "settings.txt");
+                Directory.CreateDirectory(Path.GetDirectoryName(settings));
+                var keep = File.Exists(settings) ? File.ReadAllLines(settings).Where(l => !l.StartsWith("hotkey")).ToList() : new System.Collections.Generic.List<string>();
+                if (!keep.Any(l => l.StartsWith("studio="))) keep.Add("studio=0");
+                File.WriteAllLines(settings, keep);
+
+                // 另一个进程占住 Ctrl+Alt+X（就像 QQ 占着 Ctrl+Alt+S）
+                var ready = Path.Combine(Path.GetTempPath(), "hotkey_hog.txt");
+                File.Delete(ready);
+                var psi = new System.Diagnostics.ProcessStartInfo(Application.ExecutablePath) { UseShellExecute = false };
+                foreach (var k in new[] { "HOTKEYTEST", "SHOTTEST", "AUTOTEST", "STUDIO", "UPDATE_TEST" }) psi.EnvironmentVariables.Remove(k);
+                psi.EnvironmentVariables["HOTKEY_HOG"] = "60";
+                hog = System.Diagnostics.Process.Start(psi);
+                var until = DateTime.Now.AddSeconds(30);
+                while (!File.Exists(ready) && DateTime.Now < until) Thread.Sleep(100);
+                Thread.Sleep(200);
+                Check(File.Exists(ready) && File.ReadAllText(ready) == "HOG OK", "another process holds Ctrl+Alt+X");
+
+                var form = new MainForm();
+                Check(form.ShotKey.ToString() == "Ctrl+Alt+X" && form.RecordKey.ToString() == "Ctrl+Alt+R", $"defaults without saved shortcuts: record {form.RecordKey}, shot {form.ShotKey}");
+                form.Show(); Pump(1.5);
+                Check(form.HotkeyProblems.Count == 1 && form.HotkeyProblems[0].Contains("Ctrl+Alt+X"), "detected taken shortcut: " + string.Join(" | ", form.HotkeyProblems));
+                Check(Notice.Last != null && Notice.Last.Contains("Ctrl+Alt+X"), "notification shown: " + Notice.Last);
+                Check(form.StatusText.Contains("Ctrl+Alt+X"), "status line: " + form.StatusText);
+                if (outDir != null) Snap(Path.Combine(outDir, "hotkey-1-taken.png"), true);
+
+                // 点截图快捷键按钮，真按 Ctrl+Alt+Q
+                void ClickKeyButton()
+                {
+                    form.Activate(); Pump(0.3);
+                    var b = form.ShotKeyButton; var c = b.PointToScreen(new System.Drawing.Point(b.Width / 2, b.Height / 2));
+                    Mouse.Move(c.X, c.Y); Pump(0.1); Mouse.Click(); Pump(0.5);
+                }
+                ClickKeyButton();
+                Check(form.ShotKeyButton.Text != "Ctrl+Alt+X", "button waits for keys: " + form.ShotKeyButton.Text);
+                if (outDir != null) Snap(Path.Combine(outDir, "hotkey-2-capturing.png"), true);
+                Keyboard.Combo(0x11, 0x12, 0x51);   // Ctrl+Alt+Q
+                Pump(0.8);
+                Check(form.ShotKey.ToString() == "Ctrl+Alt+Q", "changed to " + form.ShotKey);
+                Check(File.ReadAllLines(settings).Contains($"{Hotkey.ShotSetting}={Hotkey.Ctrl | Hotkey.Alt},{(int)Keys.Q}"), "saved to settings.txt");
+                Check(form.ShotKeyButton.Text == "Ctrl+Alt+Q", "button shows the new shortcut");
+                if (outDir != null) Snap(Path.Combine(outDir, "hotkey-3-changed.png"), true);
+
+                // 改成被占的 Ctrl+Alt+X：要被拒，保留 Ctrl+Alt+Q
+                // （被占的组合真按下去会被占用它的程序吞掉、到不了我们窗口，所以这里直接走「按下后」的处理）
+                form.BeginCapture(2);
+                form.ApplyCapture(new Hotkey(Hotkey.Ctrl | Hotkey.Alt, Keys.X));
+                Pump(0.3);
+                Check(form.ShotKey.ToString() == "Ctrl+Alt+Q" && form.StatusText.Contains("Ctrl+Alt+X"), $"taken combo rejected: shot={form.ShotKey}, status={form.StatusText}");
+
+                // 新快捷键真的能截图：按 Ctrl+Alt+Q → 选框弹出 → Esc
+                Mouse.Move(Screen.PrimaryScreen.Bounds.X + 10, Screen.PrimaryScreen.Bounds.Y + 10); Pump(0.2);
+                Keyboard.Combo(0x11, 0x12, 0x51);
+                until = DateTime.Now.AddSeconds(5);
+                while (!Shots.Active && DateTime.Now < until) Pump(0.05);
+                Check(Shots.Active, "Ctrl+Alt+Q opens the screenshot overlay");
+                Pump(0.5);
+                if (outDir != null) Snap(Path.Combine(outDir, "hotkey-4-overlay.png"), true);
+                SendKeys.SendWait("{ESC}"); Pump(0.5);
+                Check(!Shots.Active, "Esc closes it");
+
+                // 录屏快捷键还在：Ctrl+Alt+R 没被这一通改动弄丢
+                form.Close(); Pump(0.5);
+                File.WriteAllText(result, "OK" + Environment.NewLine + log);
+                return 0;
+            }
+            catch (Exception e)
+            {
+                File.WriteAllText(result, "FAIL " + e.Message + Environment.NewLine + log + e);
+                return 1;
+            }
+            finally
+            {
+                try { hog?.Kill(); } catch { }
+            }
+        }
+
+        static class Keyboard
+        {
+            // 依次按下、反过来松开：Combo(Ctrl, Alt, Q)
+            public static void Combo(params ushort[] vks)
+            {
+                foreach (var vk in vks) { Send(vk, 0); Thread.Sleep(30); }
+                for (int i = vks.Length - 1; i >= 0; i--) { Send(vks[i], 0x0002); Thread.Sleep(30); }
+            }
+            static void Send(ushort vk, uint flags)
+            {
+                var i = new KINPUT { type = 1, ki = new KEYBDINPUT { wVk = vk, dwFlags = flags } };
+                SendInput(1, new[] { i }, Marshal.SizeOf<KINPUT>());
+            }
+            [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public IntPtr extra; }
+            [StructLayout(LayoutKind.Explicit, Size = 40)] struct KINPUT { [FieldOffset(0)] public uint type; [FieldOffset(8)] public KEYBDINPUT ki; }
+            [DllImport("user32.dll")] static extern uint SendInput(uint n, KINPUT[] inputs, int size);
+        }
+
+        [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hWnd, int id, uint mods, uint vk);
 
         public static int RenderOnly()
         {

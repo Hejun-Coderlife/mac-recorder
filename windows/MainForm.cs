@@ -15,7 +15,9 @@ namespace ScreenRecorder
         readonly ListView list = new ListView();
         readonly CheckBox sysAudio = new CheckBox(), mic = new CheckBox(), cursor = new CheckBox(), studio = new CheckBox();
         readonly Button recordBtn = new Button(), shotBtn = new Button(), regionBtn = new Button(), refreshBtn = new Button(), folderBtn = new Button();
-        readonly Label timeLabel = new Label(), status = new Label(), hint = new Label();
+        readonly Label timeLabel = new Label(), status = new Label();
+        readonly Button recKeyBtn = new Button(), shotKeyBtn = new Button();   // 显示当前快捷键，点一下就改
+        readonly ToolTip tips = new ToolTip();
         readonly Timer timer = new Timer { Interval = 250 };
         readonly LinkLabel updateLink = new LinkLabel(), checkLink = new LinkLabel();
         Updater.Release pending;    // 查到的新版本，还没装
@@ -30,6 +32,8 @@ namespace ScreenRecorder
         bool busy;
 
         const int HotkeyId = 1, ShotHotkeyId = 2;
+        public Hotkey RecordKey = Hotkey.Load(Hotkey.RecordSetting, Hotkey.DefaultRecord), ShotKey = Hotkey.Load(Hotkey.ShotSetting, Hotkey.DefaultShot);
+        int capturing;              // 正在等用户按新快捷键：HotkeyId / ShotHotkeyId；0 = 没在改
         string lastFile;            // 刚存好的视频，「打开所在文件夹」时选中它
 
         public MainForm()
@@ -107,14 +111,24 @@ namespace ScreenRecorder
             timeLabel.AutoSize = true; timeLabel.Anchor = AnchorStyles.Left;
             timeLabel.Font = new Font("Consolas", Font.Size + 6);
             timeLabel.ForeColor = Color.FromArgb(220, 40, 40);
-            hint.Text = L("Ctrl+Alt+R 录屏 · Ctrl+Alt+S 截图", "Ctrl+Alt+R record · Ctrl+Alt+S screenshot");
-            hint.AutoSize = true; hint.Anchor = AnchorStyles.Right; hint.ForeColor = SystemColors.GrayText;
+            // 快捷键：「录屏 [Ctrl+Alt+R]  截图 [Ctrl+Alt+X]」，点按钮后按新的组合键
+            var keys = new FlowLayoutPanel { AutoSize = true, Anchor = AnchorStyles.Right, WrapContents = false, Margin = new Padding(0) };
+            foreach (var (label, btn, id) in new[] { (L("录屏", "Record"), recKeyBtn, HotkeyId), (L("截图", "Screenshot"), shotKeyBtn, ShotHotkeyId) })
+            {
+                keys.Controls.Add(new Label { Text = label, AutoSize = true, ForeColor = SystemColors.GrayText, Anchor = AnchorStyles.Left, Margin = new Padding(8, 0, 2, 0) });
+                btn.AutoSize = true; btn.Padding = new Padding(4, 0, 4, 0); btn.Margin = new Padding(0, 0, 0, 0);
+                btn.FlatStyle = FlatStyle.System;
+                btn.Click += (s, e) => BeginCapture(id);
+                tips.SetToolTip(btn, L("点一下，再按新的快捷键（Esc 取消）", "Click, then press a new shortcut (Esc to cancel)"));
+                keys.Controls.Add(btn);
+            }
+            ShowKeys();
             rec.ColumnCount = 4;
             rec.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             rec.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             rec.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             rec.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            rec.Controls.Add(recordBtn, 0, 0); rec.Controls.Add(shotBtn, 1, 0); rec.Controls.Add(timeLabel, 2, 0); rec.Controls.Add(hint, 3, 0);
+            rec.Controls.Add(recordBtn, 0, 0); rec.Controls.Add(shotBtn, 1, 0); rec.Controls.Add(timeLabel, 2, 0); rec.Controls.Add(keys, 3, 0);
             root.Controls.Add(rec);
 
             // 状态 + 打开文件夹
@@ -421,10 +435,86 @@ namespace ScreenRecorder
             base.OnHandleCreated(e);
             // 自己的窗口不出现在录出来的画面里（Windows 10 2004 及以后）
             SetWindowDisplayAffinity(Handle, 0x11);
-            if (!RegisterHotKey(Handle, HotkeyId, 0x0001 | 0x0002 | 0x4000, (uint)Keys.R))   // Alt+Ctrl，不重复触发
-                Say(L("Ctrl+Alt+R 被别的程序占用了，只能点按钮开始 / 停止", "Ctrl+Alt+R is taken by another app; use the button to start / stop"), true);
-            if (!RegisterHotKey(Handle, ShotHotkeyId, 0x0001 | 0x0002 | 0x4000, (uint)Keys.S))
-                Say(L("Ctrl+Alt+S 被别的程序占用了，截图只能点「截图」按钮", "Ctrl+Alt+S is taken by another app; use the Screenshot button"), true);
+            // 快捷键被别的程序占了（比如 QQ）：窗口底部写一行，右下角再弹个通知，告诉用户怎么改
+            var taken = new System.Collections.Generic.List<string>();
+            if (!Register(HotkeyId, RecordKey)) taken.Add(L($"录屏快捷键 {RecordKey}", $"Record shortcut {RecordKey}"));
+            if (!Register(ShotHotkeyId, ShotKey)) taken.Add(L($"截图快捷键 {ShotKey}", $"Screenshot shortcut {ShotKey}"));
+            HotkeyProblems = taken;
+            if (taken.Count > 0)
+            {
+                var what = string.Join(L("、", ", "), taken);
+                Say(L($"{what} 被别的程序占用了，点窗口右边的快捷键按钮换一个", $"{what} is taken by another app; click the shortcut button on the right to change it"), true);
+                Notice.Show(this, L("快捷键被占用", "Shortcut unavailable"),
+                    L($"{what} 被别的程序（比如 QQ）占用了。打开录屏窗口，点右边的快捷键按钮，再按一个新的组合键就行。",
+                      $"{what} is used by another app. Open Screen Recorder, click the shortcut button and press a new combination."));
+            }
+        }
+
+        public System.Collections.Generic.List<string> HotkeyProblems = new System.Collections.Generic.List<string>();
+        public string StatusText => status.Text;
+        public Button ShotKeyButton => shotKeyBtn;
+
+        bool Register(int id, Hotkey k) => RegisterHotKey(Handle, id, k.Mods | 0x4000, (uint)k.Key);   // 0x4000 = 按住不重复触发
+
+        void ShowKeys()
+        {
+            recKeyBtn.Text = capturing == HotkeyId ? L("按下新快捷键…", "Press keys…") : RecordKey.ToString();
+            shotKeyBtn.Text = capturing == ShotHotkeyId ? L("按下新快捷键…", "Press keys…") : ShotKey.ToString();
+        }
+
+        // 点了快捷键按钮：先把两个快捷键都放掉（不然按原来的组合会直接触发），等用户按新的
+        public void BeginCapture(int id)
+        {
+            if (capturing != 0) EndCapture();
+            capturing = id;
+            UnregisterHotKey(Handle, HotkeyId); UnregisterHotKey(Handle, ShotHotkeyId);
+            ShowKeys();
+            Say(L("按下新的组合键（要带 Ctrl、Alt、Shift 或 Win），Esc 取消", "Press the new combination (with Ctrl, Alt, Shift or Win); Esc cancels"));
+            Activate();
+        }
+
+        void EndCapture()
+        {
+            capturing = 0;
+            Register(HotkeyId, RecordKey); Register(ShotHotkeyId, ShotKey);
+            ShowKeys();
+        }
+
+        // 用户按了一个组合：注册成功才保存，被占了就保留原来的
+        internal void ApplyCapture(Hotkey k)
+        {
+            int id = capturing;
+            var other = id == HotkeyId ? ShotKey : RecordKey;
+            capturing = 0;
+            if (k.SameAs(other)) { EndCapture(); Say(L($"{k} 已经是另一个快捷键了，换一个", $"{k} is already the other shortcut; pick another"), true); return; }
+            if (!Register(id, k)) { EndCapture(); Say(L($"{k} 已被别的程序占用，换一个", $"{k} is taken by another app; pick another"), true); return; }
+            Register(id == HotkeyId ? ShotHotkeyId : HotkeyId, other);
+            if (id == HotkeyId) { RecordKey = k; k.Save(Hotkey.RecordSetting); }
+            else { ShotKey = k; k.Save(Hotkey.ShotSetting); }
+            ShowKeys();
+            Say(L($"已改成 {k}", $"Changed to {k}"));
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (capturing == 0) return base.ProcessCmdKey(ref msg, keyData);
+            var key = keyData & Keys.KeyCode;
+            if (key == Keys.Escape && (keyData & Keys.Modifiers) == 0) { EndCapture(); Say(""); return true; }
+            if (Hotkey.IsModifierKey(key)) return true;   // 还在按修饰键，等真正的键
+            uint mods = 0;
+            if ((keyData & Keys.Control) != 0) mods |= Hotkey.Ctrl;
+            if ((keyData & Keys.Alt) != 0) mods |= Hotkey.Alt;
+            if ((keyData & Keys.Shift) != 0) mods |= Hotkey.Shift;
+            if ((GetKeyState(0x5B) & 0x8000) != 0 || (GetKeyState(0x5C) & 0x8000) != 0) mods |= Hotkey.Win;
+            if (mods == 0) { Say(L("要带 Ctrl、Alt、Shift 或 Win 中的一个，再按一次", "Include Ctrl, Alt, Shift or Win; try again"), true); return true; }
+            ApplyCapture(new Hotkey(mods, key));
+            return true;
+        }
+
+        protected override void OnDeactivate(EventArgs e)
+        {
+            base.OnDeactivate(e);
+            if (capturing != 0) { EndCapture(); Say(""); }   // 切走了就算取消
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
@@ -456,6 +546,7 @@ namespace ScreenRecorder
 
         [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hWnd, int id, uint mods, uint vk);
         [DllImport("user32.dll")] static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+        [DllImport("user32.dll")] static extern short GetKeyState(int vk);
         [DllImport("user32.dll")] static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint affinity);
         [DllImport("user32.dll")] static extern bool IsWindow(IntPtr hWnd);
     }

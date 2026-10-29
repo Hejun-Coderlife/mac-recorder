@@ -89,6 +89,8 @@ namespace ScreenRecorder
             if (Environment.GetEnvironmentVariable("AUTOTEST") != null) return SelfTest.Run();
             if (Environment.GetEnvironmentVariable("UPDATE_TEST") != null) return Updater.SelfTest();
             if (Environment.GetEnvironmentVariable("SHOTTEST") != null) return SelfTest.Shot();
+            if (Environment.GetEnvironmentVariable("HOTKEY_HOG") != null) return SelfTest.Hog();
+            if (Environment.GetEnvironmentVariable("HOTKEYTEST") != null) return SelfTest.Hotkeys();
             Shots.CleanTemp();
             Application.Run(new MainForm());
             return 0;

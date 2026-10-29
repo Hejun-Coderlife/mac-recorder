@@ -189,6 +189,18 @@ jobs:
           Write-Host "exit=$($p.ExitCode)`n$txt"
           if ($p.ExitCode -ne 0 -or -not $txt.StartsWith("OK")) { throw "screenshot self-test failed" }
 
+      - name: Self-test (shortcuts - taken one detected + notification, change by pressing keys, saved, new one opens the overlay)
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "shots"; New-Item -ItemType Directory -Force $out | Out-Null
+          foreach ($k in "SHOTTEST", "AUTOTEST") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $env:HOTKEYTEST = "1"; $env:SHOTOUT = $out
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          Remove-Item env:HOTKEYTEST
+          $txt = Get-Content "$env:TEMP\hotkey_test.txt" -Raw
+          Write-Host "exit=$($p.ExitCode)`n$txt"
+          Get-Content "$env:APPDATA\录屏\settings.txt" | Write-Host
+          if ($p.ExitCode -ne 0 -or -not $txt.StartsWith("OK")) { throw "shortcut self-test failed" }
+
       - name: Self-test (recording saved to Desktop + video thumbnail)
         run: |
           $out = Join-Path $env:RUNNER_TEMP "shots"; New-Item -ItemType Directory -Force $out | Out-Null
