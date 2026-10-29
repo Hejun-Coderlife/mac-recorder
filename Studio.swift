@@ -117,12 +117,106 @@ final class CursorTracker: @unchecked Sendable {
 // ---- 成片的样子 ----
 struct StudioStyle {
     var zoom = 2.0                 // 放大时镜头推近几倍
-    var padding = 0.06             // 画面四周留给背景的边（占画布短边）
-    var cursorScale = 1.5          // 鼠标画大一点
     var fps = 60
-    var motionBlur = false         // 镜头动时加运动模糊：实测会把字糊掉（清晰度只剩 2~3 成），默认关
     var bitsPerPixel = 0.12        // 码率：每像素每帧多少比特
-    var aspect: Double? = nil      // 画布宽高比；nil = 跟原画面一样
+}
+
+struct RGB: Codable, Equatable {
+    var r: Double, g: Double, b: Double
+    init(_ r: Double, _ g: Double, _ b: Double) { self.r = r; self.g = g; self.b = b }
+    var ci: CIColor { CIColor(red: r, green: g, blue: b) }
+    var color: Color { Color(red: r, green: g, blue: b) }
+    init(_ c: Color) {
+        let n = NSColor(c).usingColorSpace(.sRGB) ?? .white
+        r = Double(n.redComponent); g = Double(n.greenComponent); b = Double(n.blueComponent)
+    }
+}
+
+// 剪辑窗口「样式」面板里能调的东西：存在 project.json 里，也能存成预设。旧工程没有这些字段时用默认值
+struct StudioLook: Codable, Equatable {
+    enum Aspect: String, Codable, CaseIterable { case original, wide = "16:9", tall = "9:16", square = "1:1", classic = "4:3" }
+    enum Background: String, Codable, CaseIterable { case transparent, color, gradient, wallpaper, image }
+    enum Blur: String, Codable, CaseIterable { case off, light, medium, strong }
+
+    var aspect = Aspect.original
+    var background = Background.transparent
+    var color = RGB(0.96, 0.96, 0.97)
+    var gradient0 = RGB(0.36, 0.40, 0.96), gradient1 = RGB(0.86, 0.43, 0.78)
+    var gradientAngle = 135.0      // 度：0 = 从左到右，90 = 从下到上
+    var wallpaper = ""             // 系统桌面图片的路径
+    var imagePath = ""             // 自己选的图片
+    var imageBookmark: Data?       // 图片被挪动后靠它找回来
+    var padding = 0.06             // 画面四周留的边：占画布短边 0–20%
+    var cornerRadius = 14.0        // 圆角（点）0–40
+    var shadow = 0.45              // 阴影深浅 0–1
+    var shadowBlur = 0.33          // 阴影虚化 0–1
+    var cursorScale = 1.5          // 鼠标大小 0.5–3 倍
+    var smoothing = 0.7            // 鼠标顺滑程度：0 = 不平滑，1 = 最顺
+    var hideIdleCursor = false     // 鼠标不动几秒后自动隐藏
+    var hideAfter = 2.0            // 1–5 秒
+    var clickSound = false         // 点击时加一声轻响
+    var ripple = true              // 点击波纹
+    var blur = Blur.light          // 运动模糊：只在镜头快速移动时有
+
+    init() {}
+    enum CodingKeys: String, CodingKey {
+        case aspect, background, color, gradient0, gradient1, gradientAngle, wallpaper, imagePath, imageBookmark, padding, cornerRadius,
+             shadow, shadowBlur, cursorScale, smoothing, hideIdleCursor, hideAfter, clickSound, ripple, blur
+    }
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self), z = StudioLook()
+        func v<T: Decodable>(_ k: CodingKeys, _ def: T) -> T { (try? c.decodeIfPresent(T.self, forKey: k)) ?? def }
+        aspect = v(.aspect, z.aspect); background = v(.background, z.background); color = v(.color, z.color)
+        gradient0 = v(.gradient0, z.gradient0); gradient1 = v(.gradient1, z.gradient1); gradientAngle = v(.gradientAngle, z.gradientAngle)
+        wallpaper = v(.wallpaper, z.wallpaper); imagePath = v(.imagePath, z.imagePath); imageBookmark = v(.imageBookmark, z.imageBookmark)
+        padding = v(.padding, z.padding); cornerRadius = v(.cornerRadius, z.cornerRadius); shadow = v(.shadow, z.shadow)
+        shadowBlur = v(.shadowBlur, z.shadowBlur); cursorScale = v(.cursorScale, z.cursorScale); smoothing = v(.smoothing, z.smoothing)
+        hideIdleCursor = v(.hideIdleCursor, z.hideIdleCursor); hideAfter = v(.hideAfter, z.hideAfter); clickSound = v(.clickSound, z.clickSound)
+        ripple = v(.ripple, z.ripple); blur = v(.blur, z.blur)
+    }
+
+    var transparent: Bool { background == .transparent }
+    var ratio: Double? {
+        switch aspect { case .original: nil; case .wide: 16.0 / 9; case .tall: 9.0 / 16; case .square: 1; case .classic: 4.0 / 3 }
+    }
+    // 自己选的图片：路径找不到就用书签找
+    var imageURL: URL? {
+        if !imagePath.isEmpty, FileManager.default.fileExists(atPath: imagePath) { return URL(fileURLWithPath: imagePath) }
+        var stale = false
+        if let b = imageBookmark, let u = try? URL(resolvingBookmarkData: b, options: [.withoutUI], bookmarkDataIsStale: &stale) { return u }
+        return nil
+    }
+
+    // 渐变预设
+    static let gradients: [(zh: String, en: String, a: RGB, b: RGB)] = [
+        ("晨雾", "Dawn", RGB(0.36, 0.40, 0.96), RGB(0.86, 0.43, 0.78)),
+        ("海盐", "Sea Salt", RGB(0.56, 0.82, 0.98), RGB(0.36, 0.48, 0.94)),
+        ("蜜桃", "Peach", RGB(1.00, 0.76, 0.62), RGB(0.97, 0.46, 0.62)),
+        ("薄荷", "Mint", RGB(0.58, 0.91, 0.78), RGB(0.24, 0.60, 0.86)),
+        ("暖沙", "Sand", RGB(0.99, 0.90, 0.74), RGB(0.94, 0.66, 0.50)),
+        ("夜色", "Night", RGB(0.14, 0.15, 0.24), RGB(0.36, 0.28, 0.54)),
+    ]
+    // 系统自带的桌面图片（只读 /System/Library/Desktop Pictures 顶层的静态 .heic）
+    static let wallpapers: [URL] = {
+        let dir = URL(fileURLWithPath: "/System/Library/Desktop Pictures")
+        let all = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        return all.filter { ["heic", "jpg", "jpeg", "png"].contains($0.pathExtension.lowercased()) }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }()
+}
+
+// 预设：把一套样式存起来，下拉切换；「默认」用在新录的工程上
+struct StudioPreset: Codable, Equatable, Identifiable { var name: String; var look: StudioLook; var id: String { name } }
+enum PresetStore {
+    struct File: Codable { var presets: [StudioPreset] = []; var defaultName: String? }
+    static var url: URL {
+        let d = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(Bundle.main.bundleIdentifier ?? "Recorder")
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d.appendingPathComponent("presets.json")
+    }
+    static func load() -> File { (try? JSONDecoder().decode(File.self, from: Data(contentsOf: url))) ?? File() }
+    static func save(_ f: File) { let e = JSONEncoder(); e.outputFormatting = [.prettyPrinted, .sortedKeys]; try? e.encode(f).write(to: url, options: .atomic) }
+    static var defaultLook: StudioLook { let f = load(); return f.presets.first { $0.name == f.defaultName }?.look ?? StudioLook() }
 }
 
 // 画布和画面在画布上的位置（Core Image 坐标：左下角为原点、y 朝上）
@@ -133,9 +227,9 @@ struct StudioLayout {
     let card: CGRect               // 画面（圆角卡片）在画布上的位置
     let radius: Double
 
-    init(track: Track, style: StudioStyle) {
+    init(track: Track, look: StudioLook) {
         W = Double(track.width); H = Double(track.height)
-        let f = style.padding, a = style.aspect ?? W / H
+        let f = min(max(look.padding, 0), 0.2), a = look.ratio ?? W / H
         // 先按「画面 1:1 放得下、四周留 f 的边」算画布
         var cw: Double, ch: Double
         if a >= 1 { ch = max(H / (1 - 2 * f), W / (a - 2 * f)); cw = ch * a }
