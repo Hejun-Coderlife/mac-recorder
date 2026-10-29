@@ -137,6 +137,12 @@ final class Recorder: NSObject, ObservableObject {
     @Published var region: Region?        // 框选的区域（列表里 id = "r"）
     // Studio 效果：画面里不录鼠标、另记轨迹，录完自动放大点击处、平滑鼠标、加背景（见 Studio.swift）
     @Published var studio = UserDefaults.standard.bool(forKey: "studio") { didSet { UserDefaults.standard.set(studio, forKey: "studio") } }
+    // 开录倒计时：0 = 不倒计时，3 / 5 秒
+    @Published var countdown = UserDefaults.standard.integer(forKey: "countdown") { didSet { UserDefaults.standard.set(countdown, forKey: "countdown") } }
+    // 录整个屏幕 / 区域时不录桌面上的图标（只排除访达画图标的那层窗口，桌面图片照录）
+    @Published var hideDesktopIcons = UserDefaults.standard.bool(forKey: "hideDesktopIcons") { didSet { UserDefaults.standard.set(hideDesktopIcons, forKey: "hideDesktopIcons") } }
+    @Published var counting = false
+    private var countdownCancelled = false
     private var needsPermission = false
     @Published var lastFile: URL?
 
@@ -203,6 +209,7 @@ final class Recorder: NSObject, ObservableObject {
     }
 
     func toggle() {
+        if counting { countdownCancelled = true; return }   // 倒计时中再按一次 = 取消
         guard !busy else { return }
         Task { recording ? await stop() : await start() }
     }
@@ -216,6 +223,15 @@ final class Recorder: NSObject, ObservableObject {
             if !ok { say(L("没有麦克风权限：系统设置 → 隐私与安全性 → 麦克风，打开「\(appName)」",
                          "No microphone permission: System Settings → Privacy & Security → Microphone, turn on “\(appName)”"), error: true); return }
         }
+        // 倒计时（自测时不倒计时）：倒计时窗口是本程序的，录屏时本来就被排除在外；Esc 或再按一次快捷键取消
+        if countdown > 0 && ProcessInfo.processInfo.environment["AUTOTEST"] == nil {
+            var display: CGDirectDisplayID?
+            if sel == "r" { display = region?.display } else if sel.hasPrefix("d") { display = CGDirectDisplayID(sel.dropFirst()) }
+            countdownCancelled = false; counting = true
+            let go = await Countdown.run(seconds: countdown, display: display) { [weak self] in self?.countdownCancelled ?? true }
+            counting = false
+            if !go { say(L("已取消", "Cancelled")); return }
+        }
         // 画面范围
         let filter: SCContentFilter
         var crop: CGRect?
@@ -224,15 +240,13 @@ final class Recorder: NSObject, ObservableObject {
             guard let r = region, let d = c.displays.first(where: { $0.displayID == r.display }) else {
                 say(L("那块屏幕不见了，重新选一下区域", "That screen is gone, select the area again"), error: true); return
             }
-            let mine = c.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
-            filter = SCContentFilter(display: d, excludingApplications: mine, exceptingWindows: [])
+            filter = await displayFilter(d, content: c)
             crop = r.rect
             let a = r.rect.offsetBy(dx: CGDisplayBounds(r.display).minX, dy: CGDisplayBounds(r.display).minY)
             area = { a }
         } else if sel.hasPrefix("d"), let d = c.displays.first(where: { "d\($0.displayID)" == sel }) {
             // 整个屏幕：把本程序自己的窗口排除掉
-            let mine = c.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
-            filter = SCContentFilter(display: d, excludingApplications: mine, exceptingWindows: [])
+            filter = await displayFilter(d, content: c)
             let a = CGDisplayBounds(d.displayID)
             area = { a }
         } else if let w = c.windows.first(where: { "w\($0.windowID)" == sel }) {
@@ -313,6 +327,20 @@ final class Recorder: NSObject, ObservableObject {
         NSSound(named: "Tink")?.play()
     }
 
+    // 录整个屏幕 / 区域的范围：排除本程序；开了「隐藏桌面图标」再排除访达画桌面图标的那层窗口
+    private func displayFilter(_ d: SCDisplay, content c: SCShareableContent) async -> SCContentFilter {
+        let me = Bundle.main.bundleIdentifier
+        guard hideDesktopIcons, let all = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else {
+            return SCContentFilter(display: d, excludingApplications: c.applications.filter { $0.bundleIdentifier == me }, exceptingWindows: [])
+        }
+        let skip = all.windows.filter { $0.owningApplication?.bundleIdentifier == me || Self.isDesktopIcons($0) }
+        return SCContentFilter(display: d, excludingWindows: skip)
+    }
+    // 访达的桌面图标窗口：层级在普通窗口之下（桌面图片是程序坞 / 壁纸进程画的，不是访达，不会被排除）
+    nonisolated static func isDesktopIcons(_ w: SCWindow) -> Bool {
+        w.owningApplication?.bundleIdentifier == "com.apple.finder" && w.windowLayer < 0
+    }
+
     private func stop() async {
         busy = true; defer { busy = false }
         timer?.invalidate(); timer = nil
@@ -335,7 +363,7 @@ final class Recorder: NSObject, ObservableObject {
             say(L("正在生成 Studio 版…", "Rendering Studio version…"))
             do {
                 try tr.save(to: dir, start: w.startSeconds)
-                try await Studio.render(project: dir, to: out) { p in
+                lastFile = try await Studio.render(project: dir, to: out) { p in
                     Task { @MainActor [weak self] in self?.say(L("正在生成 Studio 版… \(Int(p * 100))%", "Rendering Studio version… \(Int(p * 100))%")) }
                 }
             } catch {
@@ -693,6 +721,15 @@ struct ContentView: View {
                 Toggle(L("Studio 效果", "Studio effects"), isOn: $rec.studio)
                     .help(L("自动放大点击和打字的地方、鼠标更顺滑、加背景和圆角阴影；录完自动生成", "Auto-zoom on clicks and typing, smooth cursor, background with rounded corners and shadow; rendered after recording"))
             }.disabled(rec.recording || rec.busy)
+            HStack(spacing: 22) {
+                Picker(L("倒计时", "Countdown"), selection: $rec.countdown) {
+                    Text(L("关", "Off")).tag(0)
+                    Text(L("3 秒", "3 s")).tag(3)
+                    Text(L("5 秒", "5 s")).tag(5)
+                }.pickerStyle(.segmented).frame(width: 220)
+                Toggle(L("隐藏桌面图标", "Hide desktop icons"), isOn: $rec.hideDesktopIcons)
+                    .help(L("录整个屏幕或区域时，画面里不出现桌面上的图标（桌面本身不动）", "Desktop icons are left out of full-screen and area recordings (your desktop isn't changed)"))
+            }.disabled(rec.recording || rec.busy)
 
             HStack(alignment: .center, spacing: 16) {
                 Button(action: rec.toggle) {
@@ -775,7 +812,7 @@ struct RecorderApp: App {
             ContentView(rec: rec)
                 .onAppear {
                     HotKey.action = { [weak rec] in rec?.toggle() }
-                    if Studio.selfTest() || Updater.selfTest() || StudioTests.planTest() || StudioTests.editorShot() { return }
+                    if Studio.selfTest() || Updater.selfTest() || StudioTests.planTest() || StudioTests.editorShot() || StudioTests.blurTest() || StudioTests.presetTest() || Countdown.selfTest() || Recorder.iconsTest() { return }
                     if ProcessInfo.processInfo.environment["AUTOTEST"] == nil {
                         Updater.shared.isBusy = { [weak rec] in rec.map { $0.recording || $0.busy } ?? false }
                         Updater.shared.start()
@@ -833,3 +870,83 @@ struct RecorderApp: App {
         }
     }
 }
+
+// ---- 开录倒计时：屏幕中间大号数字 3、2、1，一秒一个，淡入淡出 ----
+@MainActor
+enum Countdown {
+    final class Model: ObservableObject { @Published var n = 3; @Published var pulse = false }
+    struct V: View {
+        @ObservedObject var m: Model
+        var body: some View {
+            ZStack {
+                Circle().fill(.black.opacity(0.55)).frame(width: 190, height: 190)
+                Text("\(m.n)").font(.system(size: 110, weight: .semibold, design: .rounded)).monospacedDigit().foregroundStyle(.white)
+                    .scaleEffect(m.pulse ? 1 : 0.7).opacity(m.pulse ? 1 : 0)
+            }.frame(width: 220, height: 220)
+        }
+    }
+    static func panel(_ m: Model, on screen: NSScreen?) -> NSPanel {
+        let p = NSPanel(contentRect: CGRect(x: 0, y: 0, width: 220, height: 220), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        p.isOpaque = false; p.backgroundColor = .clear; p.hasShadow = false
+        p.level = .screenSaver; p.ignoresMouseEvents = true; p.sharingType = .none
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        p.contentView = NSHostingView(rootView: V(m: m))
+        if let f = (screen ?? NSScreen.main)?.frame { p.setFrameOrigin(CGPoint(x: f.midX - 110, y: f.midY - 110)) }
+        return p
+    }
+    // 倒计时走完返回 true；被取消（Esc / 再按快捷键）返回 false
+    static func run(seconds: Int, display: CGDirectDisplayID?, cancelled: @escaping () -> Bool) async -> Bool {
+        let screen = NSScreen.screens.first { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == display }
+        let m = Model(), p = panel(m, on: screen)
+        var esc = false
+        let mon = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in if e.keyCode == 53 { esc = true; return nil }; return e }
+        defer { if let mon { NSEvent.removeMonitor(mon) }; p.orderOut(nil) }
+        p.orderFrontRegardless()
+        for n in stride(from: seconds, through: 1, by: -1) {
+            m.n = n; m.pulse = false
+            withAnimation(.easeOut(duration: 0.25)) { m.pulse = true }
+            for k in 0..<20 {
+                if esc || cancelled() { return false }
+                if k == 15 { withAnimation(.easeIn(duration: 0.2)) { m.pulse = false } }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+        return !(esc || cancelled())
+    }
+    // 自测：COUNTDOWNSHOT=图片路径 → 不上屏，把倒计时画面画成图片后退出
+    static func selfTest() -> Bool {
+        guard let path = ProcessInfo.processInfo.environment["COUNTDOWNSHOT"] else { return false }
+        let m = Model(); m.n = 3; m.pulse = true
+        let v = NSHostingView(rootView: V(m: m).background(Color(white: 0.85)))
+        v.frame = CGRect(x: 0, y: 0, width: 220, height: 220)
+        let w = NSWindow(contentRect: v.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        w.contentView = v; w.setFrameOrigin(CGPoint(x: -20000, y: -20000)); w.orderBack(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            if let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) {
+                v.cacheDisplay(in: v.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+            }
+            print("COUNTDOWNSHOT OK", path); exit(0)
+        }
+        return true
+    }
+}
+
+extension Recorder {
+    // 自测：ICONSTEST=1 → 列出「隐藏桌面图标」会排除的窗口（访达的桌面层）后退出
+    static func iconsTest() -> Bool {
+        guard ProcessInfo.processInfo.environment["ICONSTEST"] != nil else { return false }
+        Task {
+            do {
+                let all = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                for w in all.windows where w.windowLayer < 0 || w.owningApplication?.bundleIdentifier == "com.apple.finder" {
+                    print(isDesktopIcons(w) ? "EXCLUDE" : "keep   ", "layer", w.windowLayer, w.owningApplication?.bundleIdentifier ?? "?", "\"\(w.title ?? "")\"", Int(w.frame.width), "x", Int(w.frame.height))
+                }
+                print("ICONSTEST OK")
+            } catch { print("ICONSTEST FAIL", error) }
+            exit(0)
+        }
+        return true
+    }
+}
+

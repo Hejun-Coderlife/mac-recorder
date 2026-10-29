@@ -45,14 +45,22 @@ Windows: download the single `ScreenRecorder.exe` from Releases and double-click
 - 全局快捷键 **⌥⌘R** 开始 / 停止（游戏全屏、点不到按钮时也能用）
 - 按屏幕原始像素录制，不缩放；颜色和苹果自带录屏一致
 - 文件保存在「影片 / 录屏」
+- **开录倒计时**：关 / 3 秒 / 5 秒，屏幕中间出大号数字（不会被录进去），倒计时中按 Esc 或再按一次快捷键取消
+- **隐藏桌面图标**：录整个屏幕或区域时，画面里不出现桌面上的图标（只是不录那一层，桌面本身不动）
 - **Studio 效果**（像 Screen Studio）：打开开关后正常录就行，录完打开**剪辑窗口**——点击、打字的地方已经自动排好推近段，推近时镜头跟着鼠标走，鼠标更顺滑、点击有波纹，背景透明（存成带透明通道的 .mov，放进剪辑软件可以叠在任意画面上），带圆角和阴影。原始素材留在「影片 / 录屏 / Studio 素材」
   - 时间轴上紫色块是推近段：拖两头改长短、拖中间挪位置，空白处双击（或点「推近」）在那里加一段，选中后按 Delete 删
   - 选中一段可以调放大倍数（1.2–4 倍），选「跟着鼠标」或「固定位置」（点「选位置」后在预览上点一下）
   - 两头的黄色竖条是修剪：拖进来就剪掉开头 / 结尾
   - 空格播放 / 暂停，← → 逐帧，⌘Z / ⌘⇧Z 撤销重做；改动自动保存，点「导出」出成片（可以反复导出）
   - 以前录的素材：主窗口「打开 Studio 素材…」选那个文件夹，接着改
+  - 右边「样式」面板：
+    - **画面比例**：原始 / 16:9 / 9:16（抖音竖屏）/ 1:1 / 4:3
+    - **背景**：透明 / 纯色 / 渐变（6 套配色，也能自己挑两色和角度）/ 系统壁纸 / 自己的图片；边距、圆角、阴影深浅和虚化。透明背景导出 .mov，其他背景导出普通 .mp4
+    - **鼠标**：大小（0.5–3 倍）、顺滑程度（可关）、不动几秒后自动隐藏、点击波纹、点击音效（导出时每次点击加一声轻响）
+    - **运动模糊**：关 / 轻 / 中 / 强。只在镜头快速推拉、移动的那几帧沿方向轻微拖影，镜头停着时一点不糊
+    - **预设**：把整套样式存起来、下拉切换；「设为默认」后新录的素材都用它（存在「~/资源库/Application Support/com.hejun.screenrecorder/presets.json」）
 
-  **Studio effects** (Screen Studio–style): record as usual, then a **Studio editor** opens with zooms already placed on clicks and typing (the camera follows the cursor while zoomed). On the timeline, drag a zoom's ends to resize, drag its middle to move, double-click empty space to add one, Delete to remove; set scale (1.2–4×) and Follow cursor / Fixed position (click the preview to set it). Yellow bars trim the start / end. Space plays, ← → steps a frame, ⌘Z / ⌘⇧Z undo / redo. Edits save automatically; Export writes a transparent-background HEVC-with-alpha .mov with rounded corners and shadow. Reopen old footage with “Open Studio Footage…”.
+  **Studio effects** (Screen Studio–style): record as usual, then a **Studio editor** opens with zooms already placed on clicks and typing (the camera follows the cursor while zoomed). On the timeline, drag a zoom's ends to resize, drag its middle to move, double-click empty space to add one, Delete to remove; set scale (1.2–4×) and Follow cursor / Fixed position (click the preview to set it). Yellow bars trim the start / end. Space plays, ← → steps a frame, ⌘Z / ⌘⇧Z undo / redo. Edits save automatically. The **Style** panel sets the aspect ratio (original / 16:9 / 9:16 / 1:1 / 4:3), background (none, color, gradient, macOS wallpaper or your own image) with padding, corner radius and shadow, cursor size / smoothing / hide-when-idle / click ripple / click sound, and shutter-style motion blur (only on fast camera moves, so text stays sharp when still); styles can be saved as presets and one set as the default for new recordings. Export writes a transparent HEVC-with-alpha .mov, or an H.264 .mp4 for any other background. Reopen old footage with “Open Studio Footage…”. The main window also has a recording countdown (off / 3 / 5 s, Esc cancels) and “Hide desktop icons”.
 
 ## 自己编译 Build from source
 

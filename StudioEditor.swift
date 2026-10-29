@@ -5,12 +5,16 @@ import AVFoundation
 import CoreImage
 import SwiftUI
 
-// 预览合成在后台线程读最新的镜头计划：改了段落就换一份
+// 预览合成在后台线程读最新的渲染器和镜头计划：改了段落 / 样式就换一份（两样一起换，免得对不上）
 final class PlanBox: @unchecked Sendable {
     private let lock = NSLock()
     private var value: [FramePlan] = []
+    private var r: StudioRenderer
+    init(_ r: StudioRenderer) { self.r = r }
     var plan: [FramePlan] { lock.lock(); defer { lock.unlock() }; return value }
-    func set(_ p: [FramePlan]) { lock.lock(); value = p; lock.unlock() }
+    var renderer: StudioRenderer { lock.lock(); defer { lock.unlock() }; return r }
+    var both: (StudioRenderer, [FramePlan]) { lock.lock(); defer { lock.unlock() }; return (r, value) }
+    func set(_ p: [FramePlan], renderer: StudioRenderer) { lock.lock(); value = p; r = renderer; lock.unlock() }
 }
 
 @MainActor
@@ -19,14 +23,17 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     // 自测：EDITORSHOT=图片路径 [EDITOR=素材夹] → 不抢前台，把剪辑窗口画成图片后退出
     static let testShot = ProcessInfo.processInfo.environment["EDITORSHOT"]
 
-    let dir: URL, out: URL
+    let dir: URL
     let track: Track
     let duration: Double
-    let renderer: StudioRenderer
+    let style = StudioStyle()
     let fps: Double
     let player: AVPlayer
     private let asset: AVURLAsset
-    private let box = PlanBox()
+    private let box: PlanBox
+    var renderer: StudioRenderer { box.renderer }
+    // 成片路径：透明背景 .mov，其他 .mp4
+    var out: URL { Studio.output(Recorder.folder.appendingPathComponent(dir.lastPathComponent + ".mov"), look: project.look) }
     private var window: NSWindow?
     private var timeObserver: Any?
     private var keyMonitor: Any?
@@ -42,6 +49,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     @Published var exported: URL?
     @Published var exportError: String?
     @Published var still: NSImage?             // 截图自测时用静态画面代替播放器
+    @Published var presets = PresetStore.load()
     private var undoStack: [StudioProject] = [], redoStack: [StudioProject] = []
     private var dragBase: StudioProject?
 
@@ -66,18 +74,17 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
 
     private init(dir: URL) async throws {
         self.dir = dir
-        out = Recorder.folder.appendingPathComponent(dir.lastPathComponent + ".mov")
         track = try JSONDecoder().decode(Track.self, from: Data(contentsOf: dir.appendingPathComponent("track.json")))
         asset = AVURLAsset(url: dir.appendingPathComponent("raw.mp4"))
         duration = try await asset.load(.duration).seconds
-        let st = StudioStyle()
-        fps = Double(st.fps)
-        renderer = StudioRenderer(project: dir, track: track, style: st)
-        project = StudioProject.load(dir, track: track, duration: duration)
+        fps = Double(StudioStyle().fps)
+        let p = StudioProject.load(dir, track: track, duration: duration)
+        project = p
+        box = PlanBox(StudioRenderer(project: dir, track: track, style: StudioStyle(), look: p.look))
         player = AVPlayer()
         super.init()
         if !FileManager.default.fileExists(atPath: StudioProject.url(dir).path) { try? project.save(dir) }
-        replan()
+        box.set(box.renderer.plan(project, duration: duration), renderer: box.renderer)
         let item = AVPlayerItem(asset: asset)
         item.videoComposition = makeComposition()
         item.forwardPlaybackEndTime = CMTime(seconds: project.trimEnd, preferredTimescale: 600)
@@ -96,11 +103,11 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
 
     // ---- 窗口 ----
     private func show() {
-        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1120, height: 780), styleMask: [.titled, .closable, .miniaturizable, .resizable],
+        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1280, height: 820), styleMask: [.titled, .closable, .miniaturizable, .resizable],
                          backing: .buffered, defer: false)
         w.title = "Studio · " + dir.lastPathComponent
         w.isReleasedWhenClosed = false
-        w.contentMinSize = CGSize(width: 820, height: 600)
+        w.contentMinSize = CGSize(width: 1000, height: 640)
         w.contentView = NSHostingView(rootView: EditorView(ed: self))
         w.delegate = self
         window = w
@@ -155,15 +162,16 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
 
     // ---- 预览 ----
     private func makeComposition() -> AVVideoComposition {
-        let r = renderer, box = self.box, fps = self.fps
-        let lay = r.lay, k = min(1, 1600 / max(lay.cw, lay.ch))          // 预览缩小一点，播放流畅
+        let box = self.box, fps = self.fps
+        let lay = box.renderer.lay, k = min(1, 1600 / max(lay.cw, lay.ch))          // 预览缩小一点，播放流畅
         let size = CGSize(width: (lay.cw * k / 2).rounded() * 2, height: (lay.ch * k / 2).rounded() * 2)
         let bg = CIImage(color: CIColor(red: 0.86, green: 0.86, blue: 0.88)).cropped(to: CGRect(origin: .zero, size: size))   // 透明的地方衬一层浅灰
         let c = AVMutableVideoComposition(asset: asset) { req in
-            let plan = box.plan
+            let (r, plan) = box.both
             guard !plan.isEmpty else { req.finish(with: req.sourceImage, context: nil); return }
             let i = min(max(Int((req.compositionTime.seconds * fps).rounded()), 0), plan.count - 1)
-            let img = r.frame(i, plan: plan, source: req.sourceImage).transformed(by: CGAffineTransform(scaleX: k, y: k))
+            let kk = min(1, 1600 / max(r.lay.cw, r.lay.ch))   // 样式刚改、合成还没换时按新画布缩放
+            let img = r.frame(i, plan: plan, source: req.sourceImage).transformed(by: CGAffineTransform(scaleX: kk, y: kk))
             req.finish(with: img.composited(over: bg).cropped(to: bg.extent), context: nil)
         }
         c.renderSize = size
@@ -172,15 +180,17 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     private func replan() {
-        box.set(renderer.plan(project, duration: duration))
         player.currentItem?.forwardPlaybackEndTime = CMTime(seconds: project.trimEnd, preferredTimescale: 600)
-        // 拖的时候别每次都重建：一帧里最多刷新一次
+        // 拖的时候别每次都重建：每秒最多刷新 20 次。样式变了要换渲染器（画布、背景都可能变）
         guard !refreshPending else { return }
         refreshPending = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 20) { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.refreshPending = false
+                var r = self.box.renderer
+                if r.look != self.project.look { r = StudioRenderer(project: self.dir, track: self.track, style: self.style, look: self.project.look) }
+                self.box.set(r.plan(self.project, duration: self.duration), renderer: r)
                 self.player.currentItem?.videoComposition = self.makeComposition()
                 if !self.playing { self.seek(self.time) }
                 if self.still != nil { Task { await self.renderStill(at: self.time) } }
@@ -193,9 +203,9 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         let g = AVAssetImageGenerator(asset: asset)
         g.requestedTimeToleranceBefore = .zero; g.requestedTimeToleranceAfter = .zero
         guard let (cg, _) = try? await g.image(at: CMTime(seconds: t, preferredTimescale: 600)) else { return }
-        let plan = box.plan, i = min(max(Int((t * fps).rounded()), 0), plan.count - 1)
-        let lay = renderer.lay
-        let img = renderer.frame(i, plan: plan, source: CIImage(cgImage: cg))
+        let (r, plan) = box.both, i = min(max(Int((t * fps).rounded()), 0), plan.count - 1)
+        let lay = r.lay
+        let img = r.frame(i, plan: plan, source: CIImage(cgImage: cg))
             .composited(over: CIImage(color: CIColor(red: 0.86, green: 0.86, blue: 0.88)).cropped(to: lay.canvas))
         let ctx = CIContext()
         if let out = ctx.createCGImage(img, from: lay.canvas) { still = NSImage(cgImage: out, size: CGSize(width: lay.cw, height: lay.ch)) }
@@ -277,12 +287,48 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     // 在预览上点一下：设成选中那段的固定位置。p = 预览画面里的比例（左上为原点）
     func pick(_ p: CGPoint) {
         guard picking, let i = index(selected) else { return }
-        let lay = renderer.lay, plan = box.plan
+        let (r, plan) = box.both, lay = r.lay
         let fi = min(max(Int((time * fps).rounded()), 0), plan.count - 1)
-        let src = renderer.sourcePoint(canvas: CGPoint(x: p.x * lay.cw, y: (1 - p.y) * lay.ch), frame: plan[fi])
+        let src = r.sourcePoint(canvas: CGPoint(x: p.x * lay.cw, y: (1 - p.y) * lay.ch), frame: plan[fi])
         edit { $0.segments[i].mode = .fixed; $0.segments[i].fixedX = src.x; $0.segments[i].fixedY = src.y }
         picking = false
     }
+
+    // ---- 样式（都能撤销；滑块拖一次算一步） ----
+    func look<T: Equatable>(_ kp: WritableKeyPath<StudioLook, T>) -> Binding<T> {
+        Binding(get: { self.project.look[keyPath: kp] }, set: { v in self.edit { $0.look[keyPath: kp] = v } })
+    }
+    func lookSlider(_ kp: WritableKeyPath<StudioLook, Double>) -> Binding<Double> {
+        Binding(get: { self.project.look[keyPath: kp] }, set: { v in self.dragBegin(); self.dragUpdate { $0.look[keyPath: kp] = v } })
+    }
+    func chooseImage() {
+        let p = NSOpenPanel()
+        p.allowedContentTypes = [.image]; p.allowsMultipleSelection = false
+        p.message = L("选一张图片当背景", "Choose an image for the background")
+        guard p.runModal() == .OK, let u = p.url else { return }
+        let bm = try? u.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+        edit { $0.look.background = .image; $0.look.imagePath = u.path; $0.look.imageBookmark = bm }
+    }
+
+    // ---- 预设：存在 ~/Library/Application Support/<bundle id>/presets.json ----
+    func applyPreset(_ name: String) {
+        guard let pr = presets.presets.first(where: { $0.name == name }) else { return }
+        edit { $0.look = pr.look }
+    }
+    func savePreset(_ name: String) {
+        let n = name.trimmingCharacters(in: .whitespaces)
+        guard !n.isEmpty else { return }
+        if let i = presets.presets.firstIndex(where: { $0.name == n }) { presets.presets[i].look = project.look }
+        else { presets.presets.append(StudioPreset(name: n, look: project.look)) }
+        PresetStore.save(presets)
+    }
+    func deletePreset(_ name: String) {
+        presets.presets.removeAll { $0.name == name }
+        if presets.defaultName == name { presets.defaultName = nil }
+        PresetStore.save(presets)
+    }
+    func setDefaultPreset(_ name: String?) { presets.defaultName = name; PresetStore.save(presets) }
+    var currentPresetName: String? { presets.presets.first { $0.look == project.look }?.name }
 
     // ---- 存盘、导出 ----
     private func scheduleSave() {
@@ -300,10 +346,9 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         let dir = self.dir, out = self.out, p = project
         Task {
             do {
-                try await Studio.render(project: dir, to: out, edits: p) { v in
+                exported = try await Studio.render(project: dir, to: out, edits: p) { v in
                     Task { @MainActor [weak self] in self?.exportProgress = v }
                 }
-                exported = out
             } catch {
                 exportError = L("导出失败：", "Export failed: ") + error.localizedDescription
             }
@@ -320,15 +365,21 @@ struct EditorView: View {
         VStack(spacing: 0) {
             toolbar.padding(.horizontal, 14).padding(.vertical, 10)
             Divider()
-            preview.padding(14)
-            Divider()
-            VStack(alignment: .leading, spacing: 10) {
-                inspector.frame(height: 30)
-                TimelineStrip(ed: ed).frame(height: 120)
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    preview.padding(14)
+                    Divider()
+                    VStack(alignment: .leading, spacing: 10) {
+                        inspector.frame(height: 30)
+                        TimelineStrip(ed: ed).frame(height: 120)
+                    }
+                    .padding(14)
+                }
+                Divider()
+                StylePanel(ed: ed).frame(width: 300)
             }
-            .padding(14)
         }
-        .frame(minWidth: 820, minHeight: 600)
+        .frame(minWidth: 1000, minHeight: 640)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
@@ -497,6 +548,7 @@ struct TimelineStrip: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Rectangle().fill(Color.secondary.opacity(0.5)).frame(width: 1, height: 6)
                     Text("\(Int(t) / 60):\(String(format: "%02d", Int(t) % 60))").font(.system(size: 9).monospacedDigit()).foregroundStyle(.secondary)
+                        .offset(x: k == 0 ? 7 : 0)   // 0:00 别被左边的修剪竖条挡住
                 }.offset(x: x(t))
             }
         }.frame(width: w, height: rulerH, alignment: .topLeading)
@@ -582,6 +634,202 @@ struct SegmentBlock: View {
     }
 }
 
+// ---- 右边的「样式」面板：预设、画面比例、背景、画面、鼠标、运动模糊 ----
+struct StylePanel: View {
+    @ObservedObject var ed: StudioEditor
+    @State private var naming = false
+    @State private var newName = ""
+    @State private var open: Set<String> = ["preset", "aspect", "bg", "frame", "cursor", "blur"]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                section("preset", L("预设", "Presets")) { presetsBox }
+                section("aspect", L("画面比例", "Aspect Ratio")) { aspectBox }
+                section("bg", L("背景", "Background")) { backgroundBox }
+                section("frame", L("画面", "Frame")) { frameBox }
+                section("cursor", L("鼠标", "Cursor")) { cursorBox }
+                section("blur", L("运动模糊", "Motion Blur")) { blurBox }
+            }
+            .frame(width: 270, alignment: .leading)   // 面板 300 宽，左右各留 15
+            .padding(.horizontal, 15).padding(.vertical, 12)
+        }
+        .alert(L("存成预设", "Save as Preset"), isPresented: $naming) {
+            TextField(L("名字", "Name"), text: $newName)
+            Button(L("存", "Save")) { ed.savePreset(newName) }
+            Button(L("取消", "Cancel"), role: .cancel) {}
+        } message: { Text(L("同名的会被覆盖", "A preset with the same name is replaced")) }
+    }
+
+    private func section<C: View>(_ id: String, _ title: String, @ViewBuilder _ content: () -> C) -> some View {
+        let body = content()
+        return DisclosureGroup(isExpanded: Binding(get: { open.contains(id) }, set: { if $0 { open.insert(id) } else { open.remove(id) } })) {
+            VStack(alignment: .leading, spacing: 10) { body }.padding(.top, 8).padding(.bottom, 10)
+        } label: {
+            Text(title).font(.callout.weight(.semibold))
+        }
+    }
+
+    // 一行：名字 + 滑块 + 数值
+    private func slider(_ title: String, _ kp: WritableKeyPath<StudioLook, Double>, _ range: ClosedRange<Double>, step: Double? = nil, _ fmt: @escaping (Double) -> String) -> some View {
+        HStack(spacing: 8) {
+            Text(title).font(.callout).frame(width: 62, alignment: .leading)
+            Slider(value: ed.lookSlider(kp), in: range, onEditingChanged: { if !$0 { ed.dragEnd() } }).controlSize(.small)
+            Text(fmt(ed.project.look[keyPath: kp])).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
+        }
+    }
+
+    private var presetsBox: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("", selection: Binding(get: { ed.currentPresetName ?? "" }, set: { if !$0.isEmpty { ed.applyPreset($0) } })) {
+                Text(L("（未保存的样式）", "(Unsaved style)")).tag("")
+                ForEach(ed.presets.presets) { p in
+                    Text(p.name + (ed.presets.defaultName == p.name ? L("（默认）", " (Default)") : "")).tag(p.name)
+                }
+            }.labelsHidden()
+            HStack(spacing: 8) {
+                Button(L("存成预设…", "Save…")) { newName = ed.currentPresetName ?? ""; naming = true }
+                if let n = ed.currentPresetName {
+                    Button(ed.presets.defaultName == n ? L("取消默认", "Unset Default") : L("设为默认", "Make Default")) {
+                        ed.setDefaultPreset(ed.presets.defaultName == n ? nil : n)
+                    }
+                    Button(role: .destructive) { ed.deletePreset(n) } label: { Image(systemName: "trash") }.help(L("删除这个预设", "Delete this preset"))
+                }
+            }.controlSize(.small)
+            Text(L("「默认」预设会用在以后新录的 Studio 素材上", "The default preset is used for new Studio recordings"))
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var aspectBox: some View {
+        Picker("", selection: ed.look(\.aspect)) {
+            Text(L("原始", "Original")).tag(StudioLook.Aspect.original)
+            Text("16:9").tag(StudioLook.Aspect.wide)
+            Text("9:16").tag(StudioLook.Aspect.tall)
+            Text("1:1").tag(StudioLook.Aspect.square)
+            Text("4:3").tag(StudioLook.Aspect.classic)
+        }.pickerStyle(.segmented).labelsHidden()
+    }
+
+    private var backgroundBox: some View {
+        let look = ed.project.look
+        return VStack(alignment: .leading, spacing: 10) {
+            Picker("", selection: ed.look(\.background)) {
+                Text(L("透明", "None")).tag(StudioLook.Background.transparent)
+                Text(L("纯色", "Color")).tag(StudioLook.Background.color)
+                Text(L("渐变", "Gradient")).tag(StudioLook.Background.gradient)
+                Text(L("壁纸", "Wallpaper")).tag(StudioLook.Background.wallpaper)
+                Text(L("图片", "Image")).tag(StudioLook.Background.image)
+            }.pickerStyle(.segmented).labelsHidden()
+            switch look.background {
+            case .transparent:
+                Text(L("透明背景导出成 .mov（HEVC 带透明），放进剪辑软件可以叠在别的画面上；其他背景导出成 .mp4",
+                       "Transparent exports as .mov (HEVC with alpha) for overlaying in an editor; other backgrounds export as .mp4"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            case .color:
+                ColorPicker(L("颜色", "Color"), selection: Binding(get: { look.color.color }, set: { c in ed.edit { $0.look.color = RGB(c) } }), supportsOpacity: false)
+            case .gradient:
+                LazyVGrid(columns: Array(repeating: GridItem(.fixed(38), spacing: 6), count: 6), spacing: 6) {
+                    ForEach(Array(StudioLook.gradients.enumerated()), id: \.offset) { _, g in
+                        let on = look.gradient0 == g.a && look.gradient1 == g.b
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(LinearGradient(colors: [g.a.color, g.b.color], startPoint: .bottomLeading, endPoint: .topTrailing))
+                            .frame(width: 38, height: 26)
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(on ? Color.accentColor : Color.primary.opacity(0.15), lineWidth: on ? 2 : 1))
+                            .onTapGesture { ed.edit { $0.look.gradient0 = g.a; $0.look.gradient1 = g.b } }
+                            .help(L(g.zh, g.en))
+                    }
+                }
+                HStack(spacing: 14) {
+                    ColorPicker(L("起点", "From"), selection: Binding(get: { look.gradient0.color }, set: { c in ed.edit { $0.look.gradient0 = RGB(c) } }), supportsOpacity: false)
+                    ColorPicker(L("终点", "To"), selection: Binding(get: { look.gradient1.color }, set: { c in ed.edit { $0.look.gradient1 = RGB(c) } }), supportsOpacity: false)
+                }.font(.callout)
+                slider(L("角度", "Angle"), \.gradientAngle, 0...360) { "\(Int($0))°" }
+            case .wallpaper:
+                LazyVGrid(columns: Array(repeating: GridItem(.fixed(84), spacing: 6), count: 3), spacing: 6) {
+                    ForEach(StudioLook.wallpapers, id: \.path) { u in
+                        let on = look.wallpaper == u.path
+                        WallpaperThumb(url: u)
+                            .frame(width: 84, height: 52).clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(on ? Color.accentColor : Color.primary.opacity(0.15), lineWidth: on ? 2 : 1))
+                            .onTapGesture { ed.edit { $0.look.wallpaper = u.path } }
+                            .help(u.deletingPathExtension().lastPathComponent)
+                    }
+                }
+            case .image:
+                HStack(spacing: 8) {
+                    Button(L("选图片…", "Choose…")) { ed.chooseImage() }
+                    Text(look.imageURL?.lastPathComponent ?? L("还没选", "None yet")).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
+            }
+        }
+    }
+
+    private var frameBox: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            slider(L("边距", "Padding"), \.padding, 0...0.2) { "\(Int(($0 * 100).rounded()))%" }
+            slider(L("圆角", "Corners"), \.cornerRadius, 0...40) { "\(Int($0.rounded()))" }
+            slider(L("阴影", "Shadow"), \.shadow, 0...1) { "\(Int(($0 * 100).rounded()))%" }
+            slider(L("阴影虚化", "Softness"), \.shadowBlur, 0...1) { "\(Int(($0 * 100).rounded()))%" }
+        }
+    }
+
+    private var cursorBox: some View {
+        let look = ed.project.look
+        return VStack(alignment: .leading, spacing: 8) {
+            slider(L("大小", "Size"), \.cursorScale, 0.5...3) { String(format: "%.1f×", $0) }
+            slider(L("顺滑", "Smoothing"), \.smoothing, 0...1) { $0 < 0.01 ? L("不平滑", "Off") : "\(Int(($0 * 100).rounded()))%" }
+            Toggle(L("不动时自动隐藏", "Hide when idle"), isOn: ed.look(\.hideIdleCursor))
+            if look.hideIdleCursor {
+                slider(L("隐藏前", "After"), \.hideAfter, 1...5) { String(format: L("%.1f 秒", "%.1fs"), $0) }
+            }
+            Toggle(L("点击波纹", "Click ripple"), isOn: ed.look(\.ripple))
+            Toggle(L("点击音效", "Click sound"), isOn: ed.look(\.clickSound))
+                .help(L("导出时在每次点击处加一声轻响（预览里听不到）", "Adds a soft click sound at each click when exporting (not in the preview)"))
+        }.toggleStyle(.checkbox).font(.callout)
+    }
+
+    private var blurBox: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("", selection: ed.look(\.blur)) {
+                Text(L("关", "Off")).tag(StudioLook.Blur.off)
+                Text(L("轻", "Light")).tag(StudioLook.Blur.light)
+                Text(L("中", "Medium")).tag(StudioLook.Blur.medium)
+                Text(L("强", "Strong")).tag(StudioLook.Blur.strong)
+            }.pickerStyle(.segmented).labelsHidden()
+            Text(L("只在镜头快速推拉、移动时有一点拖影，镜头停着时字是清楚的",
+                   "Only adds a little streak while the camera moves fast; text stays sharp when it's still"))
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+// 壁纸缩略图：系统有现成的小图就用，没有就从原图快速生成，存起来
+struct WallpaperThumb: View {
+    let url: URL
+    @State private var img: NSImage?
+    private static var cache: [URL: NSImage] = [:]
+    var body: some View {
+        ZStack {
+            Color.secondary.opacity(0.15)
+            if let img { Image(nsImage: img).resizable().aspectRatio(contentMode: .fill) }
+        }
+        .task(id: url) {
+            if let c = Self.cache[url] { img = c; return }
+            let u = url
+            let made = await Task.detached { () -> NSImage? in
+                let thumb = u.deletingLastPathComponent().appendingPathComponent(".thumbnails").appendingPathComponent(u.lastPathComponent)
+                let src = FileManager.default.fileExists(atPath: thumb.path) ? thumb : u
+                guard let s = CGImageSourceCreateWithURL(src as CFURL, nil),
+                      let cg = CGImageSourceCreateThumbnailAtIndex(s, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 240] as CFDictionary)
+                else { return nil }
+                return NSImage(cgImage: cg, size: CGSize(width: cg.width, height: cg.height))
+            }.value
+            if let made { Self.cache[url] = made; img = made }
+        }
+    }
+}
+
 // ---- 自测 ----
 enum StudioTests {
     // PLANTEST=素材夹 → 给一份改过的工程，看镜头计划对不对（段内放大倍数、段外拉远、固定位置、修剪帧数），打印 PASS/FAIL 后退出
@@ -594,7 +842,7 @@ enum StudioTests {
                 let dir = URL(fileURLWithPath: path)
                 let track = try JSONDecoder().decode(Track.self, from: Data(contentsOf: dir.appendingPathComponent("track.json")))
                 let duration = try await AVURLAsset(url: dir.appendingPathComponent("raw.mp4")).load(.duration).seconds
-                let st = StudioStyle(), r = StudioRenderer(project: dir, track: track, style: st), lay = r.lay
+                let st = StudioStyle(), r = StudioRenderer(project: dir, track: track, style: st, look: StudioLook()), lay = r.lay
                 let auto = StudioProject.load(dir, track: track, duration: duration)
                 check("auto segments", !auto.segments.isEmpty, "\(auto.segments.count) segs")
                 let p = StudioProject(segments: [
@@ -625,9 +873,106 @@ enum StudioTests {
         return true
     }
 
+    // BLURTEST=素材夹 [BLURTEST_OUT=目录] → 同一帧分别不开 / 开「强」运动模糊画出来比：镜头不动的帧必须逐像素一样，快速推拉的帧要有拖影
+    @MainActor static func blurTest() -> Bool {
+        guard let path = ProcessInfo.processInfo.environment["BLURTEST"] else { return false }
+        let outDir = ProcessInfo.processInfo.environment["BLURTEST_OUT"] ?? "/tmp"
+        Task { @MainActor in
+            var ok = true
+            do {
+                let dir = URL(fileURLWithPath: path)
+                let track = try JSONDecoder().decode(Track.self, from: Data(contentsOf: dir.appendingPathComponent("track.json")))
+                let asset = AVURLAsset(url: dir.appendingPathComponent("raw.mp4"))
+                let duration = try await asset.load(.duration).seconds
+                var look = StudioLook(); look.background = .color
+                let proj = StudioProject(segments: StudioPlan.autoSegments(track, duration: duration), trimStart: 0, trimEnd: duration, look: look)
+                look.blur = .off; let r0 = StudioRenderer(project: dir, track: track, style: StudioStyle(), look: look)
+                look.blur = .strong; let r1 = StudioRenderer(project: dir, track: track, style: StudioStyle(), look: look)
+                let plan = r0.plan(proj, duration: duration)
+                // 找一帧镜头最快的、一帧镜头完全不动的
+                var fast = 1, fastV = 0.0, still = -1
+                for i in 1..<(plan.count - 1) {
+                    let a = plan[i - 1], b = plan[i + 1], v = hypot(b.sx - a.sx, b.sy - a.sy) + abs(log(b.z / a.z)) * 2000
+                    if v > fastV { fastV = v; fast = i }
+                    if still < 0, v < 1e-6, plan[i].z > 1.5 { still = i }
+                }
+                let g = AVAssetImageGenerator(asset: asset); g.requestedTimeToleranceBefore = .zero; g.requestedTimeToleranceAfter = .zero
+                func bitmap(_ r: StudioRenderer, _ i: Int) async throws -> (Data, CGImage) {
+                    let (cg, _) = try await g.image(at: CMTime(value: CMTimeValue(i), timescale: 60))
+                    let img = r.frame(i, plan: plan, source: CIImage(cgImage: cg))
+                    let out = r.ctx.createCGImage(img, from: r.lay.canvas, format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB))!
+                    return (out.dataProvider!.data! as Data, out)
+                }
+                func diff(_ a: Data, _ b: Data) -> (max: Int, mean: Double) {
+                    var m = 0, sum = 0
+                    a.withUnsafeBytes { pa in b.withUnsafeBytes { pb in
+                        let x = pa.bindMemory(to: UInt8.self), y = pb.bindMemory(to: UInt8.self)
+                        for k in stride(from: 0, to: min(x.count, y.count), by: 1) { let d = abs(Int(x[k]) - Int(y[k])); m = max(m, d); sum += d }
+                    } }
+                    return (m, Double(sum) / Double(max(1, a.count)))
+                }
+                print("fast frame", fast, String(format: "t=%.2f", Double(fast) / 60), "subsamples", r1.shutter(fast, plan: plan)?.count ?? 0, "still frame", still)
+                if still >= 0 {
+                    let (a, _) = try await bitmap(r0, still), (b, _) = try await bitmap(r1, still)
+                    let d = diff(a, b); print(d.max == 0 ? "PASS" : "FAIL", "still frame identical", "maxdiff", d.max); ok = ok && d.max == 0
+                } else { print("FAIL no still zoomed frame"); ok = false }
+                let (a, ca) = try await bitmap(r0, fast), (b, cb) = try await bitmap(r1, fast)
+                let d = diff(a, b); print(d.mean > 0.5 ? "PASS" : "FAIL", "fast frame blurred", String(format: "mean diff %.2f max %d", d.mean, d.max)); ok = ok && d.mean > 0.5
+                for (n, c) in [("blur-off", ca), ("blur-strong", cb)] {
+                    let rep = NSBitmapImageRep(cgImage: c)
+                    try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: outDir).appendingPathComponent("\(n).png"))
+                }
+            } catch { print("FAIL", error); ok = false }
+            print(ok ? "BLURTEST OK" : "BLURTEST FAIL")
+            exit(ok ? 0 : 1)
+        }
+        return true
+    }
+
+    // PRESETTEST=素材夹（没有 project.json 的副本）→ 存预设、设默认、新工程用上默认、删掉；跑完恢复原来的 presets.json
+    @MainActor static func presetTest() -> Bool {
+        guard let path = ProcessInfo.processInfo.environment["PRESETTEST"] else { return false }
+        Task { @MainActor in
+            var ok = true
+            func check(_ n: String, _ c: Bool) { print(c ? "PASS" : "FAIL", n); ok = ok && c }
+            let backup = try? Data(contentsOf: PresetStore.url)
+            func restore() { if let backup { try? backup.write(to: PresetStore.url) } else { try? FileManager.default.removeItem(at: PresetStore.url) } }
+            var look = StudioLook(); look.aspect = .tall; look.background = .gradient; look.cursorScale = 2.5; look.blur = .medium
+            var f = PresetStore.File(); f.presets = [StudioPreset(name: "竖屏测试", look: look)]; f.defaultName = "竖屏测试"
+            PresetStore.save(f)
+            let back = PresetStore.load()
+            check("saved and read back", back.presets.first?.look == look && back.defaultName == "竖屏测试")
+            do {
+                let dir = URL(fileURLWithPath: path)
+                let track = try JSONDecoder().decode(Track.self, from: Data(contentsOf: dir.appendingPathComponent("track.json")))
+                try? FileManager.default.removeItem(at: StudioProject.url(dir))
+                let p = StudioProject.load(dir, track: track, duration: 15)
+                check("new project uses default preset", p.look == look)
+                // 旧工程（没有 look 字段）读进来用默认样式、推近段不丢
+                try #"{"segments":[{"id":"8C2E0F2A-0000-4000-8000-000000000001","start":1,"end":3,"zoom":2.5,"mode":"follow","fixedX":0.5,"fixedY":0.5}],"trimStart":0,"trimEnd":15}"#
+                    .data(using: .utf8)!.write(to: StudioProject.url(dir))
+                let old = StudioProject.load(dir, track: track, duration: 15)
+                check("old project.json still loads", old.segments.count == 1 && old.segments[0].zoom == 2.5 && old.look == StudioLook())
+                try? FileManager.default.removeItem(at: StudioProject.url(dir))
+            } catch { check("load \(error)", false) }
+            f.presets = []; f.defaultName = nil; PresetStore.save(f)
+            check("deleted", PresetStore.load().presets.isEmpty && PresetStore.defaultLook == StudioLook())
+            restore()   // exit 不会跑 defer，所以在这里恢复
+            print(ok ? "PRESETTEST OK" : "PRESETTEST FAIL")
+            exit(ok ? 0 : 1)
+        }
+        return true
+    }
+
     // EDITORSHOT=图片路径 EDITOR=素材夹 → 打开剪辑窗口（不抢前台）画成图片
     @MainActor static func editorShot() -> Bool {
         guard StudioEditor.testShot != nil, let p = ProcessInfo.processInfo.environment["EDITOR"] else { return false }
+        // EDITOR_APPEARANCE=dark|light 强制深色 / 浅色
+        switch ProcessInfo.processInfo.environment["EDITOR_APPEARANCE"] {
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        default: break
+        }
         Task { await StudioEditor.open(URL(fileURLWithPath: p)) }
         return true
     }

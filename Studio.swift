@@ -5,6 +5,7 @@
 import AppKit
 import AVFoundation
 import CoreImage
+import SwiftUI
 import VideoToolbox
 
 // ---- 轨迹文件 track.json ----
@@ -241,7 +242,7 @@ struct StudioLayout {
         let pad = f * min(cw, ch)
         s = min((cw - 2 * pad) / W, (ch - 2 * pad) / H)
         card = CGRect(x: ((cw - W * s) / 2).rounded(), y: ((ch - H * s) / 2).rounded(), width: W * s, height: H * s)
-        radius = max(8, card.width * 0.011)
+        radius = min(max(0, look.cornerRadius), 40) * track.pixelsPerPoint * s
     }
     var canvas: CGRect { CGRect(x: 0, y: 0, width: cw, height: ch) }
     var toScene: CGAffineTransform { CGAffineTransform(a: s, b: 0, c: 0, d: s, tx: card.minX, ty: card.minY) }
@@ -265,6 +266,7 @@ struct FramePlan {
     var mx = 0.0, my = 0.0         // 鼠标在原画面上的位置（y 朝上）
     var shape = -1                 // 指针图案；-1 = 不画
     var press = 1.0                // 点击时指针缩一下
+    var alpha = 1.0                // 鼠标不动自动隐藏时淡出
 }
 
 // ---- 推近段（工程文件 project.json，存在素材夹里）：第一次按点击 / 打字 / 拖动自动生成，剪辑窗口里可以改 ----
@@ -282,6 +284,19 @@ struct StudioProject: Codable, Equatable {
     var segments: [ZoomSegment] = []
     var trimStart = 0.0
     var trimEnd = 0.0
+    var look = StudioLook()
+
+    init(segments: [ZoomSegment] = [], trimStart: Double = 0, trimEnd: Double = 0, look: StudioLook = StudioLook()) {
+        self.segments = segments; self.trimStart = trimStart; self.trimEnd = trimEnd; self.look = look
+    }
+    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look }
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        segments = try c.decodeIfPresent([ZoomSegment].self, forKey: .segments) ?? []
+        trimStart = try c.decodeIfPresent(Double.self, forKey: .trimStart) ?? 0
+        trimEnd = try c.decodeIfPresent(Double.self, forKey: .trimEnd) ?? 0
+        look = (try? c.decodeIfPresent(StudioLook.self, forKey: .look)) ?? StudioLook()   // 旧工程没有样式：用默认
+    }
 
     static func url(_ dir: URL) -> URL { dir.appendingPathComponent("project.json") }
     // 有 project.json 就读，没有就按自动规则生成一份
@@ -290,9 +305,16 @@ struct StudioProject: Codable, Equatable {
             p.trimStart = min(max(0, p.trimStart), duration)
             p.trimEnd = p.trimEnd > p.trimStart ? min(p.trimEnd, duration) : duration
             p.segments.sort { $0.start < $1.start }
+            // 只写了样式、没写推近段的工程（自测用）：推近段按自动规则补上
+            struct Keys: Decodable { var segments: [ZoomSegment]?; var trimEnd: Double? }
+            if let k = try? JSONDecoder().decode(Keys.self, from: d) {
+                if k.segments == nil { p.segments = StudioPlan.autoSegments(track, duration: duration, zoom: zoom) }
+                if k.trimEnd == nil { p.trimEnd = duration }
+            }
             return p
         }
-        return StudioProject(segments: StudioPlan.autoSegments(track, duration: duration, zoom: zoom), trimStart: 0, trimEnd: duration)
+        return StudioProject(segments: StudioPlan.autoSegments(track, duration: duration, zoom: zoom), trimStart: 0, trimEnd: duration,
+                             look: PresetStore.defaultLook)   // 新工程用默认预设
     }
     func save(_ dir: URL) throws {
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -340,9 +362,17 @@ enum StudioPlan {
     }
 
     // 逐帧算镜头和鼠标：从 0 秒算到结尾（修剪只决定导出哪几帧，镜头怎么走不受影响，预览和成片一致）
-    static func make(_ tr: Track, _ L: StudioLayout, _ st: StudioStyle, segments: [ZoomSegment], frames n: Int, duration: Double) -> [FramePlan] {
+    static func make(_ tr: Track, _ L: StudioLayout, _ st: StudioStyle, look: StudioLook, segments: [ZoomSegment], frames n: Int, duration: Double) -> [FramePlan] {
         let W = L.W, H = L.H, dt = 1 / Double(st.fps)
         let mouse = Mouse(tr), ev = events(tr, duration: duration)
+        // 鼠标顺滑：弹簧越软越顺；0 = 不平滑，直接用原位置
+        let smooth = look.smoothing > 0.01, mw = 8 + (1 - min(max(look.smoothing, 0), 1)) * 72
+        // 鼠标最后一次动（或点）的时刻：不动超过 hideAfter 秒就淡出
+        var moved: [Double] = []
+        var prev: [Double]?
+        for m in tr.moves { if let p = prev, hypot(m[1] - p[1], m[2] - p[2]) > 0.5 || m[4] != p[4] { moved.append(m[0]) }; prev = m }
+        moved.append(contentsOf: tr.clicks.map { $0[0] }); moved.sort()
+        var mi = 0, alpha = 1.0, lastMove = 0.0
         let segs = segments.sorted { $0.start < $1.start }
         var lz = Spring(x: 0, w: 4), cx = Spring(x: W / 2, w: 4), cy = Spring(x: H / 2, w: 4)
         var mx: Spring?, my: Spring?
@@ -355,9 +385,9 @@ enum StudioPlan {
             var f = FramePlan()
             let m = mouse.at(t)
             if let m {
-                if mx == nil { mx = Spring(x: m.x, w: 30); my = Spring(x: m.y, w: 30) }
+                if mx == nil { mx = Spring(x: m.x, w: mw); my = Spring(x: m.y, w: mw) }
                 mx!.step(to: m.x, dt: dt); my!.step(to: m.y, dt: dt)
-                f.mx = mx!.x; f.my = my!.x
+                f.mx = smooth ? mx!.x : m.x; f.my = smooth ? my!.x : m.y
                 // 鼠标跑到画面外面（别的屏幕）就不画
                 f.shape = f.mx > -40 && f.mx < W + 40 && f.my > -40 && f.my < H + 40 ? m.shape : -1
             }
@@ -396,6 +426,13 @@ enum StudioPlan {
             f.sy = min(max(L.card.minY + cy.x * L.s, ey), L.ch - ey)
             // 点下去时指针缩一下再弹回
             for c in tr.clicks where t >= c[0] && t < c[0] + 0.25 { f.press = 1 - 0.18 * sin(.pi * (t - c[0]) / 0.25) }
+            // 不动自动隐藏：淡出 0.3 秒，一动就 0.12 秒淡入
+            if look.hideIdleCursor {
+                while mi < moved.count && moved[mi] <= t { lastMove = moved[mi]; mi += 1 }
+                let target = t - lastMove >= look.hideAfter ? 0.0 : 1.0
+                alpha = target < alpha ? max(target, alpha - dt / 0.3) : min(target, alpha + dt / 0.12)
+                f.alpha = alpha
+            }
             out[i] = f
         }
         return out
@@ -406,30 +443,46 @@ enum StudioPlan {
 enum Studio {
     static let failure = { (s: String) in NSError(domain: "Studio", code: 1, userInfo: [NSLocalizedDescriptionKey: s]) }
 
-    static func render(project dir: URL, to out: URL, style: StudioStyle = StudioStyle(), edits: StudioProject? = nil, progress: @escaping @Sendable (Double) -> Void) async throws {
+    // 成片文件名：透明背景存 HEVC .mov，其他背景存 H.264 .mp4
+    static func output(_ out: URL, look: StudioLook) -> URL { out.deletingPathExtension().appendingPathExtension(look.transparent ? "mov" : "mp4") }
+
+    // 返回实际写出的文件（扩展名跟着背景走）
+    @discardableResult
+    static func render(project dir: URL, to out: URL, style: StudioStyle = StudioStyle(), edits: StudioProject? = nil, progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
         let job = try await StudioJob(project: dir, out: out, style: style, project: edits, progress: progress)
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 do { try job.run(); c.resume() } catch { c.resume(throwing: error) }
             }
         }
+        return job.outURL
     }
 
-    // 自测：STUDIO=素材文件夹 [STUDIO_OUT=输出路径] [STUDIO_ASPECT=16:9] → 只导出，不录，打印用时后退出
+    // 自测：STUDIO=素材文件夹 [STUDIO_OUT=输出路径] [STUDIO_ASPECT=16:9] [STUDIO_BLUR=off|light|medium|strong] → 只导出，不录，打印用时后退出
+    // 样式按素材夹里的 project.json；STUDIO_ASPECT / STUDIO_BLUR 临时盖掉工程里的设置
     @MainActor static func selfTest() -> Bool {
         let env = ProcessInfo.processInfo.environment
         guard let p = env["STUDIO"] else { return false }
         let dir = URL(fileURLWithPath: p)
         let out = URL(fileURLWithPath: env["STUDIO_OUT"] ?? dir.appendingPathComponent("studio.mov").path)
         var st = StudioStyle()
-        if env["STUDIO_BLUR"] != nil { st.motionBlur = true }
         if let z = env["STUDIO_ZOOM"].flatMap(Double.init) { st.zoom = z }
         if let b = env["STUDIO_BPP"].flatMap(Double.init) { st.bitsPerPixel = b }
-        if let a = env["STUDIO_ASPECT"]?.split(separator: ":").compactMap({ Double($0) }), a.count == 2 { st.aspect = a[0] / a[1] }
         Task {
             let t0 = Date()
-            do { try await render(project: dir, to: out, style: st) { _ in }; print("STUDIO OK", String(format: "%.1fs", Date().timeIntervalSince(t0)), out.path) }
-            catch { print("STUDIO FAIL", error) }
+            do {
+                var edits: StudioProject?
+                if env["STUDIO_ASPECT"] != nil || env["STUDIO_BLUR"] != nil {
+                    let track = try JSONDecoder().decode(Track.self, from: Data(contentsOf: dir.appendingPathComponent("track.json")))
+                    let d = try await AVURLAsset(url: dir.appendingPathComponent("raw.mp4")).load(.duration).seconds
+                    var pr = StudioProject.load(dir, track: track, duration: d, zoom: st.zoom)
+                    if let a = env["STUDIO_ASPECT"].flatMap(StudioLook.Aspect.init(rawValue:)) { pr.look.aspect = a }
+                    if let b = env["STUDIO_BLUR"].flatMap(StudioLook.Blur.init(rawValue:)) { pr.look.blur = b }
+                    edits = pr
+                }
+                let u = try await render(project: dir, to: out, style: st, edits: edits) { _ in }
+                print("STUDIO OK", String(format: "%.1fs", Date().timeIntervalSince(t0)), u.path)
+            } catch { print("STUDIO FAIL", error) }
             NSApp.terminate(nil)
         }
         return true
@@ -438,10 +491,13 @@ enum Studio {
 
 // ---- 一帧怎么画：导出和剪辑窗口的预览共用这一套，所以预览和成片一样 ----
 final class StudioRenderer: @unchecked Sendable {
+    // 不做色彩管理：原画面的数值原样搬过去，颜色和原录屏一致。所有渲染器共用一个（改样式时会重建渲染器）
+    static let sharedContext = CIContext(mtlDevice: MTLCreateSystemDefaultDevice()!, options: [.workingColorSpace: NSNull(), .outputColorSpace: NSNull(), .workingFormat: CIFormat.RGBAh])
     let track: Track
     let lay: StudioLayout
     let st: StudioStyle
-    let ctx: CIContext
+    let look: StudioLook
+    let ctx = StudioRenderer.sharedContext
     private let clicks: [(t: Double, x: Double, y: Double)]
     private var cursorArt: [Int: (img: CIImage, ppp: Double, hotX: Double, hotY: Double)] = [:]
     private let arrow: (img: CIImage, ppp: Double, hotX: Double, hotY: Double)
@@ -449,13 +505,11 @@ final class StudioRenderer: @unchecked Sendable {
     private var background: CIImage!
     private var mask: CIImage!
 
-    init(project dir: URL, track: Track, style: StudioStyle) {
-        self.track = track; st = style
-        lay = StudioLayout(track: track, style: style)
+    init(project dir: URL, track: Track, style: StudioStyle, look: StudioLook) {
+        self.track = track; st = style; self.look = look
+        lay = StudioLayout(track: track, look: look)
         let h = Double(track.height)
         clicks = track.clicks.map { ($0[0], $0[1], h - $0[2]) }
-        // 不做色彩管理：原画面的数值原样搬过去，颜色和原录屏一致
-        ctx = CIContext(mtlDevice: MTLCreateSystemDefaultDevice()!, options: [.workingColorSpace: NSNull(), .outputColorSpace: NSNull(), .workingFormat: CIFormat.RGBAh])
         arrow = Self.drawArrow()
         ring = Self.drawRing()
         for (i, c) in track.cursors.enumerated() where !c.arrow {
@@ -467,21 +521,52 @@ final class StudioRenderer: @unchecked Sendable {
     }
 
     func plan(_ project: StudioProject, duration: Double) -> [FramePlan] {
-        StudioPlan.make(track, lay, st, segments: project.segments, frames: max(1, Int(duration * Double(st.fps))), duration: duration)
+        StudioPlan.make(track, lay, st, look: look, segments: project.segments, frames: max(1, Int(duration * Double(st.fps))), duration: duration)
     }
 
-    // 透明背景 + 卡片阴影：每帧都一样，先画好存成一张图
+    // 背景 + 卡片阴影：每帧都一样，先画好存成一张图
     private func prepareBackground() {
-        let g = CIImage(color: .clear).cropped(to: lay.canvas)
-        let shadow = rounded(lay.card.offsetBy(dx: 0, dy: -lay.ch * 0.012), lay.radius, CIColor(red: 0, green: 0, blue: 0, alpha: 0.45))
-            .applyingGaussianBlur(sigma: lay.cw * 0.014)
-        let bg = shadow.composited(over: g).cropped(to: lay.canvas)
-        let cg = ctx.createCGImage(bg, from: lay.canvas, format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB))!
+        let canvas = lay.canvas
+        var g: CIImage
+        switch look.background {
+        case .transparent: g = CIImage(color: .clear)
+        case .color: g = CIImage(color: look.color.ci)
+        case .gradient:
+            // 按角度从一边渐变到另一边：两个端点放在画布中心两侧、跨过整个画布
+            let a = look.gradientAngle * .pi / 180, cx = lay.cw / 2, cy = lay.ch / 2
+            let r = (abs(cos(a)) * lay.cw + abs(sin(a)) * lay.ch) / 2
+            g = CIFilter(name: "CILinearGradient", parameters: [
+                "inputPoint0": CIVector(x: cx - cos(a) * r, y: cy - sin(a) * r), "inputColor0": look.gradient0.ci,
+                "inputPoint1": CIVector(x: cx + cos(a) * r, y: cy + sin(a) * r), "inputColor1": look.gradient1.ci,
+            ])!.outputImage!
+        case .wallpaper, .image:
+            let u = look.background == .wallpaper ? (look.wallpaper.isEmpty ? nil : URL(fileURLWithPath: look.wallpaper)) : look.imageURL
+            if let u, let img = CIImage(contentsOf: u, options: [.applyOrientationProperty: true]) {
+                // 铺满画布（多出来的裁掉），居中
+                let e = img.extent, k = max(lay.cw / e.width, lay.ch / e.height)
+                g = img.transformed(by: CGAffineTransform(translationX: -e.minX, y: -e.minY).concatenating(CGAffineTransform(scaleX: k, y: k))
+                    .concatenating(CGAffineTransform(translationX: (lay.cw - e.width * k) / 2, y: (lay.ch - e.height * k) / 2)))
+            } else { g = CIImage(color: look.color.ci) }   // 图片找不到：先用纯色顶上
+        }
+        g = g.cropped(to: canvas)
+        let strength = min(max(look.shadow, 0), 1), blur = min(max(look.shadowBlur, 0), 1)
+        var bg = g
+        if strength > 0.001 {
+            let sigma = lay.cw * (0.003 + 0.033 * blur)
+            let shadow = rounded(lay.card.offsetBy(dx: 0, dy: -lay.ch * (0.004 + 0.016 * blur)), lay.radius, CIColor(red: 0, green: 0, blue: 0, alpha: strength))
+                .applyingGaussianBlur(sigma: max(0.5, sigma))
+            bg = shadow.composited(over: g).cropped(to: canvas)
+        }
+        let cg = ctx.createCGImage(bg, from: canvas, format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB))!
         background = CIImage(cgImage: cg)
-        mask = rounded(lay.card, lay.radius, .white)
+        mask = lay.radius > 0.5 ? rounded(lay.card, lay.radius, .white) : CIImage(color: .white).cropped(to: lay.card)
     }
     private func rounded(_ r: CGRect, _ radius: Double, _ color: CIColor) -> CIImage {
         CIFilter(name: "CIRoundedRectangleGenerator", parameters: ["inputExtent": CIVector(cgRect: r), "inputRadius": radius, "inputColor": color])!.outputImage!
+    }
+
+    private func camera(z: Double, sx: Double, sy: Double) -> CGAffineTransform {
+        CGAffineTransform(a: z, b: 0, c: 0, d: z, tx: lay.cw / 2 - sx * z, ty: lay.ch / 2 - sy * z)
     }
 
     // 合成第 i 帧（plan 从 0 秒算起）：背景 → 圆角画面 → 点击波纹 → 鼠标，整幅按镜头推拉
@@ -495,37 +580,56 @@ final class StudioRenderer: @unchecked Sendable {
         ])
         let t = Double(i) / Double(st.fps), ppp = track.pixelsPerPoint
         // 点击波纹：0.5 秒内从 6 点扩到 28 点、渐渐淡掉
-        for c in clicks where t >= c.t && t < c.t + 0.5 {
-            let u = (t - c.t) / 0.5, e = 1 - pow(1 - u, 3)
-            let r = (6 + 22 * e) * ppp * st.cursorScale / 1.5, k = r / 52
-            let img = ring.applyingFilter("CIColorMatrix", parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1 - u)])
-                .transformed(by: CGAffineTransform(translationX: -64, y: -64).concatenating(CGAffineTransform(scaleX: k, y: k))
-                    .concatenating(CGAffineTransform(translationX: c.x, y: c.y)).concatenating(lay.toScene))
-            scene = img.composited(over: scene)
+        if look.ripple {
+            for c in clicks where t >= c.t && t < c.t + 0.5 {
+                let u = (t - c.t) / 0.5, e = 1 - pow(1 - u, 3)
+                let r = (6 + 22 * e) * ppp * look.cursorScale / 1.5, k = r / 52
+                let img = ring.applyingFilter("CIColorMatrix", parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1 - u)])
+                    .transformed(by: CGAffineTransform(translationX: -64, y: -64).concatenating(CGAffineTransform(scaleX: k, y: k))
+                        .concatenating(CGAffineTransform(translationX: c.x, y: c.y)).concatenating(lay.toScene))
+                scene = img.composited(over: scene)
+            }
         }
-        if f.shape >= 0 {
+        if f.shape >= 0 && f.alpha > 0.002 {
             let art = track.cursors.indices.contains(f.shape) && !track.cursors[f.shape].arrow ? cursorArt[f.shape] ?? arrow : arrow
-            let k = ppp * st.cursorScale * f.press / art.ppp
+            let k = ppp * look.cursorScale * f.press / art.ppp
             let hx = art.hotX * art.ppp, hy = art.img.extent.height - art.hotY * art.ppp
-            let img = art.img.transformed(by: CGAffineTransform(translationX: -hx, y: -hy).concatenating(CGAffineTransform(scaleX: k, y: k))
+            var img = art.img.transformed(by: CGAffineTransform(translationX: -hx, y: -hy).concatenating(CGAffineTransform(scaleX: k, y: k))
                 .concatenating(CGAffineTransform(translationX: f.mx, y: f.my)).concatenating(lay.toScene))
+            if f.alpha < 0.998 { img = img.applyingFilter("CIColorMatrix", parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: f.alpha)]) }
             scene = img.composited(over: scene)
         }
-        let cam = CGAffineTransform(a: f.z, b: 0, c: 0, d: f.z, tx: lay.cw / 2 - f.sx * f.z, ty: lay.ch / 2 - f.sy * f.z)
-        var img = scene.transformed(by: cam).cropped(to: lay.canvas)
-        if st.motionBlur, i > 0 {
-            let p = plan[i - 1]
-            let dx = (f.sx - p.sx) * f.z, dy = (f.sy - p.sy) * f.z, d = hypot(dx, dy), dz = abs(log(f.z / p.z))
-            if d > 3 {
-                img = img.clampedToExtent().applyingFilter("CIMotionBlur", parameters: [kCIInputRadiusKey: min(d * 0.15, 10), kCIInputAngleKey: atan2(dy, dx)]).cropped(to: lay.canvas)
-            }
-            if dz > 0.003 {
-                img = img.clampedToExtent().applyingFilter("CIZoomBlur", parameters: [
-                    kCIInputCenterKey: CIVector(x: lay.cw / 2, y: lay.ch / 2), kCIInputAmountKey: min(dz * lay.cw * 0.04, 6),
-                ]).cropped(to: lay.canvas)
-            }
+        let still = scene.transformed(by: camera(z: f.z, sx: f.sx, sy: f.sy)).cropped(to: lay.canvas)
+        // 运动模糊（快门式）：镜头动得快的帧，在这一帧前后一小段时间里取几个镜头位置分别画、再平均；镜头不动的帧原样不碰，字是清楚的
+        guard let subs = shutter(i, plan: plan) else { return still }
+        var acc: CIImage?
+        for (k, c) in subs.enumerated() {
+            let img = scene.transformed(by: camera(z: c.z, sx: c.sx, sy: c.sy)).cropped(to: lay.canvas)
+            acc = acc.map { img.applyingFilter("CIMix", parameters: [kCIInputBackgroundImageKey: $0, kCIInputAmountKey: 1.0 / Double(k + 1)]) } ?? img
         }
-        return img
+        return (acc ?? still).cropped(to: lay.canvas)
+    }
+
+    // 快门子位置：镜头每帧移动（含推拉）换算成画布上的像素，超过门槛才模糊；快门角 轻 90° / 中 180° / 强 270°，取 3–8 个位置
+    func shutter(_ i: Int, plan: [FramePlan]) -> [(z: Double, sx: Double, sy: Double)]? {
+        let angle: Double
+        switch look.blur { case .off: return nil; case .light: angle = 90; case .medium: angle = 180; case .strong: angle = 270 }
+        guard plan.count > 1 else { return nil }
+        let a = plan[max(i - 1, 0)], b = plan[min(i + 1, plan.count - 1)], f = plan[i]
+        let span = Double(min(i + 1, plan.count - 1) - max(i - 1, 0))   // 前后相隔几帧
+        let diag = hypot(lay.cw, lay.ch) / 2
+        let move = (hypot((b.sx - a.sx) * f.z, (b.sy - a.sy) * f.z) + abs(log(b.z / a.z)) * diag) / span   // 每帧移动的像素
+        let blurPx = move * angle / 360
+        guard blurPx >= 1.5 else { return nil }
+        let n = min(8, max(3, Int(blurPx / 2) + 1))
+        // 在 i ± (快门/2) 帧之间按相邻帧插值：放大倍数按对数插值
+        func at(_ x: Double) -> (z: Double, sx: Double, sy: Double) {
+            let j = min(max(x, 0), Double(plan.count - 1)), lo = Int(j.rounded(.down)), hi = min(lo + 1, plan.count - 1), u = j - Double(lo)
+            let p = plan[lo], q = plan[hi]
+            return (exp(log(p.z) + (log(q.z) - log(p.z)) * u), p.sx + (q.sx - p.sx) * u, p.sy + (q.sy - p.sy) * u)
+        }
+        let half = angle / 360 / 2
+        return (0..<n).map { at(Double(i) + (Double($0) / Double(n - 1) * 2 - 1) * half) }
     }
 
     // 画布上一点（左下为原点）→ 原画面里的比例（左上为原点）：在预览上点一下设固定位置用
@@ -568,15 +672,16 @@ final class StudioRenderer: @unchecked Sendable {
     }
 }
 
-// ---- 导出成片：按工程的推近段和修剪逐帧合成，写透明背景 HEVC .mov ----
+// ---- 导出成片：按工程的推近段、修剪和样式逐帧合成；透明背景写 HEVC .mov，其他背景写 H.264 .mp4 ----
 final class StudioJob: @unchecked Sendable {
     private let asset: AVURLAsset
     private let videoTrack: AVAssetTrack
     private let audioTracks: [AVAssetTrack]
-    private let out: URL
+    let outURL: URL
     private let r: StudioRenderer
     private let plan: [FramePlan]
     private let first: Int, last: Int          // 导出第 first..<last 帧
+    private let clickTimes: [Double]           // 要加点击声的时刻（秒，素材时间）；不加就是空的
     private let progress: @Sendable (Double) -> Void
 
     init(project dir: URL, out: URL, style: StudioStyle, project: StudioProject? = nil, progress: @escaping @Sendable (Double) -> Void) async throws {
@@ -586,17 +691,19 @@ final class StudioJob: @unchecked Sendable {
         videoTrack = vt
         audioTracks = try await asset.loadTracks(withMediaType: .audio)
         let duration = try await asset.load(.duration).seconds
-        self.out = out; self.progress = progress
-        r = StudioRenderer(project: dir, track: track, style: style)
+        self.progress = progress
         let p = project ?? StudioProject.load(dir, track: track, duration: duration, zoom: style.zoom)
+        outURL = Studio.output(out, look: p.look)
+        r = StudioRenderer(project: dir, track: track, style: style, look: p.look)
         plan = r.plan(p, duration: duration)
         let fps = Double(style.fps)
         first = min(max(0, Int((p.trimStart * fps).rounded())), plan.count - 1)
         last = max(first + 1, min(plan.count, Int((p.trimEnd * fps).rounded())))
+        clickTimes = p.look.clickSound ? track.clicks.map { $0[0] } : []
     }
 
     func run() throws {
-        let st = r.st, lay = r.lay, fps = CMTimeScale(st.fps)
+        let st = r.st, lay = r.lay, fps = CMTimeScale(st.fps), alpha = r.look.transparent
         let range = CMTimeRange(start: CMTime(value: CMTimeValue(first), timescale: fps), end: CMTime(value: CMTimeValue(last), timescale: fps))
         let reader = try AVAssetReader(asset: asset)
         reader.timeRange = range
@@ -616,16 +723,24 @@ final class StudioJob: @unchecked Sendable {
             reader.add(o); aOut = o
         }
 
-        try? FileManager.default.removeItem(at: out)
-        let writer = try AVAssetWriter(outputURL: out, fileType: .mov)   // 背景透明：H.264/mp4 存不了透明，用带透明通道的 HEVC
+        try? FileManager.default.removeItem(at: outURL)
+        let writer = try AVAssetWriter(outputURL: outURL, fileType: alpha ? .mov : .mp4)
         let w = Int(lay.cw), h = Int(lay.ch)
+        var props: [String: Any] = [
+            AVVideoAverageBitRateKey: max(10_000_000, Int(Double(w * h * st.fps) * st.bitsPerPixel)),
+            AVVideoExpectedSourceFrameRateKey: st.fps,
+            AVVideoMaxKeyFrameIntervalKey: st.fps * 2,
+        ]
+        if alpha { props[kVTCompressionPropertyKey_AlphaChannelMode as String] = kVTAlphaChannelMode_PremultipliedAlpha }   // Core Image 出的是预乘透明
+        else { props[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel }
+        // 标上色彩（和原始录屏一样 709），不然有的播放器按 601 解，颜色会偏
         let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: [
-            AVVideoCodecKey: AVVideoCodecType.hevcWithAlpha, AVVideoWidthKey: w, AVVideoHeightKey: h,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: max(10_000_000, Int(Double(w * h * st.fps) * st.bitsPerPixel)),
-                AVVideoExpectedSourceFrameRateKey: st.fps,
-                AVVideoMaxKeyFrameIntervalKey: st.fps * 2,
-                kVTCompressionPropertyKey_AlphaChannelMode as String: kVTAlphaChannelMode_PremultipliedAlpha,   // Core Image 出的是预乘透明
+            AVVideoCodecKey: alpha ? AVVideoCodecType.hevcWithAlpha : AVVideoCodecType.h264, AVVideoWidthKey: w, AVVideoHeightKey: h,
+            AVVideoCompressionPropertiesKey: props,
+            AVVideoColorPropertiesKey: [
+                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
             ],
         ])
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: vIn, sourcePixelBufferAttributes: [
@@ -635,7 +750,7 @@ final class StudioJob: @unchecked Sendable {
         ])
         writer.add(vIn)
         var aIn: AVAssetWriterInput?
-        if aOut != nil {
+        if aOut != nil || !clickTimes.isEmpty {
             let a = AVAssetWriterInput(mediaType: .audio, outputSettings: [
                 AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48000, AVNumberOfChannelsKey: 2, AVEncoderBitRateKey: 192_000,
             ])
@@ -672,12 +787,22 @@ final class StudioJob: @unchecked Sendable {
                 if (i - first) % 30 == 0 { progress(Double(i - first) / Double(total)) }
             }
         }
-        if let aOut, let aIn {
+        if let aIn {
             group.enter()
             var audioDone = false
+            let clicks = ClickSound(times: clickTimes)
+            // 没有原声音只有点击声：自己按 0.1 秒一块生成静音 + 点击
+            var genAt = Int64((range.start.seconds * 48000).rounded()), genEnd = Int64((range.end.seconds * 48000).rounded())
             aIn.requestMediaDataWhenReady(on: DispatchQueue(label: "studio.audio")) {
                 while aIn.isReadyForMoreMediaData && !audioDone {
-                    guard let sb = aOut.copyNextSampleBuffer() else { audioDone = true; aIn.markAsFinished(); group.leave(); return }
+                    let sb: CMSampleBuffer?
+                    if let aOut {
+                        sb = aOut.copyNextSampleBuffer().map { clicks.isEmpty ? $0 : (clicks.mix(into: $0) ?? $0) }
+                    } else if genAt < genEnd {
+                        let n = Int(min(4800, genEnd - genAt))
+                        sb = clicks.silence(frames: n, at: genAt); genAt += Int64(n)
+                    } else { sb = nil }
+                    guard let sb else { audioDone = true; aIn.markAsFinished(); group.leave(); return }
                     aIn.append(sb)
                 }
             }
@@ -691,5 +816,76 @@ final class StudioJob: @unchecked Sendable {
         sem.wait()
         guard writer.status == .completed else { throw writer.error ?? Studio.failure("finish") }
         progress(1)
+    }
+}
+
+// 点击音效：程序合成一声短促的「嗒」（高频衰减正弦 + 一点噪声，40 毫秒），按点击时刻混进 48k 立体声浮点 PCM
+final class ClickSound: @unchecked Sendable {
+    private let starts: [Int64]                // 每次点击从第几个采样开始
+    private let wave: [Float]
+    private var format: CMAudioFormatDescription?
+    var isEmpty: Bool { starts.isEmpty }
+
+    init(times: [Double]) {
+        starts = times.map { Int64(($0 * 48000).rounded()) }.sorted()
+        var g = SystemRandomNumberGenerator()
+        wave = (0..<1920).map { k in
+            let t = Double(k) / 48000, env = exp(-t / 0.0045)
+            let tone = 0.65 * sin(2 * .pi * 3100 * t) + 0.35 * sin(2 * .pi * 1700 * t)
+            return Float(env * (0.8 * tone + 0.2 * Double.random(in: -1...1, using: &g)) * 0.32)
+        }
+    }
+
+    // 往一块声音里加上落在它时间段里的点击，返回新的一块
+    func mix(into sb: CMSampleBuffer) -> CMSampleBuffer? {
+        let n = CMSampleBufferGetNumSamples(sb)
+        guard n > 0, let block = CMSampleBufferGetDataBuffer(sb), let fmt = CMSampleBufferGetFormatDescription(sb) else { return nil }
+        let a0 = Int64((CMSampleBufferGetPresentationTimeStamp(sb).seconds * 48000).rounded())
+        var data = [Float](repeating: 0, count: n * 2)
+        let bytes = data.count * 4
+        guard CMBlockBufferGetDataLength(block) >= bytes else { return nil }
+        _ = data.withUnsafeMutableBytes { CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: bytes, destination: $0.baseAddress!) }
+        guard add(&data, frames: n, at: a0) else { return sb }
+        return make(data, frames: n, at: a0, format: fmt)
+    }
+
+    func silence(frames n: Int, at a0: Int64) -> CMSampleBuffer? {
+        var data = [Float](repeating: 0, count: n * 2)
+        _ = add(&data, frames: n, at: a0)
+        if format == nil {
+            var asbd = AudioStreamBasicDescription(mSampleRate: 48000, mFormatID: kAudioFormatLinearPCM, mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+                                                   mBytesPerPacket: 8, mFramesPerPacket: 1, mBytesPerFrame: 8, mChannelsPerFrame: 2, mBitsPerChannel: 32, mReserved: 0)
+            CMAudioFormatDescriptionCreate(allocator: nil, asbd: &asbd, layoutSize: 0, layout: nil, magicCookieSize: 0, magicCookie: nil, extensions: nil, formatDescriptionOut: &format)
+        }
+        guard let format else { return nil }
+        return make(data, frames: n, at: a0, format: format)
+    }
+
+    private func add(_ data: inout [Float], frames n: Int, at a0: Int64) -> Bool {
+        var touched = false
+        for s in starts where s < a0 + Int64(n) && s + Int64(wave.count) > a0 {
+            for k in 0..<wave.count {
+                let j = s + Int64(k) - a0
+                guard j >= 0 && j < Int64(n) else { continue }
+                let v = wave[k]
+                data[Int(j) * 2] = max(-1, min(1, data[Int(j) * 2] + v))
+                data[Int(j) * 2 + 1] = max(-1, min(1, data[Int(j) * 2 + 1] + v))
+            }
+            touched = true
+        }
+        return touched
+    }
+
+    private func make(_ data: [Float], frames n: Int, at a0: Int64, format: CMAudioFormatDescription) -> CMSampleBuffer? {
+        let bytes = data.count * 4
+        var block: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: bytes, blockAllocator: nil, customBlockSource: nil,
+                                                 offsetToData: 0, dataLength: bytes, flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block) == noErr, let block
+        else { return nil }
+        _ = data.withUnsafeBytes { CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: bytes) }
+        var sb: CMSampleBuffer?
+        CMAudioSampleBufferCreateReadyWithPacketDescriptions(allocator: nil, dataBuffer: block, formatDescription: format, sampleCount: n,
+                                                             presentationTimeStamp: CMTime(value: a0, timescale: 48000), packetDescriptions: nil, sampleBufferOut: &sb)
+        return sb
     }
 }
