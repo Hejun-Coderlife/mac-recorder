@@ -51,6 +51,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     @Published var exportError: String?
     @Published var still: NSImage?             // 截图自测时用静态画面代替播放器
     @Published var presets = PresetStore.load()
+    @Published var timelineScale = 1.0         // 时间轴横向放大（1 = 整段刚好铺满）
     private var undoStack: [StudioProject] = [], redoStack: [StudioProject] = []
     private var dragBase: StudioProject?
 
@@ -85,6 +86,13 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         player = AVPlayer()
         super.init()
         if !FileManager.default.fileExists(atPath: StudioProject.url(dir).path) { try? project.save(dir) }
+        // 打开时按新规则重排了推近段：原来的段放进撤销栈，⌘Z 能拿回来（拿回来就算手动改过，以后不再重排）
+        else if let d = try? Data(contentsOf: StudioProject.url(dir)), var old = try? JSONDecoder().decode(StudioProject.self, from: d),
+                !old.segments.isEmpty, old.segments.sorted(by: { $0.start < $1.start }) != p.segments {
+            old.segments.sort { $0.start < $1.start }
+            old.trimStart = p.trimStart; old.trimEnd = p.trimEnd; old.look = p.look; old.segmentsEdited = true
+            undoStack = [old]
+        }
         box.set(box.renderer.plan(project, duration: duration), renderer: box.renderer)
         let item = AVPlayerItem(asset: asset)
         item.videoComposition = makeComposition()
@@ -131,6 +139,13 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
             w.setFrameOrigin(CGPoint(x: -20000, y: -20000))
             w.orderBack(nil)
             Task { @MainActor in
+                // EDITOR_UNDOCHECK=1：只看「打开时按新规则重排」能不能 ⌘Z 撤回，打印结果后退出
+                if ProcessInfo.processInfo.environment["EDITOR_UNDOCHECK"] != nil {
+                    let now = project.segments.count, could = canUndo
+                    undo()
+                    print("UNDOCHECK canUndo=\(could) segs \(now) -> \(project.segments.count) edited=\(project.segmentsEdited)")
+                    exit(0)
+                }
                 selected = project.segments.first?.id
                 await renderStill(at: project.segments.first.map { ($0.start + $0.end) / 2 } ?? 1)
                 try? await Task.sleep(for: .seconds(0.6))
@@ -389,9 +404,12 @@ struct EditorView: View {
                 VStack(spacing: 0) {
                     preview.padding(14)
                     Divider()
+                    controlBar.padding(.horizontal, 14).padding(.vertical, 8)
+                    Divider()
                     VStack(alignment: .leading, spacing: 10) {
-                        inspector.frame(height: 30)
-                        TimelineStrip(ed: ed).frame(height: 120)
+                        if ed.selected != nil { inspector.frame(height: 30) }   // 选中推近段才出现
+                        timeline.frame(height: 120)
+                            .help(L("点选推近段来调整，空白处双击新加，两端黄条修剪", "Click a zoom to edit it, double-click empty space to add one, drag the yellow bars to trim"))
                     }
                     .padding(14)
                 }
@@ -403,19 +421,10 @@ struct EditorView: View {
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
+    // 顶部只留文件名和「导出」
     private var toolbar: some View {
         HStack(spacing: 12) {
-            Button { ed.togglePlay() } label: { Image(systemName: ed.playing ? "pause.fill" : "play.fill").frame(width: 18) }
-                .help(L("播放 / 暂停（空格）", "Play / Pause (Space)"))
-            Text(clock(ed.time - ed.project.trimStart) + " / " + clock(ed.project.trimEnd - ed.project.trimStart))   // 按修剪后的成片算
-                .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-            Divider().frame(height: 18)
-            Button { ed.addSegment(at: ed.time) } label: { Label(L("推近", "Zoom"), systemImage: "plus.magnifyingglass") }
-                .help(L("在播放头处加一段推近（也可以在时间轴空白处双击）", "Add a zoom at the playhead (or double-click the timeline)"))
-            Button { ed.regenerate() } label: { Label(L("重新自动生成", "Auto-Generate"), systemImage: "wand.and.stars") }
-                .help(L("按点击、打字重新排推近段（会替换现在的段，可以撤销）", "Rebuild zooms from clicks and typing (replaces current zooms; undoable)"))
-            Button { ed.undo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!ed.canUndo).help(L("撤销 ⌘Z", "Undo ⌘Z"))
-            Button { ed.redo() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!ed.canRedo).help(L("重做 ⌘⇧Z", "Redo ⌘⇧Z"))
+            Text(ed.dir.lastPathComponent).font(.callout.weight(.medium)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             Spacer()
             if let p = ed.exportProgress {
                 ProgressView(value: p).frame(width: 160)
@@ -428,6 +437,54 @@ struct EditorView: View {
                 Text(e).font(.callout).foregroundStyle(.red).lineLimit(1)
             }
             Button(L("导出", "Export")) { ed.export() }.buttonStyle(.borderedProminent).disabled(ed.exportProgress != nil)
+        }
+    }
+
+    // 预览和时间轴之间的一条（像 Screen Studio）：左边编辑工具，正中播放和时间，右边时间轴缩放
+    private var controlBar: some View {
+        ZStack {
+            HStack(spacing: 10) {
+                Button { ed.addSegment(at: ed.time) } label: { Label(L("推近", "Zoom"), systemImage: "plus.magnifyingglass") }
+                    .help(L("在播放头处加一段推近（也可以在时间轴空白处双击）", "Add a zoom at the playhead (or double-click the timeline)"))
+                Button { ed.regenerate() } label: { Label(L("重新自动生成", "Auto-Generate"), systemImage: "wand.and.stars") }
+                    .help(L("按点击、打字重新排推近段（会替换现在的段，可以撤销）", "Rebuild zooms from clicks and typing (replaces current zooms; undoable)"))
+                Button { ed.undo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!ed.canUndo).help(L("撤销 ⌘Z", "Undo ⌘Z"))
+                Button { ed.redo() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!ed.canRedo).help(L("重做 ⌘⇧Z", "Redo ⌘⇧Z"))
+                Spacer()
+                Button { ed.timelineScale = max(1, ed.timelineScale / 1.5) } label: { Image(systemName: "minus.magnifyingglass") }
+                    .disabled(ed.timelineScale <= 1).help(L("时间轴缩小", "Zoom timeline out"))
+                Slider(value: $ed.timelineScale, in: 1...8).frame(width: 90).help(L("时间轴缩放", "Timeline zoom"))
+                Button { ed.timelineScale = min(8, ed.timelineScale * 1.5) } label: { Image(systemName: "plus.magnifyingglass") }
+                    .disabled(ed.timelineScale >= 8).help(L("时间轴放大", "Zoom timeline in"))
+            }
+            HStack(spacing: 12) {
+                Color.clear.frame(width: 130, height: 1)   // 和右边的时间等宽，让播放键正好在中间
+                Button { ed.togglePlay() } label: {
+                    Image(systemName: ed.playing ? "pause.fill" : "play.fill").font(.system(size: 15, weight: .semibold)).frame(width: 34, height: 34)
+                        .foregroundStyle(.white).background(Circle().fill(Color.accentColor))
+                }
+                .buttonStyle(.plain).help(L("播放 / 暂停（空格）", "Play / Pause (Space)"))
+                Text(clock(ed.time - ed.project.trimStart) + " / " + clock(ed.project.trimEnd - ed.project.trimStart))   // 按修剪后的成片算
+                    .font(.callout.monospacedDigit()).foregroundStyle(.secondary).frame(width: 130, alignment: .leading)
+            }
+        }
+    }
+
+    // 时间轴放大后能左右滚；播放时跟着播放头翻页
+    private var timeline: some View {
+        GeometryReader { g in
+            ScrollViewReader { sv in
+                ScrollView(.horizontal, showsIndicators: ed.timelineScale > 1.01) {
+                    ZStack(alignment: .topLeading) {
+                        TimelineStrip(ed: ed).frame(width: g.size.width * ed.timelineScale, height: g.size.height)
+                        // 滚动定位用的隐形锚点（每 1/8 宽一个）
+                        HStack(spacing: 0) { ForEach(0..<8, id: \.self) { k in Color.clear.frame(width: g.size.width * ed.timelineScale / 8, height: 1).id(k) } }
+                    }
+                }
+                .onChange(of: Int(ed.time / max(ed.duration, 0.01) * 8)) { _, k in
+                    if ed.timelineScale > 1.01 { withAnimation(.easeInOut(duration: 0.25)) { sv.scrollTo(min(max(k, 0), 7), anchor: .leading) } }
+                }
+            }
         }
     }
 
@@ -473,13 +530,6 @@ struct EditorView: View {
                 }
                 Spacer()
                 Button(role: .destructive) { ed.deleteSelected() } label: { Label(L("删除", "Delete"), systemImage: "trash") }
-            }
-        } else {
-            HStack {
-                Text(L("点选时间轴上的推近段来调整；拖两头改长短，拖中间挪位置；空白处双击加一段。两端的竖条是修剪。",
-                       "Select a zoom on the timeline to edit it; drag its ends to resize or its middle to move; double-click empty space to add one. The bars at both ends trim the video."))
-                    .font(.callout).foregroundStyle(.secondary)
-                Spacer()
             }
         }
     }
