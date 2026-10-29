@@ -111,7 +111,8 @@ namespace ScreenRecorder
                     Check("captions generated", PumpUntil(() => ed.CaptionsDone > 0, 900), ed.CaptionStatus);
                     var caps = ed.Project.Captions;
                     var text = string.Concat(caps.Select(c => c.Text));
-                    Check("captions have the spoken words", caps.Count > 0 && text.Contains("字幕"), text);
+                    // 这段测试只录了约 4 秒，只含第一句「大家好，这是我自己做的录屏软件」
+                    Check("captions have the spoken words", caps.Count > 0 && text.Contains("录屏") && text.Contains("软件"), text);
                     var first = caps.FirstOrDefault();
                     // 讲解从 1.0 秒开始，录音从开头就是那段语音（W2SPEECH 里 1.12 秒处开始说话）
                     Check("first caption lines up with the voice-over", first != null && Math.Abs(first.Start - (1.0 + 1.12 - (v?.TrimIn ?? 0))) < 0.5, $"{first?.Start:0.00}");
