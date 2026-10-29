@@ -52,6 +52,9 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     @Published var still: NSImage?             // 截图自测时用静态画面代替播放器
     @Published var presets = PresetStore.load()
     @Published var timelineScale = 1.0         // 时间轴横向放大（1 = 整段刚好铺满）
+    @Published var timelineOffset = 0.0        // 时间轴滚出左边的像素（滚动条同步过来）
+    @Published var timelineScrollSeq = 0       // 程序改了滚动位置 → 让 ScrollView 跟着滚
+    var timelineViewW = 0.0                    // 时间轴可见宽度
     private var undoStack: [StudioProject] = [], redoStack: [StudioProject] = []
     private var dragBase: StudioProject?
     private var scrubber = Scrubber()          // 拖动时的 seek 排队：同时只有一个在路上，只留最新目标；拖动中不让播放器回调改播放头
@@ -151,6 +154,12 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
                 await renderStill(at: project.segments.first.map { ($0.start + $0.end) / 2 } ?? 1)
                 // EDITOR_AT_TRIM=1：把结尾修剪到 80% 处、播放头压在修剪点上，看两者重叠时分不分得清
                 if ProcessInfo.processInfo.environment["EDITOR_AT_TRIM"] != nil { project.trimEnd = duration * 0.8; time = project.trimEnd }
+                // EDITOR_TLZOOM=倍数：时间轴按可见区 70% 处为锚点放大，看放大后的时间轴和滚动条
+                if let z = ProcessInfo.processInfo.environment["EDITOR_TLZOOM"].flatMap(Double.init) {
+                    try? await Task.sleep(for: .seconds(0.3))
+                    setTimelineScale(z, anchorX: timelineViewW * 0.7)
+                    print("TLZOOM scale=\(timelineScale) offset=\(timelineOffset) view=\(timelineViewW)")
+                }
                 try? await Task.sleep(for: .seconds(0.6))
                 if let v = w.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) {
                     v.cacheDisplay(in: v.bounds, to: rep)
@@ -259,6 +268,20 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     // 拖播放头 / 修剪把手 / 推近段期间：播放器的时间回调不许改播放头
     func scrubBegin() { scrubber.begin(); if playing { player.pause(); playing = false } }
     func scrubEnd() { scrubber.end() }
+    var isDragging: Bool { dragBase != nil || scrubber.active }
+
+    // 时间轴缩放：锚点（默认可见区正中）下的时间缩放前后留在同一位置
+    func setTimelineScale(_ s: Double, anchorX: Double? = nil) {
+        let w = max(timelineViewW, 1)
+        let r = TimelineMath.zoom(scale: timelineScale, offset: timelineOffset, view: w, anchorX: anchorX ?? w / 2, to: s)
+        guard abs(r.scale - timelineScale) > 1e-9 || abs(r.offset - timelineOffset) > 1e-9 else { return }
+        timelineScale = r.scale; timelineOffset = r.offset; timelineScrollSeq += 1
+    }
+    func panTimeline(_ dx: Double) {
+        let o = TimelineMath.clampOffset(timelineOffset + dx, scale: timelineScale, view: max(timelineViewW, 1))
+        guard abs(o - timelineOffset) > 1e-9 else { return }
+        timelineOffset = o; timelineScrollSeq += 1
+    }
     func togglePlay() {
         if playing { player.pause(); playing = false; return }
         let now = player.currentTime().seconds   // 播到头时 time 可能没跟上，按播放器实际位置判断
@@ -461,17 +484,21 @@ struct EditorView: View {
         ZStack {
             HStack(spacing: 10) {
                 Button { ed.addSegment(at: ed.time) } label: { Label(L("推近", "Zoom"), systemImage: "plus.magnifyingglass") }
-                    .help(L("在播放头处加一段推近（也可以在时间轴空白处双击）", "Add a zoom at the playhead (or double-click the timeline)"))
+                    .help(L("在播放头处新加一段推近（镜头放大凑近看）；也可以在时间轴空白处双击", "Add a zoom-in at the playhead; you can also double-click empty space on the timeline"))
                 Button { ed.regenerate() } label: { Label(L("重新自动生成", "Auto-Generate"), systemImage: "wand.and.stars") }
-                    .help(L("按点击、打字重新排推近段（会替换现在的段，可以撤销）", "Rebuild zooms from clicks and typing (replaces current zooms; undoable)"))
-                Button { ed.undo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!ed.canUndo).help(L("撤销 ⌘Z", "Undo ⌘Z"))
-                Button { ed.redo() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!ed.canRedo).help(L("重做 ⌘⇧Z", "Redo ⌘⇧Z"))
+                    .help(L("按录制时的点击和打字重新排推近段（会替换现在的段，可以撤销 ⌘Z）", "Rebuild zooms from your clicks and typing (replaces the current zooms; undo with ⌘Z)"))
+                Button { ed.undo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!ed.canUndo).help(L("撤销上一步（⌘Z）", "Undo the last change (⌘Z)"))
+                Button { ed.redo() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!ed.canRedo).help(L("重做刚撤销的那步（⌘⇧Z）", "Redo what you just undid (⌘⇧Z)"))
                 Spacer()
-                Button { ed.timelineScale = max(1, ed.timelineScale / 1.5) } label: { Image(systemName: "minus.magnifyingglass") }
-                    .disabled(ed.timelineScale <= 1).help(L("时间轴缩小", "Zoom timeline out"))
-                Slider(value: $ed.timelineScale, in: 1...8).frame(width: 90).help(L("时间轴缩放", "Timeline zoom"))
-                Button { ed.timelineScale = min(8, ed.timelineScale * 1.5) } label: { Image(systemName: "plus.magnifyingglass") }
-                    .disabled(ed.timelineScale >= 8).help(L("时间轴放大", "Zoom timeline in"))
+                Group {
+                    Button { ed.setTimelineScale(ed.timelineScale / 1.5) } label: { Image(systemName: "minus.magnifyingglass") }
+                        .disabled(ed.timelineScale <= 1)
+                    Slider(value: Binding(get: { ed.timelineScale }, set: { ed.setTimelineScale($0) }), in: TimelineMath.scaleRange).frame(width: 90)
+                    Button { ed.setTimelineScale(ed.timelineScale * 1.5) } label: { Image(systemName: "plus.magnifyingglass") }
+                        .disabled(ed.timelineScale >= 8)
+                }
+                .help(L("时间轴缩放（只改时间轴的显示，不影响成片）：也可以在时间轴上双指捏合 / 张开，或按住 ⌘ 滚动滚轮；放大后双指左右滑或滚轮翻看",
+                        "Timeline zoom (display only, doesn't change the video): pinch on the timeline or hold ⌘ and scroll; when zoomed in, swipe sideways or scroll to move along"))
             }
             HStack(spacing: 12) {
                 Color.clear.frame(width: 130, height: 1)   // 和右边的时间等宽，让播放键正好在中间
@@ -486,20 +513,31 @@ struct EditorView: View {
         }
     }
 
-    // 时间轴放大后能左右滚；播放时跟着播放头翻页
+    // 时间轴放大后能左右滚；播放时跟着播放头翻页。捏合 / ⌘+滚轮缩放、滚轮平移由 TimelineGestures 接住
+    @State private var tlPos = ScrollPosition(x: 0)
     private var timeline: some View {
         GeometryReader { g in
-            ScrollViewReader { sv in
-                ScrollView(.horizontal, showsIndicators: ed.timelineScale > 1.01) {
-                    ZStack(alignment: .topLeading) {
-                        TimelineStrip(ed: ed).frame(width: g.size.width * ed.timelineScale, height: g.size.height)
-                        // 滚动定位用的隐形锚点（每 1/8 宽一个）
-                        HStack(spacing: 0) { ForEach(0..<8, id: \.self) { k in Color.clear.frame(width: g.size.width * ed.timelineScale / 8, height: 1).id(k) } }
-                    }
-                }
-                .onChange(of: Int(ed.time / max(ed.duration, 0.01) * 8)) { _, k in
-                    if ed.timelineScale > 1.01 { withAnimation(.easeInOut(duration: 0.25)) { sv.scrollTo(min(max(k, 0), 7), anchor: .leading) } }
-                }
+            let w = g.size.width
+            ScrollView(.horizontal, showsIndicators: ed.timelineScale > 1.01) {
+                TimelineStrip(ed: ed).frame(width: w * ed.timelineScale, height: g.size.height)
+            }
+            .scrollPosition($tlPos)
+            .onScrollGeometryChange(for: Double.self) { $0.contentOffset.x } action: { _, x in
+                if abs(x - ed.timelineOffset) > 0.5 { ed.timelineOffset = TimelineMath.clampOffset(x, scale: ed.timelineScale, view: w) }
+            }
+            .background(TimelineGestures(ed: ed))
+            .onAppear { ed.timelineViewW = w }
+            .onChange(of: w) { _, nw in ed.timelineViewW = nw; ed.setTimelineScale(ed.timelineScale) }
+            .onChange(of: ed.timelineScrollSeq) { _, _ in
+                // 内容宽度这一帧才变，等布局完再滚
+                let o = ed.timelineOffset
+                DispatchQueue.main.async { tlPos.scrollTo(x: o) }
+            }
+            .onChange(of: ed.time) { _, t in
+                // 播放时播放头跑出可见区就翻一页
+                guard ed.playing, ed.timelineScale > 1.01 else { return }
+                let x = t / max(ed.duration, 0.01) * w * ed.timelineScale
+                if x < ed.timelineOffset || x > ed.timelineOffset + w - 20 { ed.panTimeline(x - w * 0.1 - ed.timelineOffset) }
             }
         }
     }
@@ -587,6 +625,44 @@ final class PlayerNSView: NSView {
 }
 
 // ---- 时间轴：刻度、事件小点、推近段、修剪把手、播放头 ----
+// 时间轴的触控板 / 滚轮：双指捏合或 ⌘+竖向滚轮 = 以鼠标处为锚点缩放；放大后竖向滚轮 = 左右平移（横向滑动交给 ScrollView 自己）。
+// 用本地事件监听，不挡住时间轴上的点击和拖动；正在拖段落 / 播放头时不缩放
+struct TimelineGestures: NSViewRepresentable {
+    let ed: StudioEditor
+    final class Catcher: NSView {
+        weak var ed: StudioEditor?
+        private var monitor: Any?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify, .scrollWheel]) { [weak self] e in
+                guard let self, let ed = self.ed, e.window === self.window else { return e }
+                let p = self.convert(e.locationInWindow, from: nil)
+                guard self.bounds.contains(p) else { return e }
+                return MainActor.assumeIsolated { self.handle(e, x: p.x, ed: ed) ? nil : e }
+            }
+        }
+        @MainActor private func handle(_ e: NSEvent, x: Double, ed: StudioEditor) -> Bool {
+            if ed.isDragging { return e.type == .magnify }
+            if e.type == .magnify {
+                ed.setTimelineScale(ed.timelineScale * (1 + e.magnification), anchorX: x); return true
+            }
+            let dx = e.scrollingDeltaX, dy = e.scrollingDeltaY
+            if e.modifierFlags.contains(.command) {
+                guard abs(dy) > abs(dx) else { return false }
+                ed.setTimelineScale(ed.timelineScale * TimelineMath.wheelFactor(dy, precise: e.hasPreciseScrollingDeltas), anchorX: x); return true
+            }
+            // 只有竖向（鼠标滚轮）且已放大：换成左右平移；横向滑动让 ScrollView 原样处理
+            guard ed.timelineScale > 1.01, abs(dy) > abs(dx) * 2 else { return false }
+            ed.panTimeline(-dy * (e.hasPreciseScrollingDeltas ? 1 : 12)); return true
+        }
+        deinit { if let m = monitor { NSEvent.removeMonitor(m) } }
+    }
+    func makeNSView(context: Context) -> Catcher { let v = Catcher(); v.ed = ed; return v }
+    func updateNSView(_ v: Catcher, context: Context) { v.ed = ed }
+}
+
 struct TimelineStrip: View {
     @ObservedObject var ed: StudioEditor
     private let rulerH = 22.0, segY = 40.0, segH = 46.0
@@ -728,6 +804,17 @@ enum TimelineMath {
         let dt = dx / w * d
         return isStart ? min(max(0, base.s + dt), base.e - 0.5) : max(min(d, base.e + dt), base.s + 0.5)
     }
+    // 时间轴视窗：放大 scale（1–8）、offset = 内容滚出左边的像素、view = 可见宽度
+    static let scaleRange = 1.0...8.0
+    static func clampOffset(_ o: Double, scale s: Double, view w: Double) -> Double { min(max(o, 0), max(0, w * s - w)) }
+    // 以可见区里 anchorX 处为锚点缩放：锚点下的时间在缩放前后屏幕位置不变（贴边时被夹住除外）
+    static func zoom(scale s: Double, offset o: Double, view w: Double, anchorX ax: Double, to newScale: Double) -> (scale: Double, offset: Double) {
+        let ns = min(max(newScale, scaleRange.lowerBound), scaleRange.upperBound)
+        let f = (o + ax) / (w * s)
+        return (ns, clampOffset(f * w * ns - ax, scale: ns, view: w))
+    }
+    // 滚轮 / 捏合换成缩放倍率
+    static func wheelFactor(_ dy: Double, precise: Bool) -> Double { pow(precise ? 1.006 : 1.12, dy) }
 }
 
 struct SegmentBlock: View {
@@ -1036,6 +1123,28 @@ enum StudioTests {
         check("final seek lands on last target", abs(player - last) < 1e-9, "\(player) vs \(last)")
         sc.end()
         check("player time accepted after drag", sc.observed(player))
+        // 3) 时间轴缩放：锚点下的时间缩放前后屏幕位置不变、边界夹住、滑块（以正中为锚点）一致
+        let vw = 1000.0
+        for (s0, o0, ax, ns) in [(1.0, 0.0, 300.0, 3.0), (3.0, 800.0, 120.0, 5.5), (5.5, 1500.0, 900.0, 2.0), (2.0, 400.0, 500.0, 2.0 * 1.006)] {
+            let r = TimelineMath.zoom(scale: s0, offset: o0, view: vw, anchorX: ax, to: ns)
+            let before = (o0 + ax) / (vw * s0) * d, after = (r.offset + ax) / (vw * r.scale) * d
+            let clamped = r.offset == 0 || abs(r.offset - (vw * r.scale - vw)) < 1e-9
+            check("anchor stays put s=\(s0)→\(ns) ax=\(ax)", abs(before - after) < 1e-9 || clamped, String(format: "%.4f → %.4f", before, after))
+        }
+        let big = TimelineMath.zoom(scale: 2, offset: 0, view: vw, anchorX: 500, to: 50), small = TimelineMath.zoom(scale: 4, offset: 2500, view: vw, anchorX: 500, to: 0.2)
+        check("scale clamped to 1–8", big.scale == 8 && small.scale == 1 && small.offset == 0)
+        check("offset clamped", TimelineMath.clampOffset(-50, scale: 3, view: vw) == 0 && TimelineMath.clampOffset(5000, scale: 3, view: vw) == 2000)
+        let edgeR = TimelineMath.zoom(scale: 3, offset: 2000, view: vw, anchorX: 1000, to: 4)   // 右边缘锚点：末尾仍贴右边
+        check("right-edge anchor keeps end visible", abs(edgeR.offset - (vw * 4 - vw)) < 1e-9)
+        let viaSlider = TimelineMath.zoom(scale: 2, offset: 600, view: vw, anchorX: vw / 2, to: 3)
+        let mid = (600 + vw / 2) / (vw * 2) * d, mid2 = (viaSlider.offset + vw / 2) / (vw * 3) * d
+        check("slider keeps center time", abs(mid - mid2) < 1e-9)
+        // 捏合一小步一小步放大到 3 倍，再缩回 1 倍：回到原位
+        var st = (scale: 1.0, offset: 0.0)
+        for _ in 0..<200 { st = TimelineMath.zoom(scale: st.scale, offset: st.offset, view: vw, anchorX: 700, to: st.scale * 1.0055) }
+        for _ in 0..<400 { st = TimelineMath.zoom(scale: st.scale, offset: st.offset, view: vw, anchorX: 700, to: st.scale / 1.0055) }
+        check("pinch in then out returns to start", st.scale == 1 && st.offset == 0)
+        check("wheel factor direction", TimelineMath.wheelFactor(10, precise: true) > 1 && TimelineMath.wheelFactor(-1, precise: false) < 1)
         print(ok ? "SCRUBTEST OK" : "SCRUBTEST FAIL")
         exit(ok ? 0 : 1)
     }
