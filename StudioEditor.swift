@@ -16,6 +16,10 @@ final class PlanBox: @unchecked Sendable {
     var renderer: StudioRenderer { lock.lock(); defer { lock.unlock() }; return r }
     var both: (StudioRenderer, [FramePlan]) { lock.lock(); defer { lock.unlock() }; return (r, value) }
     func set(_ p: [FramePlan], renderer: StudioRenderer) { lock.lock(); value = p; r = renderer; lock.unlock() }
+    // 字幕（素材时间查：预览按素材时间播）
+    private var cap: CaptionLayer?
+    var captions: CaptionLayer? { lock.lock(); defer { lock.unlock() }; return cap }
+    func setCaptions(_ c: CaptionLayer?) { lock.lock(); cap = c; lock.unlock() }
 }
 
 @MainActor
@@ -73,6 +77,12 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     private var duckNow: Float = 1             // 预览里原声音现在压到多少（有讲解时 0.25）
     static var countdownOn: Bool { UserDefaults.standard.object(forKey: "voiceCountdown") as? Bool ?? true }
     static var muteWhileRecording: Bool { UserDefaults.standard.object(forKey: "voiceMuteOriginal") as? Bool ?? true }
+    // 字幕
+    struct CaptionJob: Equatable { var message: String; var progress: Double? }
+    @Published var captionJob: CaptionJob?     // 正在识别：说明 + 进度（nil = 还不知道多少）
+    @Published var captionError: String?
+    @Published var editingCaption: UUID?       // 双击字幕：弹出改字
+    private var captionTask: Task<Void, Never>?
     private var undoStack: [StudioProject] = [], redoStack: [StudioProject] = []
     private var dragBase: StudioProject?
     private var scrubber = Scrubber()          // 拖动时的 seek 排队：同时只有一个在路上，只留最新目标；拖动中不让播放器回调改播放头
@@ -127,6 +137,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
             undoStack = [old]
         }
         box.set(box.renderer.plan(project, duration: duration), renderer: box.renderer)
+        box.setCaptions(captionLayer(box.renderer))
         let item = AVPlayerItem(asset: asset)
         item.videoComposition = makeComposition()
         item.audioMix = PreviewAudio.mix(tracks: aTracks, gains: gains)
@@ -239,6 +250,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         if voiceRec != nil { stopVoice() }
+        cancelCaptions()
         countdownTask?.cancel(); countdown = nil
         voicePlayer.stopAll()
         player.pause()
@@ -276,7 +288,9 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
             guard !plan.isEmpty else { req.finish(with: req.sourceImage, context: nil); return }
             let i = min(max(Int((req.compositionTime.seconds * fps).rounded()), 0), plan.count - 1)
             let kk = min(1, 1600 / max(r.lay.cw, r.lay.ch))   // 样式刚改、合成还没换时按新画布缩放
-            let img = r.frame(i, plan: plan, source: req.sourceImage).transformed(by: CGAffineTransform(scaleX: kk, y: kk))
+            var img = r.frame(i, plan: plan, source: req.sourceImage)
+            if let c = box.captions?.image(atSource: req.compositionTime.seconds) { img = c.composited(over: img) }
+            img = img.transformed(by: CGAffineTransform(scaleX: kk, y: kk))
             req.finish(with: img.composited(over: bg).cropped(to: bg.extent), context: nil)
         }
         c.renderSize = size
@@ -296,6 +310,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
                 var r = self.box.renderer
                 if r.look != self.project.look { r = StudioRenderer(project: self.dir, track: self.track, style: self.style, look: self.project.look) }
                 self.box.set(r.plan(self.project, duration: self.duration), renderer: r)
+                self.box.setCaptions(self.captionLayer(r))
                 self.player.currentItem?.videoComposition = self.makeComposition()
                 self.updateGains()
                 self.resetBoundaries()
@@ -312,8 +327,9 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         guard let (cg, _) = try? await g.image(at: CMTime(seconds: t, preferredTimescale: 600)) else { return }
         let (r, plan) = box.both, i = min(max(Int((t * fps).rounded()), 0), plan.count - 1)
         let lay = r.lay
-        let img = r.frame(i, plan: plan, source: CIImage(cgImage: cg))
-            .composited(over: CIImage(color: CIColor(red: 0.86, green: 0.86, blue: 0.88)).cropped(to: lay.canvas))
+        var fr = r.frame(i, plan: plan, source: CIImage(cgImage: cg))
+        if let c = box.captions?.image(atSource: t) { fr = c.composited(over: fr) }
+        let img = fr.composited(over: CIImage(color: CIColor(red: 0.86, green: 0.86, blue: 0.88)).cropped(to: lay.canvas))
         let ctx = CIContext()
         if let out = ctx.createCGImage(img, from: lay.canvas) { still = NSImage(cgImage: out, size: CGSize(width: lay.cw, height: lay.ch)) }
         time = t
@@ -574,6 +590,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         selected = seg.id
     }
     func deleteSelected() {
+        if let i = captionIndex(selected) { edit { $0.captions.remove(at: i) }; selected = nil; return }
         if let i = cutIndex(selected) { edit { $0.cuts.remove(at: i) }; selected = nil; return }
         if let i = voiceIndex(selected) { edit { $0.voiceovers.remove(at: i) }; selected = nil; return }
         guard let i = index(selected) else { return }
@@ -604,6 +621,100 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         let c = CutSegment(start: s, end: e)
         edit { $0.cuts.append(c); $0.cuts.sort { $0.start < $1.start } }
         selected = c.id
+    }
+
+    // ---- 字幕 ----
+    func captionLayer(_ r: StudioRenderer) -> CaptionLayer {
+        CaptionLayer(captions: project.captions, style: project.captionStyle, map: timeMap, trim: (project.trimStart, project.trimEnd),
+                     canvas: CGSize(width: r.lay.cw, height: r.lay.ch))
+    }
+    func captionIndex(_ id: UUID?) -> Int? { project.captions.firstIndex { $0.id == id } }
+    // 一句字幕能占的范围（素材时间）：不压到前后两句、不出修剪范围
+    func captionRoom(for id: UUID, in p: StudioProject) -> ClosedRange<Double> {
+        let cs = p.captions.sorted { $0.start < $1.start }
+        guard let i = cs.firstIndex(where: { $0.id == id }) else { return p.trimStart...p.trimEnd }
+        let lo = max(p.trimStart, i > 0 ? cs[i - 1].end : 0)
+        let hi = min(p.trimEnd, i + 1 < cs.count ? cs[i + 1].start : duration)
+        return lo...max(lo, hi)
+    }
+    // 在 t 处新加一句空白字幕（默认 2 秒，放不下就缩短），马上弹出改字
+    func addCaption(at t: Double) {
+        let cs = project.captions.sorted { $0.start < $1.start }
+        guard !cs.contains(where: { t >= $0.start && t < $0.end }) else { NSSound.beep(); return }
+        let lo = max(project.trimStart, cs.last(where: { $0.end <= t })?.end ?? 0)
+        let hi = min(project.trimEnd, cs.first(where: { $0.start > t })?.start ?? duration)
+        guard hi - lo >= 0.3 else { NSSound.beep(); return }
+        var s = max(lo, t), e = min(hi, s + 2)
+        s = max(lo, e - 2); e = min(hi, s + 2)
+        let c = Caption(start: s, end: e, text: "")
+        edit { $0.captions.append(c); $0.captions.sort { $0.start < $1.start } }
+        selected = c.id; editingCaption = c.id
+    }
+    func setCaptionText(_ id: UUID, _ text: String) {
+        guard let i = captionIndex(id) else { return }
+        let t = text.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
+        edit { $0.captions[i].text = t }
+    }
+    // 在播放头处拆成两句：字按时间比例分
+    func splitCaption(_ id: UUID, at t: Double) {
+        guard let i = captionIndex(id) else { return }
+        let c = project.captions[i]
+        guard t > c.start + 0.15, t < c.end - 0.15 else { NSSound.beep(); return }
+        let chars = Array(c.text), k = min(max(1, Int((Double(chars.count) * (t - c.start) / (c.end - c.start)).rounded())), max(1, chars.count - 1))
+        var a = c, b = Caption(start: t, end: c.end, text: chars.count > 1 ? String(chars[k...]) : "")
+        a.end = t; a.text = chars.count > 1 ? String(chars[..<k]) : c.text
+        b.id = UUID()
+        edit { $0.captions[i] = a; $0.captions.append(b); $0.captions.sort { $0.start < $1.start } }
+        selected = b.id
+    }
+    // 和下一句合成一句
+    func mergeCaption(_ id: UUID) {
+        let cs = project.captions.sorted { $0.start < $1.start }
+        guard let i = cs.firstIndex(where: { $0.id == id }), i + 1 < cs.count else { NSSound.beep(); return }
+        var a = cs[i]; let b = cs[i + 1]
+        let ascii = (a.text.last?.isASCII ?? false) && (b.text.first?.isASCII ?? false)
+        a.text = a.text + (ascii ? " " : "") + b.text; a.end = b.end
+        edit { p in p.captions = cs.enumerated().compactMap { $0.offset == i ? a : $0.offset == i + 1 ? nil : $0.element } }
+        selected = a.id
+    }
+    var hasRecordedAudio: Bool { !audioChannels.isEmpty }
+    // 语音转文字：识别完整个替换成新的字幕（能撤销）
+    func generateCaptions(_ source: CaptionMaker.Source) {
+        guard captionJob == nil else { return }
+        captionError = nil
+        captionJob = CaptionJob(message: L("准备识别…", "Preparing…"), progress: nil)
+        saveNow()
+        let dir = self.dir, p = project, canvas = CGSize(width: renderer.lay.cw, height: renderer.lay.ch)
+        captionTask = Task {
+            do {
+                let caps = try await CaptionMaker.make(dir: dir, project: p, source: source, canvas: canvas) { msg, f in
+                    Task { @MainActor [weak self] in if self?.captionJob != nil { self?.captionJob = CaptionJob(message: msg, progress: f) } }
+                }
+                if caps.isEmpty { captionError = L("没听出说的话", "No speech was found") }
+                else { edit { $0.captions = caps }; selected = nil }
+            } catch is CancellationError {
+            } catch {
+                if !Task.isCancelled { captionError = L("识别失败：", "Transcription failed: ") + error.localizedDescription }
+            }
+            captionJob = nil; captionTask = nil
+        }
+    }
+    func cancelCaptions() { captionTask?.cancel(); captionTask = nil; captionJob = nil }
+    // 另存 .srt（成片时间）：给剪映、抖音、B 站用
+    func exportSRT() {
+        let p = NSSavePanel()
+        p.allowedContentTypes = [.init(filenameExtension: "srt") ?? .plainText]
+        p.nameFieldStringValue = dir.lastPathComponent + ".srt"
+        p.directoryURL = Recorder.folder
+        guard p.runModal() == .OK, let u = p.url else { return }
+        do { try SRT.text(project).write(to: u, atomically: true, encoding: .utf8) }
+        catch { captionError = error.localizedDescription }
+    }
+    func capStyle<T: Equatable>(_ kp: WritableKeyPath<CaptionStyle, T>) -> Binding<T> {
+        Binding(get: { self.project.captionStyle[keyPath: kp] }, set: { v in self.edit { $0.captionStyle[keyPath: kp] = v } })
+    }
+    func capSlider(_ kp: WritableKeyPath<CaptionStyle, Double>) -> Binding<Double> {
+        Binding(get: { self.project.captionStyle[keyPath: kp] }, set: { v in self.dragBegin(); self.dragUpdate { $0.captionStyle[keyPath: kp] = v } })
     }
 
     // 在预览上点一下：设成选中那段的固定位置。p = 预览画面里的比例（左上为原点）
@@ -700,6 +811,8 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
 // ---- 界面 ----
 struct EditorView: View {
     @ObservedObject var ed: StudioEditor
+    @State var showCaptionMenu = false
+    @State var captionSource = CaptionMaker.Source.recorded
 
     var body: some View {
         VStack(spacing: 0) {
@@ -712,12 +825,13 @@ struct EditorView: View {
                     controlBar.padding(.horizontal, 14).padding(.vertical, 8)
                     Divider()
                     VStack(alignment: .leading, spacing: 10) {
-                        if ed.cutIndex(ed.selected) != nil { cutInspector.frame(height: 30) }   // 选中剪辑段
+                        if ed.captionIndex(ed.selected) != nil { captionInspector.frame(height: 30) }   // 选中字幕
+                        else if ed.cutIndex(ed.selected) != nil { cutInspector.frame(height: 30) }   // 选中剪辑段
                         else if ed.voiceIndex(ed.selected) != nil { voiceInspector.frame(height: 30) }   // 选中讲解
                         else if ed.selected != nil { inspector.frame(height: 30) }   // 选中推近段才出现
-                        timeline.frame(height: 146)
-                            .help(L("上面一条是剪掉 / 快放的段，中间是推近段，最下面是讲解；点选来调整，空白处双击新加推近，两端黄条修剪",
-                                   "Top lane: cut / speed-up parts; middle: zooms; bottom: voiceovers. Click to edit, double-click empty space to add a zoom, drag the yellow bars to trim"))
+                        timeline.frame(height: 176)
+                            .help(L("从上到下：剪掉 / 快放、推近、讲解、字幕；点选来调整，空白处双击新加推近（字幕那条双击新加字幕），两端黄条修剪",
+                                   "Top to bottom: cut / speed-up, zooms, voiceovers, captions. Click to edit, double-click empty space to add a zoom (a caption on the caption lane), drag the yellow bars to trim"))
                     }
                     .padding(14)
                 }
@@ -727,7 +841,14 @@ struct EditorView: View {
         }
         .frame(minWidth: 1000, minHeight: 640)
         .background(Color(nsColor: .windowBackgroundColor))
+        .alert(L("字幕", "Caption"), isPresented: Binding(get: { ed.editingCaption != nil }, set: { if !$0 { ed.editingCaption = nil } })) {
+            TextField(L("这句字幕", "Caption text"), text: $captionText)
+            Button(L("好", "OK")) { if let id = ed.editingCaption { ed.setCaptionText(id, captionText) }; ed.editingCaption = nil }
+            Button(L("取消", "Cancel"), role: .cancel) { ed.editingCaption = nil }
+        } message: { Text(L("一次只显示一行，太长会自动缩小字", "Shown on one line; long text is scaled down to fit")) }
+        .onChange(of: ed.editingCaption) { _, id in captionText = id.flatMap { i in ed.project.captions.first { $0.id == i }?.text } ?? "" }
     }
+    @State private var captionText = ""
 
     // 顶部只留文件名和「导出」
     private var toolbar: some View {
@@ -759,6 +880,7 @@ struct EditorView: View {
                 Button { ed.addCut(at: ed.time) } label: { Label(L("剪掉", "Cut"), systemImage: "scissors") }
                     .help(L("在播放头处放一段「剪掉」（红色），拖两头盖住不要的部分；选中后也能改成「加速」快放", "Mark a part to cut out at the playhead (red); drag its ends over what you don't want. Select it to switch to speed-up instead"))
                 voiceButton
+                captionButton
                 Button { ed.regenerate() } label: { Label(L("重新自动生成", "Auto-Generate"), systemImage: "wand.and.stars") }
                     .help(L("按录制时的点击和打字重新排推近段（会替换现在的段，可以撤销 ⌘Z）", "Rebuild zooms from your clicks and typing (replaces the current zooms; undo with ⌘Z)"))
                 Button { ed.undo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!ed.canUndo).help(L("撤销上一步（⌘Z）", "Undo the last change (⌘Z)"))
@@ -898,6 +1020,66 @@ extension EditorView {
         }
     }
 
+    // 字幕：点开选识别哪段声音，识别中显示进度、能取消；另存 .srt
+    @ViewBuilder var captionButton: some View {
+        if let j = ed.captionJob {
+            HStack(spacing: 6) {
+                if let f = j.progress { ProgressView(value: f).frame(width: 70) } else { ProgressView().controlSize(.small) }
+                Text(j.message).font(.caption).foregroundStyle(.secondary).lineLimit(1).frame(maxWidth: 190, alignment: .leading)
+                Button(L("取消", "Cancel")) { ed.cancelCaptions() }.controlSize(.small)
+            }
+        } else {
+            Button { showCaptionMenu.toggle() } label: { Label(L("字幕", "Captions"), systemImage: "captions.bubble") }
+                .help(L("把说的话自动变成字幕（在本机识别普通话），一次只显示一行；也能另存 .srt", "Turn speech into captions (Mandarin, on this Mac), one line at a time; you can also save an .srt"))
+                .popover(isPresented: $showCaptionMenu, arrowEdge: .bottom) { captionMenu.padding(14).frame(width: 290) }
+        }
+    }
+    @ViewBuilder private var captionMenu: some View {
+        let hasRec = ed.hasRecordedAudio, hasVoice = !ed.project.voiceovers.isEmpty
+        VStack(alignment: .leading, spacing: 10) {
+            Text(L("语音转字幕", "Speech to Captions")).font(.headline)
+            Picker(L("识别", "From"), selection: $captionSource) {
+                Text(L("录到的声音", "Recorded sound")).tag(CaptionMaker.Source.recorded).disabled(!hasRec)
+                Text(L("讲解", "Voiceover")).tag(CaptionMaker.Source.voice).disabled(!hasVoice)
+                Text(L("两样都要", "Both")).tag(CaptionMaker.Source.both).disabled(!hasRec || !hasVoice)
+            }
+            Text(L("在本机识别普通话，不上传。第一次用时系统会下载识别资源。会替换现在的字幕（可以撤销 ⌘Z）。",
+                   "Recognizes Mandarin on this Mac, nothing is uploaded. The first time, macOS downloads the speech model. Replaces the current captions (undo with ⌘Z)."))
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if let e = ed.captionError { Text(e).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
+            HStack {
+                Button(L("开始识别", "Transcribe")) { showCaptionMenu = false; ed.generateCaptions(captionSource) }
+                    .buttonStyle(.borderedProminent).disabled(!hasRec && !hasVoice)
+                Spacer()
+                Button(L("加一句", "Add")) { showCaptionMenu = false; ed.addCaption(at: ed.time) }
+                Button(L("存 .srt…", "Save .srt…")) { showCaptionMenu = false; ed.exportSRT() }.disabled(ed.project.captions.isEmpty)
+            }
+        }
+        .onAppear { if !hasRec && hasVoice { captionSource = .voice } else if hasRec && captionSource != .recorded && !hasVoice { captionSource = .recorded } }
+    }
+
+    // 选中字幕：时间、文字、改字 / 拆分 / 合并 / 删除
+    @ViewBuilder var captionInspector: some View {
+        if let i = ed.captionIndex(ed.selected) {
+            let c = ed.project.captions[i]
+            HStack(spacing: 12) {
+                Text(L("字幕", "Caption")).font(.callout.weight(.semibold))
+                Text(clock(c.start) + " – " + clock(c.end)).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                Divider().frame(height: 16)
+                Text(c.text.isEmpty ? L("（空白）", "(empty)") : c.text).font(.callout).lineLimit(1).truncationMode(.tail)
+                    .foregroundStyle(c.text.isEmpty ? .secondary : .primary)
+                Button(L("改字…", "Edit…")) { ed.editingCaption = c.id }
+                Spacer(minLength: 6)
+                Button { ed.splitCaption(c.id, at: ed.time) } label: { Label(L("拆分", "Split"), systemImage: "scissors") }
+                    .disabled(!(ed.time > c.start + 0.15 && ed.time < c.end - 0.15))
+                    .help(L("在播放头处拆成两句", "Split into two at the playhead"))
+                Button { ed.mergeCaption(c.id) } label: { Label(L("合并", "Merge"), systemImage: "arrow.right.to.line") }
+                    .help(L("和下一句合成一句", "Merge with the next caption"))
+                Button(role: .destructive) { ed.deleteSelected() } label: { Image(systemName: "trash") }.help(L("删除这句", "Delete this caption"))
+            }
+        }
+    }
+
     // 选中讲解：时间、音量、删除
     @ViewBuilder var voiceInspector: some View {
         if let i = ed.voiceIndex(ed.selected) {
@@ -1023,7 +1205,7 @@ struct TimelineGestures: NSViewRepresentable {
 
 struct TimelineStrip: View {
     @ObservedObject var ed: StudioEditor
-    private let rulerH = 22.0, cutY = 38.0, cutH = 20.0, segY = 64.0, segH = 40.0, voiceY = 112.0, voiceH = 26.0
+    private let rulerH = 22.0, cutY = 38.0, cutH = 20.0, segY = 64.0, segH = 40.0, voiceY = 112.0, voiceH = 26.0, capY = 144.0, capH = 26.0
     private let accent = Color(red: 0.42, green: 0.36, blue: 0.95)
 
     var body: some View {
@@ -1073,6 +1255,16 @@ struct TimelineStrip: View {
                         .clipped()
                         .frame(width: max(6, x(e) - x(r.start)), height: voiceH)
                         .offset(x: x(r.start), y: voiceY).allowsHitTesting(false)
+                }
+                // 字幕轨：每句一块；这一条的空白处双击新加一句
+                RoundedRectangle(cornerRadius: 5).fill(Color.secondary.opacity(0.07)).frame(width: w - 4, height: capH)
+                    .contentShape(Rectangle())
+                    .gesture(SpatialTapGesture(count: 2).onEnded { ed.addCaption(at: tAt($0.location.x + 2)) }
+                        .exclusively(before: SpatialTapGesture().onEnded { ed.selected = nil; ed.picking = false; ed.seek(tAt($0.location.x + 2)) }))
+                    .offset(x: 2, y: capY)
+                ForEach(ed.project.captions) { c in
+                    CaptionBlock(ed: ed, cap: c, w: w, d: d).frame(width: max(6, x(c.end) - x(c.start)), height: capH)
+                        .offset(x: x(c.start), y: capY)
                 }
                 // 修剪范围外压暗
                 Rectangle().fill(Color.black.opacity(0.28)).frame(width: max(0, x(ed.project.trimStart)), height: g.size.height).allowsHitTesting(false)
@@ -1416,6 +1608,78 @@ struct VoiceBlock: View {
     }
 }
 
+// 字幕轨上的一句：显示文字；拖中间挪、拖两头改起止（不压到前后两句），单击选中、双击改字
+struct CaptionBlock: View {
+    @ObservedObject var ed: StudioEditor
+    let cap: Caption
+    let w: Double, d: Double
+    private let minLen = 0.3
+    private let tint = Color(red: 0.96, green: 0.62, blue: 0.12)
+
+    var body: some View {
+        let sel = ed.selected == cap.id
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 5).fill(tint.opacity(sel ? 0.95 : 0.72))
+            RoundedRectangle(cornerRadius: 5).stroke(sel ? Color.white : Color.clear, lineWidth: 2)
+            Text(cap.text.isEmpty ? L("双击写字幕", "Double-click to type") : cap.text)
+                .font(.system(size: 10.5, weight: .semibold)).foregroundStyle(.white.opacity(cap.text.isEmpty ? 0.7 : 1))
+                .lineLimit(1).truncationMode(.tail).padding(.horizontal, 9)
+            HStack {
+                edge(isStart: true)
+                Spacer(minLength: 0)
+                edge(isStart: false)
+            }
+        }
+        .clipped()
+        .contentShape(Rectangle())
+        .gesture(TapGesture(count: 2).onEnded { ed.selected = cap.id; ed.editingCaption = cap.id }
+            .exclusively(before: TapGesture().onEnded { ed.selected = cap.id; ed.picking = false }))
+        .simultaneousGesture(DragGesture(minimumDistance: 2, coordinateSpace: .named(TimelineStrip.space))
+            .onChanged { v in
+                ed.selected = cap.id
+                ed.dragBegin()
+                let dt = v.translation.width / w * d
+                ed.dragUpdate { p in
+                    guard let i = p.captions.firstIndex(where: { $0.id == cap.id }) else { return }
+                    let b = p.captions[i], r = ed.captionRoom(for: cap.id, in: p), len = b.end - b.start
+                    let s = min(max(b.start + dt, r.lowerBound), r.upperBound - len)
+                    p.captions[i].start = s; p.captions[i].end = s + len
+                }
+            }
+            .onEnded { _ in ed.dragEnd() })
+        .help(cap.text.isEmpty ? L("空白字幕：双击写字", "Empty caption: double-click to type") : cap.text)
+    }
+
+    private func edge(isStart: Bool) -> some View {
+        Rectangle().fill(Color.white.opacity(0.001)).frame(width: 8)
+            .overlay(Capsule().fill(Color.white.opacity(0.9)).frame(width: 2.5, height: 12))
+            .contentShape(Rectangle())
+            .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
+            .onTapGesture { ed.selected = cap.id; ed.picking = false }
+            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named(TimelineStrip.space))
+                .onChanged { v in
+                    ed.selected = cap.id
+                    ed.dragBegin()
+                    let dt = v.translation.width / w * d
+                    ed.dragUpdate { p in
+                        guard let i = p.captions.firstIndex(where: { $0.id == cap.id }) else { return }
+                        p.captions[i] = CaptionDrag.resize(p.captions[i], isStart: isStart, dt: dt, room: ed.captionRoom(for: cap.id, in: p), minLen: minLen)
+                    }
+                }
+                .onEnded { _ in ed.dragEnd() })
+    }
+}
+
+// 拖字幕两头（纯函数，好测）：按「按下时的值 + 拖了多远」，夹在前后两句之间
+enum CaptionDrag {
+    static func resize(_ c: Caption, isStart: Bool, dt: Double, room r: ClosedRange<Double>, minLen: Double) -> Caption {
+        var n = c
+        if isStart { n.start = min(max(c.start + dt, r.lowerBound), c.end - minLen) }
+        else { n.end = max(min(c.end + dt, r.upperBound), c.start + minLen) }
+        return n
+    }
+}
+
 // 拖讲解（纯函数，好测）：dt 是时间轴上拖过的素材时间
 enum VoiceDrag {
     static func move(_ c: VoiceClip, dt: Double, duration d: Double) -> Double { min(max(0, c.start + dt), max(0, d - 0.05)) }
@@ -1458,7 +1722,7 @@ struct StylePanel: View {
     @AppStorage("voiceCountdown") private var voiceCountdown = true
     @AppStorage("voiceMuteOriginal") private var voiceMuteOriginal = true
     @State private var open: Set<String> = ProcessInfo.processInfo.environment["EDITOR_OPEN"].map { Set($0.split(separator: ",").map(String.init)) }
-        ?? ["preset", "aspect", "bg", "frame", "cursor", "audio", "blur"]
+        ?? ["preset", "aspect", "bg", "frame", "cursor", "audio", "caption", "blur"]
 
     var body: some View {
         ScrollView {
@@ -1469,6 +1733,7 @@ struct StylePanel: View {
                 section("frame", L("画面", "Frame")) { frameBox }
                 section("cursor", L("鼠标", "Cursor")) { cursorBox }
                 section("audio", L("声音", "Sound")) { audioBox }
+                section("caption", L("字幕", "Captions")) { captionBox }
                 section("blur", L("运动模糊", "Motion Blur")) { blurBox }
             }
             .frame(width: 270, alignment: .leading)   // 面板 300 宽，左右各留 15
@@ -1687,6 +1952,53 @@ struct StylePanel: View {
             Text(title).font(.callout).frame(width: 62, alignment: .leading)
             Slider(value: ed.audioSlider(kp), in: 0...2, onEditingChanged: { if !$0 { ed.dragEnd() } }).controlSize(.small)
             Text(fmt(ed.project.audio[keyPath: kp])).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
+        }
+    }
+
+    // 字幕样式：显示开关、粗细、字号、颜色、描边阴影、底色条、位置
+    private var captionBox: some View {
+        let cs = ed.project.captionStyle
+        let colors: [(RGB, String)] = [(RGB(1, 1, 1), L("白", "White")), (RGB(1, 0.86, 0.2), L("黄", "Yellow")), (RGB(0.1, 0.1, 0.1), L("黑", "Black"))]
+        return VStack(alignment: .leading, spacing: 8) {
+            Toggle(L("显示字幕", "Show captions"), isOn: ed.capStyle(\.show))
+            if ed.project.captions.isEmpty {
+                Text(L("还没有字幕：点播放栏的「字幕」自动识别，或在时间轴最下面一条双击新加", "No captions yet: click Captions in the play bar to transcribe, or double-click the bottom lane to add one"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Group {
+                chips(ed.capStyle(\.weight), [(.regular, L("常规", "Regular")), (.medium, L("中粗", "Medium")), (.semibold, L("粗", "Bold"))], columns: 3)
+                capSlider(L("字号", "Size"), \.size, 0.03...0.09) { "\(Int(($0 * 1000).rounded()))" }
+                HStack(spacing: 6) {
+                    Text(L("颜色", "Color")).font(.callout).frame(width: 62, alignment: .leading)
+                    ForEach(colors.indices, id: \.self) { k in
+                        let (c, name) = colors[k], on = cs.color == c
+                        Button { ed.capStyle(\.color).wrappedValue = c } label: {
+                            Circle().fill(c.color).frame(width: 18, height: 18)
+                                .overlay(Circle().stroke(on ? Color.accentColor : Color.secondary.opacity(0.4), lineWidth: on ? 2.5 : 1))
+                        }.buttonStyle(.plain).help(name)
+                    }
+                    ColorPicker("", selection: Binding(get: { cs.color.color }, set: { ed.capStyle(\.color).wrappedValue = RGB($0) }), supportsOpacity: false).labelsHidden()
+                }
+                HStack(spacing: 14) {
+                    Toggle(L("描边", "Outline"), isOn: ed.capStyle(\.outline))
+                    Toggle(L("阴影", "Shadow"), isOn: ed.capStyle(\.shadow))
+                }
+                Text(L("底色条", "Background bar")).font(.caption).foregroundStyle(.secondary)
+                chips(ed.capStyle(\.box), [(.none, L("无", "None")), (.dark, L("深色", "Dark")), (.light, L("浅色", "Light"))], columns: 3)
+                Text(L("位置", "Position")).font(.caption).foregroundStyle(.secondary)
+                chips(ed.capStyle(\.position), [(.bottom, L("底部", "Bottom")), (.top, L("顶部", "Top"))], columns: 2)
+                capSlider(L("离边", "Margin"), \.margin, 0.02...0.25) { "\(Int(($0 * 100).rounded()))%" }
+                Text(L("一次只显示一行；竖屏时字自动大一号，放底部时让开抖音等 App 底部的按钮", "One line at a time; in vertical video the text is a size bigger and, at the bottom, kept clear of TikTok-style buttons"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            .disabled(!cs.show).opacity(cs.show ? 1 : 0.45)
+        }.toggleStyle(.checkbox).font(.callout)
+    }
+    private func capSlider(_ title: String, _ kp: WritableKeyPath<CaptionStyle, Double>, _ range: ClosedRange<Double>, _ fmt: @escaping (Double) -> String) -> some View {
+        HStack(spacing: 8) {
+            Text(title).font(.callout).frame(width: 62, alignment: .leading)
+            Slider(value: ed.capSlider(kp), in: range, onEditingChanged: { if !$0 { ed.dragEnd() } }).controlSize(.small)
+            Text(fmt(ed.project.captionStyle[keyPath: kp])).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
         }
     }
 

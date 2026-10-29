@@ -456,11 +456,13 @@ struct StudioProject: Codable, Equatable {
     var cuts: [CutSegment] = []         // 中间剪掉 / 快放的段（Windows 版还没有，打开后会原样留着）
     var audio = AudioSettings()
     var voiceovers: [VoiceClip] = []    // 后来录的讲解（Windows 版还没有，打开后会原样留着）
+    var captions: [Caption] = []        // 字幕（素材时间；Windows 版还没有，打开后会原样留着）
+    var captionStyle = CaptionStyle()
 
     init(segments: [ZoomSegment] = [], trimStart: Double = 0, trimEnd: Double = 0, look: StudioLook = StudioLook()) {
         self.segments = segments; self.trimStart = trimStart; self.trimEnd = trimEnd; self.look = look
     }
-    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look, segmentsEdited, cuts, audio, voiceovers }
+    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look, segmentsEdited, cuts, audio, voiceovers, captions, captionStyle }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         segments = try c.decodeIfPresent([ZoomSegment].self, forKey: .segments) ?? []
@@ -471,6 +473,8 @@ struct StudioProject: Codable, Equatable {
         cuts = (try? c.decodeIfPresent([CutSegment].self, forKey: .cuts)) ?? []
         audio = (try? c.decodeIfPresent(AudioSettings.self, forKey: .audio)) ?? AudioSettings()
         voiceovers = (try? c.decodeIfPresent([VoiceClip].self, forKey: .voiceovers)) ?? []
+        captions = (try? c.decodeIfPresent([Caption].self, forKey: .captions)) ?? []
+        captionStyle = (try? c.decodeIfPresent(CaptionStyle.self, forKey: .captionStyle)) ?? CaptionStyle()
     }
 
     static func url(_ dir: URL) -> URL { dir.appendingPathComponent("project.json") }
@@ -988,6 +992,7 @@ final class StudioJob: @unchecked Sendable {
     private let audio: AudioSettings
     private let trackVolumes: [Double]         // 每条音轨的音量（按声道数认：双声道 = 电脑声音，单声道 = 麦克风）
     private let voice: VoiceMix?               // 后来录的讲解（GIF 不要声音）
+    private let captions: CaptionLayer         // 字幕：烧进画面（成片时间）
     private let progress: @Sendable (Double) -> Void
 
     init(project dir: URL, out: URL, style: StudioStyle, project: StudioProject? = nil, progress: @escaping @Sendable (Double) -> Void) async throws {
@@ -1020,6 +1025,12 @@ final class StudioJob: @unchecked Sendable {
         }
         trackVolumes = vols
         voice = style.gif ? nil : try await VoiceMix.load(dir: dir, project: p, map: map)
+        captions = CaptionLayer(captions: p.captions, style: p.captionStyle, map: map, trim: (p.trimStart, p.trimEnd), canvas: CGSize(width: r.lay.cw, height: r.lay.ch))
+    }
+    // 第 i 帧（成片时间）叠上字幕
+    private func withCaption(_ img: CIImage, _ i: Int) -> CIImage {
+        guard let c = captions.image(atOut: Double(i) / Double(r.st.fps)) else { return img }
+        return c.composited(over: img)
     }
 
     private let lock = NSLock()
@@ -1128,7 +1139,7 @@ final class StudioJob: @unchecked Sendable {
                     CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
                     guard let pb else { fail(Studio.failure("pool")); return false }
                     t0 = CACurrentMediaTime()
-                    let img = r.frame(i, plan: plan, source: CIImage(cvPixelBuffer: src))
+                    let img = withCaption(r.frame(i, plan: plan, source: CIImage(cvPixelBuffer: src)), i)
                     let dest = CIRenderDestination(pixelBuffer: pb)
                     dest.colorSpace = nil
                     let task: CIRenderTask
@@ -1240,7 +1251,7 @@ final class StudioJob: @unchecked Sendable {
             while let nx = next, nx.presentationTimeStamp <= pts { cur = nx; next = vOut.copyNextSampleBuffer() }
             try autoreleasepool {
                 guard let src = CMSampleBufferGetImageBuffer(cur) else { throw Studio.failure("frame") }
-                let img = r.frame(i, plan: plan, source: CIImage(cvPixelBuffer: src)).composited(over: white)
+                let img = withCaption(r.frame(i, plan: plan, source: CIImage(cvPixelBuffer: src)), i).composited(over: white)
                 guard let cg = r.ctx.createCGImage(img, from: lay.canvas, format: .RGBA8, colorSpace: srgb) else { throw Studio.failure("gif frame") }
                 CGImageDestinationAddImage(dst, cg, frameProps)
             }
