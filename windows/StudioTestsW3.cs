@@ -232,8 +232,10 @@ namespace ScreenRecorder
                     var cz = Render(pz, "camera-zoom"); var czn = Render(pzn, "camera-zoom-plain");
                     if (cz != null && czn != null)
                     {
-                        var dz = Diff(Grab(czn, 6.5, W, H), Grab(cz, 6.5, W, H), W, H, 12);
-                        r.Check("zoomed in: bubble the same size (not magnified)", Math.Abs((dz.x1 - dz.x0) - (d.x1 - d.x0)) <= 3 && Math.Abs(dz.x0 - d.x0) <= 3, $"{dz.x1 - dz.x0} vs {d.x1 - d.x0}");
+                        // 量摄像头画面本身（中心那一行亮度和中心一样的像素有多宽），不量阴影：推近后小窗底下的画面变了，阴影外沿跟着变
+                        int Disc(byte[] f) { double lc = Luma(f, W, cxp, cyp, 1); int a0 = cxp, b0 = cxp; while (a0 > 0 && Math.Abs(Luma(f, W, a0 - 1, cyp, 0) - lc) < 10) a0--; while (b0 < W - 1 && Math.Abs(Luma(f, W, b0 + 1, cyp, 0) - lc) < 10) b0++; return b0 - a0 + 1; }
+                        int wz = Disc(Grab(cz, 6.5, W, H)), wn = Disc(Grab(cam, 6.5, W, H));
+                        r.Check("zoomed in: bubble the same size (not magnified)", Math.Abs(wz - wn) <= 3 && Math.Abs(wn - eside) < 8, $"{wz} vs {wn} (side {F(eside)})");
                     }
                     // 布局：2–4 全屏、5–7 分屏、8–9 隐藏
                     var pl = Base(false, true);
