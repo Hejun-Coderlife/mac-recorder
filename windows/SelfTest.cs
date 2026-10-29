@@ -74,7 +74,7 @@ namespace ScreenRecorder
                     var log = new System.Text.StringBuilder();
                     var sw = System.Diagnostics.Stopwatch.StartNew();
                     proj.Finish(s2.FirstFrameAt, p => { }, m => log.AppendLine(m));
-                    extra = $"studio raw={proj.Raw} first-frame-offset={(s2.FirstFrameAt - startClock):0.000}s render={sw.Elapsed.TotalSeconds:0.0}s" + Environment.NewLine + log + (input?.Log ?? "");
+                    extra = $"studio raw={proj.Raw} first-frame-offset={(s2.FirstFrameAt - startClock):0.000}s render={sw.Elapsed.TotalSeconds:0.0}s" + Environment.NewLine + log + (input?.Log ?? "") + "cursor: " + string.Join("; ", proj.Tracker.Seen) + Environment.NewLine;
                     done = proj.Out;
                 }
                 File.WriteAllText(result, "OK " + done + Environment.NewLine + src.Kind + " " + src.Detail + Environment.NewLine + extra);

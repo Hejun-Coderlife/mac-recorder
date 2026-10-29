@@ -34,6 +34,7 @@ namespace ScreenRecorder
         uint hookThreadId;
         volatile bool running;
         LowLevelProc mouseProc, keyProc;       // 留着引用，别被回收
+        public readonly List<string> Seen = new List<string>();   // 自测时看系统报的指针状态
 
         public CursorTracker(Func<Rectangle?> area, double pixelsPerPoint) { areaOf = area; ppp = pixelsPerPoint; }
 
@@ -79,7 +80,9 @@ namespace ScreenRecorder
             var ci = new CURSORINFO { cbSize = Marshal.SizeOf<CURSORINFO>() };
             if (!GetCursorInfo(ref ci)) return;
             double now = Clock.Now;
-            int shape = (ci.flags & 1) == 0 ? -1 : ShapeIndex(ci.hCursor);   // CURSOR_SHOWING
+            // 有指针图案就画（同 Mac 版）；没接鼠标的电脑（虚拟机等）系统会报「没显示」，但图案还在
+            int shape = ci.hCursor != IntPtr.Zero ? ShapeIndex(ci.hCursor) : (ci.flags & 1) != 0 ? ShapeIndex(arrowHandle) : -1;
+            if (Seen.Count < 8) { var key = $"flags={ci.flags} cursor={(ci.hCursor == IntPtr.Zero ? "none" : ci.hCursor == arrowHandle ? "arrow" : "other")}"; if (!Seen.Contains(key)) Seen.Add(key); }
             bool left = (GetAsyncKeyState(0x01) & 0x8000) != 0;
             lock (gate)
             {
