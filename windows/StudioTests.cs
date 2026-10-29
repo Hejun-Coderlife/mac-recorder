@@ -84,7 +84,9 @@ namespace ScreenRecorder
             };
             var plan = StudioPlan.Make(tr, lay, st, look, p.Segments, (int)(dur * fps), dur);
             FramePlan At(double t) => plan[Math.Min(plan.Length - 1, (int)(t * fps))];
-            r.Check("zoom inside follow segment", Math.Abs(At(4.5).z - 3) < 0.05, "z=" + F(At(4.5).z));
+            // 段里镜头在别处远距离平移时会「边移边退」（故意的），所以看段内后半程推到的最大倍数
+            double zmax = Enumerable.Range((int)(2.5 * fps), (int)(2.4 * fps)).Max(i => plan[Math.Min(plan.Length - 1, i)].z);
+            r.Check("zoom inside follow segment", Math.Abs(zmax - 3) < 0.05, "max z=" + F(zmax) + " z(4.5)=" + F(At(4.5).z));
             r.Check("zoomed out between segments", At(7.5).z < 1.08, "z=" + F(At(7.5).z));
             var tf = At(11.5);
             double hw = lay.cw / (2 * 2.0 * lay.s), hh = lay.ch / (2 * 2.0 * lay.s);
