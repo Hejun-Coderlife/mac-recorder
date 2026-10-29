@@ -63,8 +63,9 @@ jobs:
           $env:UPDATE_TEST = "1"; $env:UPDATE_FAKE_VERSION = "1.0"; $env:UPDATE_NORELAUNCH = "1"; $env:UPDATE_TOKEN = "${{ github.token }}"
           $p = Start-Process -FilePath "$dir\录屏.exe" -Wait -PassThru
           $res = "$env:TEMP\update_test.txt"
-          for ($i = 0; $i -lt 90 -and -not ((Test-Path $res) -and (Get-Content $res -Raw) -match "COPIED|COPY FAIL|FAIL|UPTODATE")); $i++) { Start-Sleep 1 }
-          for ($i = 0; $i -lt 60 -and (Get-Content $res -Raw) -match "^STAGED" -and (Get-Content $res -Raw) -notmatch "COPIED|COPY FAIL"; $i++) { Start-Sleep 1 }
+          # 安装脚本在本程序退出后才覆盖，做完往结果文件追加 COPIED OK / COPY FAIL
+          function Done { (Test-Path $res) -and ((Get-Content $res -Raw) -match "COPIED|FAIL|UPTODATE") }
+          for ($i = 0; $i -lt 120 -and -not (Done); $i++) { Start-Sleep 1 }
           $txt = Get-Content $res -Raw
           Write-Host "exit=$($p.ExitCode)`n$txt"
           if ($p.ExitCode -ne 0 -or $txt -notmatch "STAGED" -or $txt -notmatch "COPIED OK") { throw "update self-test failed" }
