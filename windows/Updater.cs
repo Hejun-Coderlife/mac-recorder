@@ -114,11 +114,13 @@ namespace ScreenRecorder
             var work = Path.Combine(Path.GetTempPath(), "录屏-update-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(work);
             var zip = Path.Combine(work, AssetName);
-            using (var c = Client())
-            {
-                c.DownloadProgressChanged += (s, e) => progress(e.ProgressPercentage);
-                await c.DownloadFileTaskAsync(new Uri(r.ZipUrl), zip);
-            }
+            if (File.Exists(r.ZipUrl)) File.Copy(r.ZipUrl, zip);   // 自测：UPDATE_ZIP 给的本地安装包
+            else
+                using (var c = Client())
+                {
+                    c.DownloadProgressChanged += (s, e) => progress(e.ProgressPercentage);
+                    await c.DownloadFileTaskAsync(new Uri(r.ZipUrl), zip);
+                }
             var dir = Path.Combine(work, "new");
             await Task.Run(() => ZipFile.ExtractToDirectory(zip, dir));
             if (!File.Exists(Path.Combine(dir, "录屏.exe"))) throw new Exception(L("下载的安装包里没有 录屏.exe", "录屏.exe is missing from the downloaded package"));
@@ -148,21 +150,25 @@ for ($i = 0; $i -lt 20 -and -not $ok; $i++) {
     Get-ChildItem -LiteralPath $Src | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $Dst -Recurse -Force -ErrorAction Stop }
     # 程序被改过名字的话，也把新的 录屏.exe 盖到原来的名字上，重新打开的还是新版
     $name = Split-Path -Leaf $Exe
-    if ($name -ne '录屏.exe') {
-      Copy-Item -LiteralPath (Join-Path $Src '录屏.exe') -Destination $Exe -Force -ErrorAction Stop
-      $cfg = Join-Path $Src '录屏.exe.config'
-      if (Test-Path -LiteralPath $cfg) { Copy-Item -LiteralPath $cfg -Destination ($Exe + '.config') -Force -ErrorAction Stop }
-    }
+    if ($name -ne '录屏.exe') { Copy-Item -LiteralPath (Join-Path $Src '录屏.exe') -Destination $Exe -Force -ErrorAction Stop }
     $ok = $true
   } catch { $err = $_.Exception.Message; Start-Sleep -Milliseconds 500 }
 }
-if ($ok) { Log 'COPIED OK' } else { Log ('COPY FAIL ' + $err) }
+if ($ok) {
+  # 新包把 dll / ffmpeg 收进了「运行库」：删掉老布局散在外面的那些（删不掉也不要紧，程序优先用「运行库」里的）
+  if (Test-Path -LiteralPath (Join-Path $Src '运行库')) {
+    foreach ($f in 'ScreenRecorderLib.dll', 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'concrt140.dll', 'ffmpeg.exe', 'ffmpeg-LICENSE.txt', '录屏.exe.config', ((Split-Path -Leaf $Exe) + '.config')) {
+      Remove-Item -LiteralPath (Join-Path $Dst $f) -Force -ErrorAction SilentlyContinue
+    }
+  }
+  Log 'COPIED OK'
+} else { Log ('COPY FAIL ' + $err) }
 if ($Relaunch -eq 1) { Start-Process -FilePath $Exe -WorkingDirectory $Dst }
 Start-Sleep -Seconds 1
 Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction SilentlyContinue
 ";
 
-        // 自测（不弹窗）：UPDATE_TEST=1 [UPDATE_FAKE_VERSION=1.0] [UPDATE_NORELAUNCH=1] [UPDATE_TOKEN=令牌]
+        // 自测（不弹窗）：UPDATE_TEST=1 [UPDATE_FAKE_VERSION=1.0] [UPDATE_NORELAUNCH=1] [UPDATE_TOKEN=令牌] [UPDATE_ZIP=本地 zip]
         // 查最新版 → 下载 → 解压 → 交给安装脚本覆盖当前文件夹后退出；结果写 %TEMP%\update_test.txt
         //（本程序写 STAGED/UPTODATE/FAIL 一行，安装脚本做完再追加 COPIED OK 或 COPY FAIL）
         public static int SelfTest()
@@ -171,7 +177,9 @@ Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction SilentlyContinue
             try { File.Delete(result); } catch { }
             try
             {
-                var r = CheckAsync().GetAwaiter().GetResult();
+                // UPDATE_ZIP=本地安装包：不上网查，直接拿它当「新版本」装（测新包布局的升级、清理老文件）
+                var local = Environment.GetEnvironmentVariable("UPDATE_ZIP");
+                var r = local != null ? new Release { Tag = "v99.0", Version = new Version(99, 0), ZipUrl = Path.GetFullPath(local) } : CheckAsync().GetAwaiter().GetResult();
                 if (r == null) { File.WriteAllText(result, "UPTODATE current=" + Show(Current) + "\r\n"); return 0; }
                 if (!CanWriteAppDir()) { File.WriteAllText(result, "FAIL app folder not writable: " + AppDir + "\r\n"); return 1; }
                 var dir = DownloadAsync(r, _ => { }).GetAwaiter().GetResult();

@@ -10,6 +10,9 @@ namespace ScreenRecorder
     // 自测（不弹窗）：AUTOTEST=秒 [AUTOREGION=x,y,w,h（相对主屏幕）] [AUTOWINDOW=窗口标题里的字] [AUTOAUDIO=1 录电脑声音] [AUTOMIC=1] [AUTOOUT=输出路径]
     //   [AUTOSTUDIO=1 开 Studio 效果录，录完直接生成] [AUTOINPUT=1 录的时候自己动鼠标、点击、打字（SendInput）]
     // 只重新生成 Studio 版：STUDIO=素材文件夹 [STUDIO_OUT=输出路径] [STUDIO_FAKETRACK=1 没有 track.json 时编一条轨迹，测速度用]
+    //   [AUTOTHUMB=1 录完照常弹出右下角缩略图，等它自己消失；SHOTOUT=文件夹 存一张缩略图的截屏]
+    // 截图自测：SHOTTEST=1 [SHOTREGION=x,y,w,h（相对主屏幕）] [SHOTOUT=文件夹 存几张截屏] [THUMB_SECONDS=缩略图停留秒数] SHOT_VISIBLE=1
+    //   → 结果写到 %TEMP%\shot_test.txt（第一行 OK 或 FAIL）
     // 结果写到 %TEMP%\recorder_test.txt：第一行 OK 路径 或 FAIL 原因
     static class SelfTest
     {
@@ -77,6 +80,18 @@ namespace ScreenRecorder
                     extra = $"studio raw={proj.Raw} first-frame-offset={(s2.FirstFrameAt - startClock):0.000}s render={sw.Elapsed.TotalSeconds:0.0}s" + Environment.NewLine + log + (input?.Log ?? "") + "cursor: " + string.Join("; ", proj.Tracker.Seen) + Environment.NewLine;
                     done = proj.Out;
                 }
+                if (env("AUTOTHUMB") == "1")
+                {
+                    // 录完和真用一样：右下角出视频缩略图，没人动它就自己滑走；视频本来就在桌面
+                    var t = Thumb.ShowVideo(done, Thumb.VideoFrame(done));
+                    Pump(0.8);
+                    bool shown = t.Visible && Thumb.Open.Contains(t);
+                    if (env("SHOTOUT") is string so) Snap(Path.Combine(so, "video-thumb.png"));
+                    var until = DateTime.Now.AddSeconds(30);
+                    while (!t.IsDisposed && DateTime.Now < until) Pump(0.1);
+                    extra += $"thumb shown={shown} outcome={t.Outcome} closed={t.IsDisposed}" + Environment.NewLine;
+                    if (!shown || !t.IsDisposed) throw new Exception("video thumbnail didn't show / go away: " + extra);
+                }
                 File.WriteAllText(result, "OK " + done + Environment.NewLine + src.Kind + " " + src.Detail + Environment.NewLine + extra);
                 return 0;
             }
@@ -87,6 +102,173 @@ namespace ScreenRecorder
             }
         }
     
+        static void Pump(double secs)
+        {
+            var until = DateTime.Now.AddSeconds(secs);
+            while (DateTime.Now < until) { Application.DoEvents(); Thread.Sleep(15); }
+        }
+
+        // 截主屏幕右下角一块（缩略图在那儿）或整屏存 png，给人看
+        static void Snap(string file, bool whole = false)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(file));
+            var b = Screen.PrimaryScreen.Bounds;
+            var r = whole ? b : new System.Drawing.Rectangle(b.Right - b.Width / 2, b.Bottom - b.Height / 2, b.Width / 2, b.Height / 2);
+            using (var bmp = new System.Drawing.Bitmap(r.Width, r.Height))
+            {
+                using (var g = System.Drawing.Graphics.FromImage(bmp)) g.CopyFromScreen(r.Location, System.Drawing.Point.Empty, r.Size);
+                bmp.Save(file, System.Drawing.Imaging.ImageFormat.Png);
+            }
+        }
+
+        // ---- 截图自测：剪贴板、缩略图超时存桌面、悬停不消失、× 不落盘、拖进别的窗口、真拖一次选框 ----
+        public static int Shot()
+        {
+            string result = Path.Combine(Path.GetTempPath(), "shot_test.txt");
+            var log = new System.Text.StringBuilder();
+            var env = (Func<string, string>)Environment.GetEnvironmentVariable;
+            string outDir = env("SHOTOUT");
+            void Check(bool ok, string what) { log.AppendLine((ok ? "pass " : "FAIL ") + what); if (!ok) throw new Exception(what); }
+            try
+            {
+                var main = Screen.PrimaryScreen.Bounds;
+                // 截图里要有东西：开一个彩色的小窗口
+                var f = new Form { Text = "shot-subject", StartPosition = FormStartPosition.Manual, Bounds = new System.Drawing.Rectangle(main.X + main.Width / 2 - 350, main.Y + main.Height / 2 - 250, 700, 500), BackColor = System.Drawing.Color.FromArgb(70, 140, 220), TopMost = true };
+                f.Controls.Add(new Label { Text = "截图 Screenshot", Dock = DockStyle.Fill, Font = new System.Drawing.Font("Segoe UI", 36), ForeColor = System.Drawing.Color.White, TextAlign = System.Drawing.ContentAlignment.MiddleCenter });
+                f.Show(); Pump(0.5);
+
+                var rr = (env("SHOTREGION") ?? $"{main.Width / 2 - 300},{main.Height / 2 - 200},600,400").Split(',').Select(int.Parse).ToArray();
+                var region = new System.Drawing.Rectangle(main.X + rr[0], main.Y + rr[1], rr[2], rr[3]);
+                System.Drawing.Bitmap Grab()
+                {
+                    using (var all = Shots.Freeze(out var virt))
+                        return all.Clone(new System.Drawing.Rectangle(region.X - virt.X, region.Y - virt.Y, region.Width, region.Height), all.PixelFormat);
+                }
+
+                // 1. 剪贴板 + 缩略图 + 没人动 → 存到桌面
+                Thumb t1;
+                using (var bmp = Grab()) t1 = Shots.Deliver(bmp);
+                var img = Clipboard.GetImage();
+                Check(img != null && img.Width == region.Width && img.Height == region.Height, $"clipboard image {img?.Width}x{img?.Height} (want {region.Width}x{region.Height})");
+                Check(Clipboard.GetDataObject().GetDataPresent("PNG"), "clipboard has PNG");
+                Pump(0.6);
+                Check(t1.Visible && Thumb.Open.Contains(t1), "thumbnail shown");
+                if (outDir != null) Snap(Path.Combine(outDir, "1-thumb.png"));
+                string tmp1 = t1.FilePath;
+                var until = DateTime.Now.AddSeconds(20);
+                while (!t1.IsDisposed && DateTime.Now < until) Pump(0.1);
+                Check(t1.IsDisposed && t1.Outcome == "saved", $"timed out → {t1.Outcome}");
+                Check(t1.FilePath.StartsWith(App.Desktop, StringComparison.OrdinalIgnoreCase) && File.Exists(t1.FilePath) && !File.Exists(tmp1), "saved to Desktop: " + t1.FilePath);
+                using (var saved = new System.Drawing.Bitmap(t1.FilePath)) Check(saved.Width == region.Width && saved.Height == region.Height, "desktop png size");
+                if (outDir != null) File.Copy(t1.FilePath, Path.Combine(outDir, "desktop-shot.png"), true);
+                File.Delete(t1.FilePath);
+
+                // 2. 悬停不消失 → 点 × → 不落盘
+                Thumb t2;
+                using (var bmp = Grab()) t2 = Shots.Deliver(bmp);
+                Pump(0.8);
+                var c2 = t2.PointToScreen(new System.Drawing.Point(t2.Width / 2, t2.Height / 2));
+                Mouse.Move(c2.X, c2.Y); Pump(0.1); Mouse.Move(c2.X + 2, c2.Y + 1);
+                Pump(3.5);   // 比停留时间长
+                Check(!t2.IsDisposed, "hover keeps the thumbnail");
+                if (outDir != null) Snap(Path.Combine(outDir, "2-hover.png"));
+                var cb = t2.CloseBox; var x = t2.PointToScreen(new System.Drawing.Point(cb.X + cb.Width / 2, cb.Y + cb.Height / 2));
+                string tmp2 = t2.FilePath;
+                Mouse.Move(x.X, x.Y); Pump(0.2); Mouse.Click(); Pump(1.0);
+                Check(t2.Outcome == "dismissed", "× → " + t2.Outcome);
+                Pump(2.5);
+                Check(!File.Exists(tmp2) && !File.Exists(Path.Combine(App.Desktop, Path.GetFileName(tmp2))), "× leaves no file");
+                Mouse.Move(main.X + 20, main.Y + main.Height / 2); Pump(0.3);
+
+                // 3. 拖进别的窗口：收到文件和图片，缩略图走掉，桌面上没有
+                var drop = new Form { Text = "drop-target", StartPosition = FormStartPosition.Manual, Bounds = new System.Drawing.Rectangle(main.X + 40, main.Y + 40, 420, 320), AllowDrop = true, TopMost = true, BackColor = System.Drawing.Color.Beige };
+                string[] gotFiles = null; bool gotBitmap = false;
+                drop.DragEnter += (s, e) => e.Effect = DragDropEffects.Copy;
+                drop.DragOver += (s, e) => e.Effect = DragDropEffects.Copy;
+                drop.DragDrop += (s, e) => { gotFiles = e.Data.GetData(DataFormats.FileDrop) as string[]; gotBitmap = e.Data.GetDataPresent(DataFormats.Bitmap); };
+                drop.Show(); Pump(0.3);
+                Thumb t3;
+                using (var bmp = Grab()) t3 = Shots.Deliver(bmp);
+                Pump(0.8);
+                var c3 = t3.PointToScreen(new System.Drawing.Point(t3.Width / 2, t3.Height / 2));
+                var dst = drop.PointToScreen(new System.Drawing.Point(200, 150));
+                var mover = new Thread(() =>
+                {
+                    Mouse.Move(c3.X, c3.Y); Thread.Sleep(150); Mouse.Down(); Thread.Sleep(80);
+                    for (int i = 1; i <= 30; i++) { Mouse.Move(c3.X + (dst.X - c3.X) * i / 30, c3.Y + (dst.Y - c3.Y) * i / 30); Thread.Sleep(25); }
+                    Thread.Sleep(200); Mouse.Up();
+                }) { IsBackground = true };
+                mover.Start();
+                until = DateTime.Now.AddSeconds(10);
+                while (gotFiles == null && DateTime.Now < until) Pump(0.05);
+                Pump(1.0);
+                Check(gotFiles != null && gotFiles.Length == 1 && File.Exists(gotFiles[0]), "drop target got the file: " + (gotFiles == null ? "none" : string.Join(",", gotFiles)));
+                Check(gotBitmap, "drop target got a bitmap too");
+                Check(t3.Outcome == "dragged", "drag → " + t3.Outcome);
+                Pump(2.5);
+                Check(!File.Exists(Path.Combine(App.Desktop, Path.GetFileName(t3.FilePath))), "dragged shot not saved to Desktop");
+                drop.Close();
+
+                // 4. 真拖一次选框（遮罩是真的弹出来）
+                System.Drawing.Bitmap picked = null; bool cancelled = false;
+                Shots.Start(b => picked = b);
+                Pump(0.5);
+                Check(Shots.Active, "overlay shown");
+                var a = new System.Drawing.Point(main.X + main.Width / 2 - 250, main.Y + main.Height / 2 - 180);
+                var bpt = new System.Drawing.Point(a.X + 400, a.Y + 300);
+                var drag = new Thread(() =>
+                {
+                    Mouse.Move(a.X, a.Y); Thread.Sleep(150); Mouse.Down(); Thread.Sleep(60);
+                    for (int i = 1; i <= 25; i++) { Mouse.Move(a.X + (bpt.X - a.X) * i / 25, a.Y + (bpt.Y - a.Y) * i / 25); Thread.Sleep(25); }
+                    Thread.Sleep(300);
+                    if (outDir != null) Snap(Path.Combine(outDir, "3-overlay.png"), true);
+                    Mouse.Up();
+                }) { IsBackground = true };
+                drag.Start();
+                until = DateTime.Now.AddSeconds(10);
+                while (picked == null && DateTime.Now < until) Pump(0.05);
+                Check(picked != null && picked.Width == 400 && picked.Height == 300, $"overlay drag → {picked?.Width}x{picked?.Height} (want 400x300)");
+                Check(!Shots.Active, "overlay closed");
+                if (outDir != null) picked.Save(Path.Combine(outDir, "overlay-pick.png"), System.Drawing.Imaging.ImageFormat.Png);
+                picked.Dispose();
+
+                // 5. Esc 取消
+                Shots.Start(b => { picked = b; });
+                Pump(0.5);
+                picked = null;
+                SendKeys.SendWait("{ESC}");
+                Pump(0.5);
+                cancelled = !Shots.Active && picked == null;
+                Check(cancelled, "Esc cancels");
+
+                f.Close();
+                File.WriteAllText(result, "OK" + Environment.NewLine + log);
+                return 0;
+            }
+            catch (Exception e)
+            {
+                File.WriteAllText(result, "FAIL " + e.Message + Environment.NewLine + log + e);
+                return 1;
+            }
+        }
+
+        static class Mouse
+        {
+            public static void Move(int x, int y) => SetCursorPos(x, y);
+            public static void Down() => Send(0x0002);
+            public static void Up() => Send(0x0004);
+            public static void Click() { Down(); Thread.Sleep(40); Up(); }
+            static void Send(uint flags)
+            {
+                var i = new MINPUT { type = 0, mi = new MOUSEINPUT { dwFlags = flags } };
+                SendInput(1, new[] { i }, Marshal.SizeOf<MINPUT>());
+            }
+            [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr extra; }
+            [StructLayout(LayoutKind.Explicit, Size = 40)] struct MINPUT { [FieldOffset(0)] public uint type; [FieldOffset(8)] public MOUSEINPUT mi; }
+            [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+            [DllImport("user32.dll")] static extern uint SendInput(uint n, MINPUT[] inputs, int size);
+        }
+
         public static int RenderOnly()
         {
             string result = Path.Combine(Path.GetTempPath(), "recorder_test.txt");

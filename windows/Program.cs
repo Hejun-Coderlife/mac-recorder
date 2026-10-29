@@ -1,11 +1,16 @@
 // 录屏 · Screen Recorder（Windows 版）
 // 录制引擎：ScreenRecorderLib（Desktop Duplication / Windows.Graphics.Capture + Media Foundation 硬件编码，声音在库里混成一条音轨）
-// 界面语言跟随系统（中文 / 英文）；Studio 效果见 StudioCore.cs / StudioWin.cs（背景白色、出 mp4，读写视频用同目录的 ffmpeg.exe）
+// 界面语言跟随系统（中文 / 英文）；Studio 效果见 StudioCore.cs / StudioWin.cs（背景白色、出 mp4，读写视频用「运行库」里的 ffmpeg.exe）
+// 截图见 Shots.cs，录完 / 截完右下角浮出的缩略图见 Thumb.cs
+// 安装包布局：最外层只有 录屏.exe 和 README.txt，其余（录制引擎、VC++ 运行库、ffmpeg）都在「运行库」文件夹里
 using System;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace ScreenRecorder
@@ -27,8 +32,19 @@ namespace ScreenRecorder
             }
         }
 
+        // 录好的视频和没拖走的截图都放桌面（同 Mac 自带截图）；Studio 原始素材还在「视频\录屏\Studio 素材」
+        public static string Desktop => Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+
         public static string NewName() => $"{L("录屏", "Recording")} {DateTime.Now:yyyy-MM-dd HH.mm.ss}";
-        public static string NewFilePath() => Path.Combine(Folder, NewName() + ".mp4");
+        public static string NewFilePath() => Path.Combine(Desktop, NewName() + ".mp4");
+
+        // 桌面上已有同名文件就加 (2)、(3)…
+        public static string Unique(string path)
+        {
+            if (!File.Exists(path)) return path;
+            string dir = Path.GetDirectoryName(path), name = Path.GetFileNameWithoutExtension(path), ext = Path.GetExtension(path);
+            for (int i = 2; ; i++) { var p = Path.Combine(dir, $"{name} ({i}){ext}"); if (!File.Exists(p)) return p; }
+        }
 
         public static Icon Icon
         {
@@ -38,14 +54,40 @@ namespace ScreenRecorder
             }
         }
 
+        // 「运行库」文件夹：托管的 ScreenRecorderLib.dll 靠 AssemblyResolve 从这里加载，原生的 VC++ dll 靠 SetDllDirectory 找到
+        public const string LibDir = Studio.LibDirName;
+
         [STAThread]
         static int Main()
+        {
+            UseLibFolder();
+            return Run();   // 分开写：Main 里不能直接碰到引用 ScreenRecorderLib 的类型，否则还没装好 AssemblyResolve 就去找 dll 了
+        }
+
+        static void UseLibFolder()
+        {
+            var lib = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, LibDir);
+            if (!Directory.Exists(lib)) return;   // 老布局（dll 和 exe 放在一起）照样能用
+            SetDllDirectory(lib);
+            AppDomain.CurrentDomain.AssemblyResolve += (s, e) =>
+            {
+                var file = Path.Combine(lib, new AssemblyName(e.Name).Name + ".dll");
+                return File.Exists(file) ? Assembly.LoadFrom(file) : null;
+            };
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool SetDllDirectory(string path);
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static int Run()
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             if (Environment.GetEnvironmentVariable("STUDIO") != null) return SelfTest.RenderOnly();
             if (Environment.GetEnvironmentVariable("AUTOTEST") != null) return SelfTest.Run();
             if (Environment.GetEnvironmentVariable("UPDATE_TEST") != null) return Updater.SelfTest();
+            if (Environment.GetEnvironmentVariable("SHOTTEST") != null) return SelfTest.Shot();
+            Shots.CleanTemp();
             Application.Run(new MainForm());
             return 0;
         }

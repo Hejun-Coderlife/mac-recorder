@@ -14,7 +14,7 @@ namespace ScreenRecorder
     {
         readonly ListView list = new ListView();
         readonly CheckBox sysAudio = new CheckBox(), mic = new CheckBox(), cursor = new CheckBox(), studio = new CheckBox();
-        readonly Button recordBtn = new Button(), regionBtn = new Button(), refreshBtn = new Button(), folderBtn = new Button();
+        readonly Button recordBtn = new Button(), shotBtn = new Button(), regionBtn = new Button(), refreshBtn = new Button(), folderBtn = new Button();
         readonly Label timeLabel = new Label(), status = new Label(), hint = new Label();
         readonly Timer timer = new Timer { Interval = 250 };
         readonly LinkLabel updateLink = new LinkLabel(), checkLink = new LinkLabel();
@@ -29,7 +29,8 @@ namespace ScreenRecorder
         DateTime startedAt;
         bool busy;
 
-        const int HotkeyId = 1;
+        const int HotkeyId = 1, ShotHotkeyId = 2;
+        string lastFile;            // 刚存好的视频，「打开所在文件夹」时选中它
 
         public MainForm()
         {
@@ -97,21 +98,29 @@ namespace ScreenRecorder
             recordBtn.ForeColor = Color.White;
             recordBtn.Margin = new Padding(0, 6, 12, 6);
             recordBtn.Click += (s, e) => Toggle();
+            // 截图：和录制并排，录制中也能截
+            shotBtn.Text = L("截图", "Screenshot");
+            shotBtn.AutoSize = true;
+            shotBtn.MinimumSize = new Size(96, 44);
+            shotBtn.Margin = new Padding(0, 6, 12, 6);
+            shotBtn.Click += (s, e) => Screenshot();
             timeLabel.AutoSize = true; timeLabel.Anchor = AnchorStyles.Left;
             timeLabel.Font = new Font("Consolas", Font.Size + 6);
             timeLabel.ForeColor = Color.FromArgb(220, 40, 40);
-            hint.Text = L("Ctrl+Alt+R 开始 / 停止", "Ctrl+Alt+R start / stop");
+            hint.Text = L("Ctrl+Alt+R 录屏 · Ctrl+Alt+S 截图", "Ctrl+Alt+R record · Ctrl+Alt+S screenshot");
             hint.AutoSize = true; hint.Anchor = AnchorStyles.Right; hint.ForeColor = SystemColors.GrayText;
+            rec.ColumnCount = 4;
+            rec.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             rec.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             rec.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             rec.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            rec.Controls.Add(recordBtn, 0, 0); rec.Controls.Add(timeLabel, 1, 0); rec.Controls.Add(hint, 2, 0);
+            rec.Controls.Add(recordBtn, 0, 0); rec.Controls.Add(shotBtn, 1, 0); rec.Controls.Add(timeLabel, 2, 0); rec.Controls.Add(hint, 3, 0);
             root.Controls.Add(rec);
 
             // 状态 + 打开文件夹
             var bottom = Row();
             status.AutoSize = true; status.Anchor = AnchorStyles.Left; status.MaximumSize = new Size(440, 0);
-            Btn(folderBtn, L("打开文件夹", "Open Folder"), (s, e) => Open(Folder));
+            Btn(folderBtn, L("打开所在文件夹", "Show in Folder"), (s, e) => ShowInFolder());
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             bottom.Controls.Add(status, 0, 0); bottom.Controls.Add(folderBtn, 1, 0);
@@ -280,7 +289,7 @@ namespace ScreenRecorder
 
         void Say(string msg, bool error = false)
         {
-            status.Text = string.IsNullOrEmpty(msg) ? L("保存到：视频 \\ ", "Saved to: Videos \\ ") + Path.GetFileName(Folder) : msg;
+            status.Text = string.IsNullOrEmpty(msg) ? L("视频和截图都存到桌面", "Recordings and screenshots go to the Desktop") : msg;
             status.ForeColor = error ? Color.FromArgb(200, 30, 30) : SystemColors.GrayText;
         }
 
@@ -297,8 +306,8 @@ namespace ScreenRecorder
                 return;
             }
             bool studioOn = studio.Checked;
-            if (studioOn && !StudioProject.Available) { Say(L("找不到 ffmpeg.exe，Studio 效果用不了（要和 录屏.exe 放在同一个文件夹）", "ffmpeg.exe is missing next to the app, Studio effects can't run"), true); return; }
-            string name = NewName(), outPath = Path.Combine(Folder, name + ".mp4");
+            if (studioOn && !StudioProject.Available) { Say(L("找不到 ffmpeg.exe，Studio 效果用不了（应该在「运行库」文件夹里，整个文件夹要和 录屏.exe 放在一起）", "ffmpeg.exe is missing from the 运行库 folder next to the app, Studio effects can't run"), true); return; }
+            string name = NewName(), outPath = Unique(Path.Combine(Desktop, name + ".mp4"));
             // Studio 模式：原始画面写进素材文件夹，成片录完再生成到 outPath
             StudioProject proj = studioOn ? StudioProject.Create(name, outPath, src) : null;
             Session s;
@@ -350,9 +359,30 @@ namespace ScreenRecorder
                 return;
             }
             if (proj != null) { RenderStudio(proj, s.FirstFrameAt); return; }
+            Saved(path);
+        }
+
+        // 存好了：右下角浮出缩略图（拖进别的软件 / 单击播放），不再自动打开播放器
+        void Saved(string path)
+        {
             System.Media.SystemSounds.Exclamation.Play();
-            Say(L("已保存：", "Saved: ") + Path.GetFileName(path));
-            Open(path);   // 录完直接用默认播放器打开
+            lastFile = path;
+            Say(L("已存到桌面：", "Saved to Desktop: ") + Path.GetFileName(path));
+            System.Threading.Tasks.Task.Run(() => Thumb.VideoFrame(path))
+                .ContinueWith(t => BeginInvoke((Action)(() => Thumb.ShowVideo(path, t.Result))));
+        }
+
+        void ShowInFolder()
+        {
+            if (lastFile != null && File.Exists(lastFile)) { try { Process.Start("explorer.exe", $"/select,\"{lastFile}\""); } catch { } }
+            else Open(Desktop);
+        }
+
+        // 截图：定格屏幕 → 拖框 → 剪贴板 + 右下角缩略图
+        void Screenshot()
+        {
+            if (Shots.Active) return;
+            Shots.Start(bmp => { using (bmp) Shots.Deliver(bmp); });
         }
 
         // 存轨迹，按轨迹生成 Studio 版（后台线程；进度显示在状态栏）
@@ -376,9 +406,7 @@ namespace ScreenRecorder
                         Say(L("生成 Studio 版失败（原始素材在「Studio 素材」文件夹）：", "Studio render failed (raw footage is in the “Studio 素材” folder): ") + err, true);
                         return;
                     }
-                    System.Media.SystemSounds.Exclamation.Play();
-                    Say(L("已保存：", "Saved: ") + Path.GetFileName(proj.Out));
-                    Open(proj.Out);
+                    Saved(proj.Out);
                 }));
             });
         }
@@ -395,6 +423,8 @@ namespace ScreenRecorder
             SetWindowDisplayAffinity(Handle, 0x11);
             if (!RegisterHotKey(Handle, HotkeyId, 0x0001 | 0x0002 | 0x4000, (uint)Keys.R))   // Alt+Ctrl，不重复触发
                 Say(L("Ctrl+Alt+R 被别的程序占用了，只能点按钮开始 / 停止", "Ctrl+Alt+R is taken by another app; use the button to start / stop"), true);
+            if (!RegisterHotKey(Handle, ShotHotkeyId, 0x0001 | 0x0002 | 0x4000, (uint)Keys.S))
+                Say(L("Ctrl+Alt+S 被别的程序占用了，截图只能点「截图」按钮", "Ctrl+Alt+S is taken by another app; use the Screenshot button"), true);
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
@@ -413,12 +443,14 @@ namespace ScreenRecorder
                 System.Threading.Thread.Sleep(1500);
             }
             UnregisterHotKey(Handle, HotkeyId);
+            UnregisterHotKey(Handle, ShotHotkeyId);
             base.OnFormClosing(e);
         }
 
         protected override void WndProc(ref Message m)
         {
             if (m.Msg == 0x0312 && m.WParam.ToInt32() == HotkeyId) Toggle();   // WM_HOTKEY
+            if (m.Msg == 0x0312 && m.WParam.ToInt32() == ShotHotkeyId) Screenshot();
             base.WndProc(ref m);
         }
 

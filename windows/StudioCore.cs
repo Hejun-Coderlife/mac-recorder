@@ -613,7 +613,16 @@ namespace ScreenRecorder
 
     static class Studio
     {
-        public static string FfmpegPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, OperatingSystemIsWindows() ? "ffmpeg.exe" : "ffmpeg");
+        // 安装包里 ffmpeg 在「运行库」文件夹；老布局（和 exe 放一起）、Mac 上的测试工具也认
+        public const string LibDirName = "运行库";
+        public static string FfmpegPath = FindFfmpeg();
+
+        static string FindFfmpeg()
+        {
+            string name = OperatingSystemIsWindows() ? "ffmpeg.exe" : "ffmpeg", baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            var lib = Path.Combine(baseDir, LibDirName, name);
+            return File.Exists(lib) ? lib : Path.Combine(baseDir, name);
+        }
 
         static bool OperatingSystemIsWindows() => Path.DirectorySeparatorChar == '\\';
 
