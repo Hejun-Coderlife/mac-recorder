@@ -176,7 +176,15 @@ struct StudioLook: Codable, Equatable {
         ripple = v(.ripple, z.ripple); blur = v(.blur, z.blur)
     }
 
-    var transparent: Bool { background == .transparent }
+    // 选了「图片 / 壁纸」但还没选到能用的图：按透明处理（预览、导出都一样）
+    var transparent: Bool {
+        switch background {
+        case .transparent: true
+        case .image: imageURL == nil
+        case .wallpaper: wallpaper.isEmpty || !FileManager.default.fileExists(atPath: wallpaper)
+        default: false
+        }
+    }
     var ratio: Double? {
         switch aspect { case .original: nil; case .wide: 16.0 / 9; case .tall: 9.0 / 16; case .square: 1; case .classic: 4.0 / 3 }
     }
@@ -285,17 +293,19 @@ struct StudioProject: Codable, Equatable {
     var trimStart = 0.0
     var trimEnd = 0.0
     var look = StudioLook()
+    var segmentsEdited = false          // 推近段手动改过：以后自动规则变了也不重算；没改过的打开时按最新规则重排
 
     init(segments: [ZoomSegment] = [], trimStart: Double = 0, trimEnd: Double = 0, look: StudioLook = StudioLook()) {
         self.segments = segments; self.trimStart = trimStart; self.trimEnd = trimEnd; self.look = look
     }
-    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look }
+    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look, segmentsEdited }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         segments = try c.decodeIfPresent([ZoomSegment].self, forKey: .segments) ?? []
         trimStart = try c.decodeIfPresent(Double.self, forKey: .trimStart) ?? 0
         trimEnd = try c.decodeIfPresent(Double.self, forKey: .trimEnd) ?? 0
         look = (try? c.decodeIfPresent(StudioLook.self, forKey: .look)) ?? StudioLook()   // 旧工程没有样式：用默认
+        segmentsEdited = try c.decodeIfPresent(Bool.self, forKey: .segmentsEdited) ?? false   // 旧工程没有这个标记：当作没改过
     }
 
     static func url(_ dir: URL) -> URL { dir.appendingPathComponent("project.json") }
@@ -308,7 +318,7 @@ struct StudioProject: Codable, Equatable {
             // 只写了样式、没写推近段的工程（自测用）：推近段按自动规则补上
             struct Keys: Decodable { var segments: [ZoomSegment]?; var trimEnd: Double? }
             if let k = try? JSONDecoder().decode(Keys.self, from: d) {
-                if k.segments == nil { p.segments = StudioPlan.autoSegments(track, duration: duration, zoom: zoom) }
+                if k.segments == nil || !p.segmentsEdited { p.segments = StudioPlan.autoSegments(track, duration: duration, zoom: zoom) }
                 if k.trimEnd == nil { p.trimEnd = duration }
             }
             return p
@@ -349,15 +359,43 @@ enum StudioPlan {
         return ev.filter { $0.t >= 0 && $0.t <= duration - 1 }.sorted { $0.t < $1.t }
     }
 
-    // 自动生成推近段：事件前 0.6 秒开始推近，最后一个事件后停 3.5 秒；两段之间不到 1.5 秒就连成一段（别刚拉远又推近）
+    // 自动生成推近段（参考 Screen Studio 的观感）：
+    // - 事件前 0.6 秒推近，最后一个事件后停 3.5 秒；同一块地方接着操作、间隔不到 1.5 秒就连成一段（别刚拉远又推近）
+    // - 下一个事件离得远（超过约 1/3 屏幕）、中间又有空：前一段收掉，拉回全景至少 1.2 秒再推近过去；
+    //   来不及拉远：留在同一段，镜头平移过去，路远时边移边往后退一点（见 make）
+    // - 一段最长约 8 秒：再往后有 ≥1.6 秒的空档就在那里断开、回一下全景（1 秒）；一直不停超过 10 秒就硬断
+    static let zoomOutHold = 1.2, shortOut = 1.0, leadIn = 0.6, holdAfter = 3.5, mergeGap = 1.5, maxLen = 8.0, hardMax = 10.0
     static func autoSegments(_ tr: Track, duration: Double, zoom: Double = 2.0) -> [ZoomSegment] {
         let W = Double(tr.width), H = Double(tr.height)
+        struct Cur { var start: Double; var end: Double; var lastT: Double; var x: Double; var y: Double; var fx: Double; var fy: Double }
         var segs: [ZoomSegment] = []
-        for e in events(tr, duration: duration) {
-            let s = max(0, e.t - 0.6), end = min(duration, e.t + 3.5)
-            if let last = segs.last, s <= last.end + 1.5 { segs[segs.count - 1].end = max(last.end, end) }
-            else { segs.append(ZoomSegment(start: s, end: end, zoom: zoom, fixedX: e.x / W, fixedY: 1 - e.y / H)) }
+        var cur: Cur?
+        func close(_ c: Cur, at end: Double) {
+            segs.append(ZoomSegment(start: c.start, end: max(c.start + 0.5, end), zoom: zoom, fixedX: c.fx / W, fixedY: 1 - c.fy / H))
         }
+        for e in events(tr, duration: duration) {
+            let s = max(0, e.t - leadIn), end = min(duration, e.t + holdAfter)
+            guard var c = cur else { cur = Cur(start: s, end: end, lastT: e.t, x: e.x, y: e.y, fx: e.x, fy: e.y); continue }
+            let gap = e.t - c.lastT
+            let far = max(abs(e.x - c.x) / W, abs(e.y - c.y) / H) > 0.35
+            let len = e.t - c.start
+            // 能在中间拉回全景：前一段最晚收在「下一段开始前 1.2 秒」，还得比上个事件晚一点
+            let outEnd = s - zoomOutHold, canZoomOut = outEnd >= c.lastT + 0.4
+            if s > c.end + mergeGap {
+                close(c, at: min(c.end, s - zoomOutHold)); cur = Cur(start: s, end: end, lastT: e.t, x: e.x, y: e.y, fx: e.x, fy: e.y)
+            } else if far && canZoomOut {
+                close(c, at: outEnd); cur = Cur(start: s, end: end, lastT: e.t, x: e.x, y: e.y, fx: e.x, fy: e.y)
+            } else if len > maxLen && gap >= leadIn + shortOut && s - shortOut > c.lastT {
+                close(c, at: s - shortOut); cur = Cur(start: s, end: end, lastT: e.t, x: e.x, y: e.y, fx: e.x, fy: e.y)
+            } else if len > hardMax {
+                // 一直没空：在上个事件后马上收，回全景 1 秒，再推近（这一下的事件会稍晚一点才推到）
+                let cut = c.lastT + 0.2
+                close(c, at: cut); cur = Cur(start: cut + shortOut, end: max(end, cut + shortOut + 0.5), lastT: e.t, x: e.x, y: e.y, fx: e.x, fy: e.y)
+            } else {
+                c.end = max(c.end, end); c.lastT = e.t; c.x = e.x; c.y = e.y; cur = c
+            }
+        }
+        if let c = cur { close(c, at: c.end) }
         return segs
     }
 
@@ -417,6 +455,9 @@ enum StudioPlan {
                 focus.x = 2 * hw >= W ? W / 2 : min(max(focus.x, hw), W - hw)
                 focus.y = 2 * hh >= H ? H / 2 : min(max(focus.y, hh), H - hh)
                 tz = Z; tx = focus.x; ty = focus.y
+                // 镜头要走很远（来不及拉远再推近时）：边移边往后退，路越远退得越多，到了再推回去
+                let travel = max(abs(tx - cx.x) / W, abs(ty - cy.x) / H)
+                if travel > 0.2 { tz = 1 + (Z - 1) * min(1, max(0.2, 1 - (travel - 0.2) / 0.3)) }
             }
             lz.step(to: log(tz), dt: dt); cx.step(to: tx, dt: dt); cy.step(to: ty, dt: dt)
             f.z = exp(lz.x)
@@ -546,7 +587,7 @@ final class StudioRenderer: @unchecked Sendable {
                 let e = img.extent, k = max(lay.cw / e.width, lay.ch / e.height)
                 g = img.transformed(by: CGAffineTransform(translationX: -e.minX, y: -e.minY).concatenating(CGAffineTransform(scaleX: k, y: k))
                     .concatenating(CGAffineTransform(translationX: (lay.cw - e.width * k) / 2, y: (lay.ch - e.height * k) / 2)))
-            } else { g = CIImage(color: look.color.ci) }   // 图片找不到：先用纯色顶上
+            } else { g = CIImage(color: .clear) }   // 还没选图 / 图片找不到：透明（look.transparent 也会是 true）
         }
         g = g.cropped(to: canvas)
         let strength = min(max(look.shadow, 0), 1), blur = min(max(look.shadowBlur, 0), 1)

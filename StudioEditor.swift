@@ -36,6 +36,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     var out: URL { Studio.output(Recorder.folder.appendingPathComponent(dir.lastPathComponent + ".mov"), look: project.look) }
     private var window: NSWindow?
     private var timeObserver: Any?
+    private var endObserver: Any?, statusObserver: NSKeyValueObservation?
     private var keyMonitor: Any?
     private var saveWork: DispatchWorkItem?
     private var refreshPending = false
@@ -99,11 +100,21 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
                 if self.playing && rate == 0 { self.playing = false }
             }
         }
+        // 播到结尾（或修剪的终点）时间就不走了，上面的回调不再来：另外听「播完」和播放状态，把图标换回播放
+        endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.playing = false; self.map { $0.time = $0.player.currentTime().seconds } }
+        }
+        statusObserver = player.observe(\.timeControlStatus) { [weak self] p, _ in
+            let paused = p.timeControlStatus == .paused
+            Task { @MainActor in if paused, let self, self.playing { self.playing = false; self.time = p.currentTime().seconds } }
+        }
     }
 
     // ---- 窗口 ----
     private func show() {
-        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1280, height: 820), styleMask: [.titled, .closable, .miniaturizable, .resizable],
+        // EDITOR_WIDTH=像素：截图自测时指定窗口宽（高按 16:10 左右）
+        let ew = ProcessInfo.processInfo.environment["EDITOR_WIDTH"].flatMap(Double.init) ?? 1280
+        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: ew, height: max(820, ew * 0.56)), styleMask: [.titled, .closable, .miniaturizable, .resizable],
                          backing: .buffered, defer: false)
         w.title = "Studio · " + dir.lastPathComponent
         w.isReleasedWhenClosed = false
@@ -220,7 +231,8 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     }
     func togglePlay() {
         if playing { player.pause(); playing = false; return }
-        if time >= project.trimEnd - 0.05 || time < project.trimStart { seek(project.trimStart) }
+        let now = player.currentTime().seconds   // 播到头时 time 可能没跟上，按播放器实际位置判断
+        if now >= project.trimEnd - 0.05 || now < project.trimStart - 0.01 { seek(project.trimStart) }
         player.play(); playing = true
     }
     func step(_ n: Int) {
@@ -233,6 +245,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         var p = project
         change(&p)
         guard p != project else { return }
+        if p.segments != project.segments { p.segmentsEdited = true }
         undoStack.append(project); redoStack.removeAll()
         project = p
     }
@@ -242,11 +255,18 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         guard let base = dragBase else { return }
         var p = base
         change(&p)
+        if p.segments != base.segments { p.segmentsEdited = true }
         project = p
     }
     func dragEnd() {
         if let base = dragBase, base != project { undoStack.append(base); redoStack.removeAll() }
         dragBase = nil
+    }
+    // 按自动规则重新排推近段（能撤销）；排完算「没手动改过」
+    func regenerate() {
+        edit { $0.segments = StudioPlan.autoSegments(track, duration: duration, zoom: $0.segments.first?.zoom ?? 2.0) }
+        project.segmentsEdited = false
+        selected = nil
     }
     func undo() { guard let p = undoStack.popLast() else { return }; redoStack.append(project); project = p }
     func redo() { guard let p = redoStack.popLast() else { return }; undoStack.append(project); project = p }
@@ -392,6 +412,8 @@ struct EditorView: View {
             Divider().frame(height: 18)
             Button { ed.addSegment(at: ed.time) } label: { Label(L("推近", "Zoom"), systemImage: "plus.magnifyingglass") }
                 .help(L("在播放头处加一段推近（也可以在时间轴空白处双击）", "Add a zoom at the playhead (or double-click the timeline)"))
+            Button { ed.regenerate() } label: { Label(L("重新自动生成", "Auto-Generate"), systemImage: "wand.and.stars") }
+                .help(L("按点击、打字重新排推近段（会替换现在的段，可以撤销）", "Rebuild zooms from clicks and typing (replaces current zooms; undoable)"))
             Button { ed.undo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!ed.canUndo).help(L("撤销 ⌘Z", "Undo ⌘Z"))
             Button { ed.redo() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!ed.canRedo).help(L("重做 ⌘⇧Z", "Redo ⌘⇧Z"))
             Spacer()
@@ -664,9 +686,25 @@ struct StylePanel: View {
     private func section<C: View>(_ id: String, _ title: String, @ViewBuilder _ content: () -> C) -> some View {
         let body = content()
         return DisclosureGroup(isExpanded: Binding(get: { open.contains(id) }, set: { if $0 { open.insert(id) } else { open.remove(id) } })) {
-            VStack(alignment: .leading, spacing: 10) { body }.padding(.top, 8).padding(.bottom, 10)
+            VStack(alignment: .leading, spacing: 10) { body }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8).padding(.bottom, 10)
         } label: {
             Text(title).font(.callout.weight(.semibold))
+        }
+    }
+
+    // 小按钮组（像分段控件，但能换行，不会被裁）
+    private func chips<T: Hashable>(_ sel: Binding<T>, _ items: [(T, String)], columns: Int) -> some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: columns), spacing: 4) {
+            ForEach(items.indices, id: \.self) { i in
+                let v = items[i].0, on = sel.wrappedValue == v
+                Button { sel.wrappedValue = v } label: {
+                    Text(items[i].1).font(.callout).lineLimit(1).minimumScaleFactor(0.8)
+                        .frame(maxWidth: .infinity).padding(.vertical, 4)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(on ? Color.accentColor : Color.primary.opacity(0.08)))
+                        .foregroundStyle(on ? Color.white : Color.primary)
+                        .contentShape(Rectangle())
+                }.buttonStyle(.plain)
+            }
         }
     }
 
@@ -686,7 +724,7 @@ struct StylePanel: View {
                 ForEach(ed.presets.presets) { p in
                     Text(p.name + (ed.presets.defaultName == p.name ? L("（默认）", " (Default)") : "")).tag(p.name)
                 }
-            }.labelsHidden()
+            }.labelsHidden().fixedSize()
             HStack(spacing: 8) {
                 Button(L("存成预设…", "Save…")) { newName = ed.currentPresetName ?? ""; naming = true }
                 if let n = ed.currentPresetName {
@@ -702,25 +740,17 @@ struct StylePanel: View {
     }
 
     private var aspectBox: some View {
-        Picker("", selection: ed.look(\.aspect)) {
-            Text(L("原始", "Original")).tag(StudioLook.Aspect.original)
-            Text("16:9").tag(StudioLook.Aspect.wide)
-            Text("9:16").tag(StudioLook.Aspect.tall)
-            Text("1:1").tag(StudioLook.Aspect.square)
-            Text("4:3").tag(StudioLook.Aspect.classic)
-        }.pickerStyle(.segmented).labelsHidden()
+        chips(ed.look(\.aspect), [(.original, L("原始", "Original")), (.wide, "16:9"), (.tall, "9:16"), (.square, "1:1"), (.classic, "4:3")], columns: 5)
     }
 
     private var backgroundBox: some View {
         let look = ed.project.look
         return VStack(alignment: .leading, spacing: 10) {
-            Picker("", selection: ed.look(\.background)) {
-                Text(L("透明", "None")).tag(StudioLook.Background.transparent)
-                Text(L("纯色", "Color")).tag(StudioLook.Background.color)
-                Text(L("渐变", "Gradient")).tag(StudioLook.Background.gradient)
-                Text(L("壁纸", "Wallpaper")).tag(StudioLook.Background.wallpaper)
-                Text(L("图片", "Image")).tag(StudioLook.Background.image)
-            }.pickerStyle(.segmented).labelsHidden()
+            // 五个选项一排放不下（英文会被裁），排成两行的小按钮
+            chips(ed.look(\.background), [
+                (.transparent, L("透明", "None")), (.color, L("纯色", "Color")), (.gradient, L("渐变", "Gradient")),
+                (.wallpaper, L("壁纸", "Wallpaper")), (.image, L("图片", "Image")),
+            ], columns: 3)
             switch look.background {
             case .transparent:
                 Text(L("透明背景导出成 .mov（HEVC 带透明），放进剪辑软件可以叠在别的画面上；其他背景导出成 .mp4",
@@ -759,7 +789,11 @@ struct StylePanel: View {
             case .image:
                 HStack(spacing: 8) {
                     Button(L("选图片…", "Choose…")) { ed.chooseImage() }
-                    Text(look.imageURL?.lastPathComponent ?? L("还没选", "None yet")).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    Text(look.imageURL?.lastPathComponent ?? L("选一张图片", "Pick an image")).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
+                if look.imageURL == nil {
+                    Text(L("没选图之前按透明背景预览和导出", "Until you pick one, the background stays transparent"))
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -791,12 +825,7 @@ struct StylePanel: View {
 
     private var blurBox: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Picker("", selection: ed.look(\.blur)) {
-                Text(L("关", "Off")).tag(StudioLook.Blur.off)
-                Text(L("轻", "Light")).tag(StudioLook.Blur.light)
-                Text(L("中", "Medium")).tag(StudioLook.Blur.medium)
-                Text(L("强", "Strong")).tag(StudioLook.Blur.strong)
-            }.pickerStyle(.segmented).labelsHidden()
+            chips(ed.look(\.blur), [(.off, L("关", "Off")), (.light, L("轻", "Light")), (.medium, L("中", "Medium")), (.strong, L("强", "Strong"))], columns: 4)
             Text(L("只在镜头快速推拉、移动时有一点拖影，镜头停着时字是清楚的",
                    "Only adds a little streak while the camera moves fast; text stays sharp when it's still"))
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -866,6 +895,51 @@ enum StudioTests {
                 check("click → source point", abs(pt.x - fx / lay.W) < 0.01 && abs(pt.y - (1 - fy / lay.H)) < 0.01, String(format: "(%.3f, %.3f)", pt.x, pt.y))
                 let frames = Int((p.trimEnd * fps).rounded()) - Int((p.trimStart * fps).rounded())
                 check("trim frame count", frames == 720, "\(frames)")
+
+                // ---- 自动分段规则（造几份假的轨迹）----
+                func fake(_ dur: Double, clicks: [(Double, Double, Double)], keys: [Double], at: (Double, Double)) -> Track {
+                    var t = Track(width: 2000, height: 1200, pixelsPerPoint: 2)
+                    // 鼠标：打字时停在 at，点击时在点击处
+                    var pos = at
+                    var ci = 0
+                    for i in 0...Int(dur * 30) {
+                        let tt = Double(i) / 30
+                        while ci < clicks.count && clicks[ci].0 <= tt { pos = (clicks[ci].1, clicks[ci].2); ci += 1 }
+                        t.moves.append([tt, pos.0, pos.1, 0, 0])
+                    }
+                    t.clicks = clicks.map { [$0.0, $0.1, $0.2] }; t.keys = keys
+                    return t
+                }
+                func segList(_ segs: [ZoomSegment]) -> String { segs.map { String(format: "%.1f–%.1f", $0.start, $0.end) }.joined(separator: " ") }
+                // 1) 同一处一直打字 6 秒 → 一段
+                let typeKeys: [Double] = Array(stride(from: 1.2, to: 7.2, by: 0.15))
+                let typing = fake(10, clicks: [(1, 1000, 600)], keys: typeKeys, at: (1000, 600))
+                let s1 = StudioPlan.autoSegments(typing, duration: 10)
+                check("same-place typing → one segment", s1.count == 1, segList(s1))
+                // 2) 屏幕左右两头来回点，每 3 秒一下 → 多段，中间回到全景
+                var pingClicks: [(Double, Double, Double)] = []
+                for i in 0..<6 { let x: Double = i % 2 == 0 ? 150 : 1850; pingClicks.append((1.0 + Double(i) * 3, x, 600)) }
+                let ping = fake(20, clicks: pingClicks, keys: [], at: (150, 600))
+                let s2 = StudioPlan.autoSegments(ping, duration: 20)
+                check("ping-pong clicks → several segments", s2.count >= 4, segList(s2))
+                let pingLay = StudioLayout(track: ping, look: StudioLook())
+                let pingPlan = StudioPlan.make(ping, pingLay, st, look: StudioLook(), segments: s2, frames: Int(20 * fps), duration: 20)
+                var minBetween = 9.0
+                for k in 0..<max(0, s2.count - 1) {
+                    let a = Int(s2[k].end * fps), b = min(Int(s2[k + 1].start * fps), pingPlan.count - 1)
+                    if b > a { minBetween = min(minBetween, pingPlan[a...b].map(\.z).min() ?? 9) }
+                }
+                check("ping-pong zooms out between", minBetween < 1.06, String(format: "min z between = %.3f", minBetween))
+                // 3) 同一处连续 20 秒不停地点、打字（间隔 2 秒有空档）→ 被切开，每段不超过约 12 秒
+                // 每 4 秒里前 2 秒在打字、后 2 秒停（制造 2 秒空档）
+                var busyKeys: [Double] = []
+                for k in stride(from: 0.5, to: 20.5, by: 0.3) { let ph: Double = k.truncatingRemainder(dividingBy: 4); if ph < 2 { busyKeys.append(k) } }
+                let busy = fake(22, clicks: [(0.5, 1000, 600)], keys: busyKeys, at: (1000, 600))
+                let s3 = StudioPlan.autoSegments(busy, duration: 22)
+                check("20 s continuous → split", s3.count >= 2 && s3.allSatisfy { $0.end - $0.start <= 12.5 + StudioPlan.holdAfter }, segList(s3))
+                // 4) 真实素材：打印自动分段
+                let real = StudioPlan.autoSegments(track, duration: duration)
+                print("REAL", String(format: "%.1fs", duration), "→", real.count, "segs:", segList(real))
             } catch { check("load", false, "\(error)") }
             print(ok ? "PLANTEST OK" : "PLANTEST FAIL")
             exit(ok ? 0 : 1)
@@ -894,7 +968,8 @@ enum StudioTests {
                 for i in 1..<(plan.count - 1) {
                     let a = plan[i - 1], b = plan[i + 1], v = hypot(b.sx - a.sx, b.sy - a.sy) + abs(log(b.z / a.z)) * 2000
                     if v > fastV { fastV = v; fast = i }
-                    if still < 0, v < 1e-6, plan[i].z > 1.5 { still = i }
+                    // 推近中、镜头几乎不动（前后两帧合起来挪不到 0.05 像素）：快门模糊不该碰它
+                    if still < 0, v < 0.05, plan[i].z > 1.5 { still = i }
                 }
                 let g = AVAssetImageGenerator(asset: asset); g.requestedTimeToleranceBefore = .zero; g.requestedTimeToleranceAfter = .zero
                 func bitmap(_ r: StudioRenderer, _ i: Int) async throws -> (Data, CGImage) {
@@ -952,7 +1027,13 @@ enum StudioTests {
                 try #"{"segments":[{"id":"8C2E0F2A-0000-4000-8000-000000000001","start":1,"end":3,"zoom":2.5,"mode":"follow","fixedX":0.5,"fixedY":0.5}],"trimStart":0,"trimEnd":15}"#
                     .data(using: .utf8)!.write(to: StudioProject.url(dir))
                 let old = StudioProject.load(dir, track: track, duration: 15)
-                check("old project.json still loads", old.segments.count == 1 && old.segments[0].zoom == 2.5 && old.look == StudioLook())
+                // 没有 segmentsEdited 标记 = 当作没手动改过：推近段按最新自动规则重排
+                check("old project.json still loads (segments re-generated)", old.look == StudioLook() && old.segments == StudioPlan.autoSegments(track, duration: 15).map { var x = $0; x.id = old.segments.first(where: { $0.start == x.start })?.id ?? x.id; return x })
+                // 手动改过的工程：推近段原样保留
+                try #"{"segments":[{"id":"8C2E0F2A-0000-4000-8000-000000000001","start":1,"end":3,"zoom":2.5,"mode":"follow","fixedX":0.5,"fixedY":0.5}],"trimStart":0,"trimEnd":15,"segmentsEdited":true}"#
+                    .data(using: .utf8)!.write(to: StudioProject.url(dir))
+                let edited = StudioProject.load(dir, track: track, duration: 15)
+                check("edited project keeps its segments", edited.segments.count == 1 && edited.segments[0].zoom == 2.5 && edited.segmentsEdited)
                 try? FileManager.default.removeItem(at: StudioProject.url(dir))
             } catch { check("load \(error)", false) }
             f.presets = []; f.defaultName = nil; PresetStore.save(f)
