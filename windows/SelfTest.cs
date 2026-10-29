@@ -316,7 +316,7 @@ namespace ScreenRecorder
                 Check(form.HotkeyProblems.Count == 1 && form.HotkeyProblems[0].Contains("Ctrl+Alt+X"), "detected taken shortcut: " + string.Join(" | ", form.HotkeyProblems));
                 Check(Notice.Last != null && Notice.Last.Contains("Ctrl+Alt+X"), "notification shown: " + Notice.Last);
                 Check(form.StatusText.Contains("Ctrl+Alt+X"), "status line: " + form.StatusText);
-                if (outDir != null) Snap(Path.Combine(outDir, "hotkey-1-taken.png"), true);
+                if (outDir != null) SnapForm(form, Path.Combine(outDir, "hotkey-1-taken.png"));
 
                 // 点截图快捷键按钮，真按 Ctrl+Alt+Q
                 void ClickKeyButton()
@@ -327,13 +327,13 @@ namespace ScreenRecorder
                 }
                 ClickKeyButton();
                 Check(form.ShotKeyButton.Text != "Ctrl+Alt+X", "button waits for keys: " + form.ShotKeyButton.Text);
-                if (outDir != null) Snap(Path.Combine(outDir, "hotkey-2-capturing.png"), true);
+                if (outDir != null) SnapForm(form, Path.Combine(outDir, "hotkey-2-capturing.png"));
                 Keyboard.Combo(0x11, 0x12, 0x51);   // Ctrl+Alt+Q
                 Pump(0.8);
                 Check(form.ShotKey.ToString() == "Ctrl+Alt+Q", "changed to " + form.ShotKey);
                 Check(File.ReadAllLines(settings).Contains($"{Hotkey.ShotSetting}={Hotkey.Ctrl | Hotkey.Alt},{(int)Keys.Q}"), "saved to settings.txt");
                 Check(form.ShotKeyButton.Text == "Ctrl+Alt+Q", "button shows the new shortcut");
-                if (outDir != null) Snap(Path.Combine(outDir, "hotkey-3-changed.png"), true);
+                if (outDir != null) SnapForm(form, Path.Combine(outDir, "hotkey-3-changed.png"));
 
                 // 改成被占的 Ctrl+Alt+X：要被拒，保留 Ctrl+Alt+Q
                 // （被占的组合真按下去会被占用它的程序吞掉、到不了我们窗口，所以这里直接走「按下后」的处理）
@@ -366,6 +366,16 @@ namespace ScreenRecorder
             finally
             {
                 try { hog?.Kill(); } catch { }
+            }
+        }
+
+        // 主窗口设了「不被录进画面」，截屏里看不到它，所以直接把窗口画成图
+        static void SnapForm(Form f, string file)
+        {
+            using (var bmp = new System.Drawing.Bitmap(f.Width, f.Height))
+            {
+                f.DrawToBitmap(bmp, new System.Drawing.Rectangle(0, 0, f.Width, f.Height));
+                bmp.Save(file, System.Drawing.Imaging.ImageFormat.Png);
             }
         }
 
