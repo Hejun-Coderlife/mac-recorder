@@ -278,7 +278,7 @@ final class Recorder: NSObject, ObservableObject {
 
         let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd HH.mm.ss"
         let name = "\(L("录屏", "Recording")) \(fmt.string(from: Date()))"
-        let url = Recorder.folder.appendingPathComponent(name + ".mp4")
+        let url = Recorder.folder.appendingPathComponent(name + (studioOn ? ".mov" : ".mp4"))   // Studio 版背景透明，只能存 mov
         // Studio 模式：原始画面写进素材文件夹，成片录完再生成到 url
         var rawURL = url, dir: URL?
         if studioOn {

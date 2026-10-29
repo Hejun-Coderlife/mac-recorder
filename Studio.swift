@@ -1,9 +1,10 @@
 // Studio 效果（仿 Screen Studio）：录的时候画面里不录鼠标，另记一份鼠标轨迹；录完按轨迹自动放大点击、打字的地方，
-// 镜头和鼠标都用弹簧曲线走得顺滑，再加渐变背景、圆角、阴影，逐帧合成（Core Image 走显卡）导出成片
+// 镜头和鼠标都用弹簧曲线走得顺滑，再加透明背景、圆角、阴影，逐帧合成（Core Image 走显卡）导出成片
 // 素材留在「影片/录屏/Studio 素材/<名字>/」：raw.mp4（没有鼠标的原始画面）、track.json（轨迹）、cursor-N.png（录到的指针图案），以后剪辑界面要用
 import AppKit
 import AVFoundation
 import CoreImage
+import VideoToolbox
 
 // ---- 轨迹文件 track.json ----
 struct Track: Codable {
@@ -121,8 +122,6 @@ struct StudioStyle {
     var motionBlur = false         // 镜头动时加运动模糊：实测会把字糊掉（清晰度只剩 2~3 成），默认关
     var bitsPerPixel = 0.12        // 码率：每像素每帧多少比特
     var aspect: Double? = nil      // 画布宽高比；nil = 跟原画面一样
-    var color0 = CIColor(red: 0.36, green: 0.40, blue: 0.96)   // 背景渐变：左上
-    var color1 = CIColor(red: 0.86, green: 0.43, blue: 0.78)   // 右下
 }
 
 // 画布和画面在画布上的位置（Core Image 坐标：左下角为原点、y 朝上）
@@ -274,7 +273,7 @@ enum Studio {
         let env = ProcessInfo.processInfo.environment
         guard let p = env["STUDIO"] else { return false }
         let dir = URL(fileURLWithPath: p)
-        let out = URL(fileURLWithPath: env["STUDIO_OUT"] ?? dir.appendingPathComponent("studio.mp4").path)
+        let out = URL(fileURLWithPath: env["STUDIO_OUT"] ?? dir.appendingPathComponent("studio.mov").path)
         var st = StudioStyle()
         if env["STUDIO_BLUR"] != nil { st.motionBlur = true }
         if let z = env["STUDIO_ZOOM"].flatMap(Double.init) { st.zoom = z }
@@ -332,12 +331,9 @@ final class StudioJob: @unchecked Sendable {
         prepareBackground()
     }
 
-    // 背景渐变 + 卡片阴影：每帧都一样，先画好存成一张图
+    // 透明背景 + 卡片阴影：每帧都一样，先画好存成一张图
     private func prepareBackground() {
-        let g = CIFilter(name: "CILinearGradient", parameters: [
-            "inputPoint0": CIVector(x: 0, y: lay.ch), "inputColor0": st.color0,
-            "inputPoint1": CIVector(x: lay.cw, y: 0), "inputColor1": st.color1,
-        ])!.outputImage!.cropped(to: lay.canvas)
+        let g = CIImage(color: .clear).cropped(to: lay.canvas)
         let shadow = rounded(lay.card.offsetBy(dx: 0, dy: -lay.ch * 0.012), lay.radius, CIColor(red: 0, green: 0, blue: 0, alpha: 0.45))
             .applyingGaussianBlur(sigma: lay.cw * 0.014)
         let bg = shadow.composited(over: g).cropped(to: lay.canvas)
@@ -368,15 +364,15 @@ final class StudioJob: @unchecked Sendable {
         }
 
         try? FileManager.default.removeItem(at: out)
-        let writer = try AVAssetWriter(outputURL: out, fileType: .mp4)
+        let writer = try AVAssetWriter(outputURL: out, fileType: .mov)   // 背景透明：H.264/mp4 存不了透明，用带透明通道的 HEVC
         let w = Int(lay.cw), h = Int(lay.ch)
         let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: [
-            AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: w, AVVideoHeightKey: h,
+            AVVideoCodecKey: AVVideoCodecType.hevcWithAlpha, AVVideoWidthKey: w, AVVideoHeightKey: h,
             AVVideoCompressionPropertiesKey: [
                 AVVideoAverageBitRateKey: max(10_000_000, Int(Double(w * h * st.fps) * st.bitsPerPixel)),
                 AVVideoExpectedSourceFrameRateKey: st.fps,
                 AVVideoMaxKeyFrameIntervalKey: st.fps * 2,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+                kVTCompressionPropertyKey_AlphaChannelMode as String: kVTAlphaChannelMode_PremultipliedAlpha,   // Core Image 出的是预乘透明
             ],
         ])
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: vIn, sourcePixelBufferAttributes: [
