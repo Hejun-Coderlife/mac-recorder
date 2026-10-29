@@ -37,6 +37,7 @@ namespace ScreenRecorder
                 Slider(L("阴影", "Shadow"), 0, 1, l => l.Shadow, (l, v) => l.Shadow = v, v => $"{Math.Round(v * 100)}%"),
                 Slider(L("阴影虚化", "Softness"), 0, 1, l => l.ShadowBlur, (l, v) => l.ShadowBlur = v, v => $"{Math.Round(v * 100)}%")));
             Section(L("鼠标", "Cursor"), CursorBox());
+            Section(L("声音", "Sound"), SoundBox());
             Section(L("运动模糊", "Motion Blur"), Box(
                 Chips(new[] { ("off", L("关", "Off")), ("light", L("轻", "Light")), ("medium", L("中", "Medium")), ("strong", L("强", "Strong")) }, 4, l => l.Blur, (l, v) => l.Blur = v),
                 Caption(L("只在镜头快速推拉、移动时有一点拖影，镜头停着时字是清楚的", "Only adds a little streak while the camera moves fast; text stays sharp when it's still"))));
@@ -46,11 +47,20 @@ namespace ScreenRecorder
         StudioLook Look => ed.Project.Look;
 
         // ---- 分组：自己画的标题行（▸ / ▾ + 粗体字），点一下折叠 ----
+        readonly Dictionary<string, Control> heads = new Dictionary<string, Control>();
+        // 自测截图用：把某一组滚到面板顶上
+        public void ScrollTo(string title)
+        {
+            foreach (var kv in heads)
+                if (kv.Key.Contains(title) && kv.Value != null) { int y = kv.Value.Top + stack.Top - AutoScrollPosition.Y; AutoScrollPosition = new Point(0, Math.Max(0, y - 8)); return; }
+        }
+
         void Section(string title, Control content)
         {
             var head = new Label { Text = "▾  " + title, AutoSize = false, Width = W, Height = 26, Font = new Font(Font, FontStyle.Bold), ForeColor = Theme.Text, TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(0, 4, 0, 0), Cursor = Cursors.Hand };
             content.Margin = new Padding(0, 4, 0, 10);
             head.Click += (s, e) => { content.Visible = !content.Visible; head.Text = (content.Visible ? "▾  " : "▸  ") + title; };
+            heads[title] = head;
             stack.Controls.Add(head); stack.Controls.Add(content);
         }
 
@@ -324,7 +334,7 @@ namespace ScreenRecorder
             var after = Slider(L("隐藏前", "After"), 1, 5, l => l.HideAfter, (l, v) => l.HideAfter = v, v => L($"{v:0.0} 秒", $"{v:0.0}s"));
             var ripple = Check(L("点击波纹", "Click ripple"), l => l.Ripple, (l, v) => l.Ripple = v);
             var sound = Check(L("点击音效", "Click sound"), l => l.ClickSound, (l, v) => l.ClickSound = v);
-            tips.SetToolTip(sound, L("导出时在每次点击处加一声轻响（预览里听不到，选声音时会响一下给你听）", "Adds a soft click at each click when exporting (not in the preview; picking a sound plays it)"));
+            tips.SetToolTip(sound, L("每次点击处加一声轻响（预览和导出都有；选声音时会响一下给你听）", "Adds a soft click at each click (in the preview and the export; picking a sound plays it)"));
             var names = new[] { ("soft", L("轻点", "Soft tap")), ("mouse", L("鼠标咔哒", "Mouse click")), ("thock", L("低沉", "Deep thock")), ("wood", L("木头", "Wood")), ("pop", L("气泡", "Pop")), ("tick", L("清脆滴答", "Crisp tick")) };
             var box = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = W - 48, Margin = new Padding(0, 0, 6, 0) };
             foreach (var (_, n) in names) box.Items.Add(n);
@@ -346,6 +356,56 @@ namespace ScreenRecorder
                 hide, after, ripple, sound, soundRow);
         }
 
+        // ---- 声音：一键静音录到的声音、电脑声音 / 麦克风各自的音量（0–200%）、点击声音量；改了预览声音会在后台重做（约一两秒） ----
+        Control SoundBox()
+        {
+            var a = ed.Info.AudioChannels;
+            var items = new List<Control>();
+            var mute = new CheckBox { Text = L("录到的声音静音", "Mute recorded sound"), AutoSize = true, Margin = new Padding(0) };
+            mute.CheckedChanged += (s, e) => { if (!syncing) ed.Edit(p => p.Audio.Muted = mute.Checked); };
+            syncs.Add(() => { if (mute.Checked != ed.Project.Audio.Muted) mute.Checked = ed.Project.Audio.Muted; });
+            Func<double, string> pct = v => $"{Math.Round(v * 100)}%";
+            var tracks = new List<Control>();
+            if (a.Count == 1) tracks.Add(SliderP(L("录到的", "Recorded"), 0, 2, p => p.Audio.System, (p, v) => p.Audio.System = v, pct));
+            else
+            {
+                if (a.Any(c => c != 1)) tracks.Add(SliderP(L("电脑声音", "Computer"), 0, 2, p => p.Audio.System, (p, v) => p.Audio.System = v, pct));
+                if (a.Any(c => c == 1)) tracks.Add(SliderP(L("麦克风", "Microphone"), 0, 2, p => p.Audio.Mic, (p, v) => p.Audio.Mic = v, pct));
+            }
+            if (a.Count > 0) { items.Add(mute); items.AddRange(tracks); }
+            else items.Add(Caption(L("这段录制没有声音", "This recording has no sound")));
+            var clicks = SliderP(L("点击声", "Clicks"), 0, 2, p => p.Audio.Clicks, (p, v) => p.Audio.Clicks = v, pct);
+            items.Add(clicks);
+            items.Add(Caption(L("预览里听到的就是成片的声音；改了音量、剪辑后稍等一两秒生效", "The preview plays the final mix; after changing volume or cuts it updates in a second or two")));
+            syncs.Add(() =>
+            {
+                foreach (var t in tracks) t.Enabled = !ed.Project.Audio.Muted;
+                clicks.Visible = ed.Project.Look.ClickSound;
+            });
+            return Box(items.ToArray());
+        }
+
+        // 同 Slider，但改的是工程里样式以外的东西（声音）
+        Control SliderP(string title, double min, double max, Func<StudioProject, double> get, Action<StudioProject, double> set, Func<double, string> fmt)
+        {
+            var row = new Panel { Width = W, Height = 28, Margin = new Padding(0) };
+            var name = new Label { Text = title, AutoSize = false, Width = 72, Height = 28, TextAlign = ContentAlignment.MiddleLeft, Location = new Point(0, 0) };
+            var bar = new TrackBar { Minimum = 0, Maximum = 1000, TickStyle = TickStyle.None, AutoSize = false, Width = W - 72 - 46, Height = 28, Location = new Point(72, 2), TabStop = false };
+            var val = new Label { AutoSize = false, Width = 46, Height = 28, TextAlign = ContentAlignment.MiddleRight, Location = new Point(W - 46, 0), ForeColor = Theme.Secondary };
+            bar.Scroll += (s, e) => { if (syncing) return; double v = min + (max - min) * bar.Value / 1000.0; val.Text = fmt(v); ed.DragBegin(); ed.DragUpdate(p => set(p, v)); };
+            bar.MouseUp += (s, e) => ed.DragEnd();
+            bar.KeyUp += (s, e) => ed.DragEnd();
+            row.Controls.Add(name); row.Controls.Add(bar); row.Controls.Add(val);
+            syncs.Add(() =>
+            {
+                double v = get(ed.Project);
+                int iv = (int)Math.Round(Math.Min(1, Math.Max(0, (v - min) / (max - min))) * 1000);
+                if (!ed.IsDragging && bar.Value != iv) bar.Value = iv;
+                val.Text = fmt(v);
+            });
+            return row;
+        }
+
         static System.Media.SoundPlayer clickPlayer;
         public static void PlayClick(string style)
         {
@@ -361,7 +421,7 @@ namespace ScreenRecorder
         // 工程或预设变了：把各个控件的值对上（只在样式真变了时才做）
         public void Sync()
         {
-            var sig = Look.ToJson() + "|" + ed.Presets.DefaultKey + "|" + string.Join(",", ed.Presets.Presets.Select(p => p.Name));
+            var sig = Look.ToJson() + "|" + ed.Project.Audio.ToJson() + "|" + ed.Presets.DefaultKey + "|" + string.Join(",", ed.Presets.Presets.Select(p => p.Name));
             if (sig == lastSig) return;
             lastSig = sig;
             syncing = true;

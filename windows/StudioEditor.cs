@@ -27,6 +27,7 @@ namespace ScreenRecorder
         public double Duration => Info.Duration;
         public StudioProject Project;
         public string Selected;               // 选中的推近段 id
+        public string SelectedCut;            // 选中的剪掉 / 快放段 id（和推近段只能选一个）
         public bool Picking;                  // 正在「在预览上点一下设固定位置」
         public double Time;                   // 播放头（秒，素材时间）
         public bool Playing;
@@ -64,6 +65,9 @@ namespace ScreenRecorder
         string exported;
         bool exporting;
         public string OutPath;
+        public ExportOptions ExportOpt = ExportOptions.Load(Settings.GetString("exportOptions", ""));
+        CancellationTokenSource exportCancel;
+        readonly Button optBtn = new Button(), cancelBtn = new Button(), cutBtn = new Button();
 
         // 打开一个素材夹（Studio 录完、或主窗口「打开 Studio 素材…」）
         public static StudioEditor Open(string dir, string outPath = null)
@@ -116,6 +120,7 @@ namespace ScreenRecorder
             saveTimer.Tick += (s, e) => { saveTimer.Stop(); SaveNow(); };
             Changed += SyncUi;
             SyncUi();
+            audioTimer.Tick += (s, e) => { audioTimer.Stop(); StartAudioPrep(); };
             Shown += (s, e) => { RequestFrame(Time); StartAudioPrep(); };
         }
 
@@ -135,17 +140,21 @@ namespace ScreenRecorder
             Flat(openBtn, L("打开", "Open"), (s, e) => { if (exported != null) Shell(exported); }); openBtn.Visible = false;
             Flat(showBtn, L("在资源管理器中显示", "Show in Explorer"), (s, e) => { if (exported != null) try { Process.Start("explorer.exe", $"/select,\"{exported}\""); } catch { } }); showBtn.Visible = false;
             Primary(exportBtn, L("导出", "Export"), (s, e) => Export());
-            right.Controls.AddRange(new Control[] { exportBar, exportStatus, openBtn, showBtn, exportBtn });
+            Flat(cancelBtn, L("取消", "Cancel"), (s, e) => exportCancel?.Cancel()); cancelBtn.Visible = false;
+            Flat(optBtn, "⚙ " + ExportOpt.Summary(L), (s, e) => ShowExportMenu());
+            tips.SetToolTip(optBtn, L("导出设置：分辨率、帧率、画质、视频 / GIF、导出后复制到剪贴板", "Export settings: resolution, frame rate, quality, video / GIF, copy to clipboard"));
+            right.Controls.AddRange(new Control[] { exportBar, exportStatus, cancelBtn, openBtn, showBtn, optBtn, exportBtn });
             top.Controls.Add(title); top.Controls.Add(right);
             var topLine = new Panel { Dock = DockStyle.Top, Height = 1, BackColor = Theme.Line };
 
             // 左边：预览 / 播放栏 / 属性条 / 时间轴
             var left = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Window };
-            var tlArea = new Panel { Dock = DockStyle.Bottom, Height = 176, Padding = new Padding(14, 8, 14, 10), BackColor = Theme.Window };
+            var tlArea = new Panel { Dock = DockStyle.Bottom, Height = 204, Padding = new Padding(14, 8, 14, 10), BackColor = Theme.Window };
             Timeline.Dock = DockStyle.Fill;
             inspector.Dock = DockStyle.Top; inspector.Height = 34; inspector.Visible = false;
-            BuildInspector();
-            tlArea.Controls.Add(Timeline); tlArea.Controls.Add(inspector);
+            cutInspector.Dock = DockStyle.Top; cutInspector.Height = 34; cutInspector.Visible = false;
+            BuildInspector(); BuildCutInspector();
+            tlArea.Controls.Add(Timeline); tlArea.Controls.Add(inspector); tlArea.Controls.Add(cutInspector);
             var barLine2 = new Panel { Dock = DockStyle.Bottom, Height = 1, BackColor = Theme.Line };
             var bar = new Panel { Dock = DockStyle.Bottom, Height = 50, Padding = new Padding(14, 7, 14, 7), BackColor = Theme.Window };
             BuildControlBar(bar);
@@ -170,7 +179,9 @@ namespace ScreenRecorder
             Flat(undoBtn, "↶", (s, e) => Undo()); tips.SetToolTip(undoBtn, L("撤销上一步（Ctrl+Z）", "Undo the last change (Ctrl+Z)"));
             Flat(redoBtn, "↷", (s, e) => Redo()); tips.SetToolTip(redoBtn, L("重做刚撤销的那步（Ctrl+Y）", "Redo what you just undid (Ctrl+Y)"));
             foreach (var b in new[] { undoBtn, redoBtn }) { b.Width = 34; b.Font = new Font(Font.FontFamily, Font.Size + 2); }
-            leftTools.Controls.AddRange(new Control[] { zoomBtn, autoBtn, undoBtn, redoBtn });
+            Flat(cutBtn, "✂ " + L("剪掉", "Cut"), (s, e) => AddCut(Time));
+            tips.SetToolTip(cutBtn, L("在播放头处放一段「剪掉」（红色斜纹）：拖两头改范围，选中后可以改成快放 2× / 4× / 8×", "Put a cut at the playhead (red stripes): drag its ends; select it to switch to speed-up 2× / 4× / 8×"));
+            leftTools.Controls.AddRange(new Control[] { zoomBtn, cutBtn, autoBtn, undoBtn, redoBtn });
 
             var rightTools = new FlowLayoutPanel { Dock = DockStyle.Right, AutoSize = true, WrapContents = false, Padding = new Padding(0), Margin = new Padding(0) };
             Flat(tlMinus, "−", (s, e) => SetTimelineScale(Timeline.Scale / 1.5, null)); tlMinus.Width = 30;
@@ -234,6 +245,34 @@ namespace ScreenRecorder
             inspector.Controls.Add(insDelete);
         }
 
+        // 选中剪掉 / 快放段才出现：剪掉 / 快放 2× 4× 8×、时长变化、删除
+        readonly Panel cutInspector = new Panel();
+        readonly Label cutTitle = new Label(), cutTime = new Label(), cutLen = new Label();
+        readonly Button cutCut = new Button(), cut2 = new Button(), cut4 = new Button(), cut8 = new Button(), cutDelete = new Button();
+        void BuildCutInspector()
+        {
+            var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Padding = new Padding(0), Margin = new Padding(0) };
+            cutTitle.AutoSize = true; cutTitle.Font = new Font(Font, FontStyle.Bold); cutTitle.Margin = new Padding(0, 8, 8, 0);
+            cutTime.AutoSize = true; cutTime.ForeColor = Theme.Secondary; cutTime.Margin = new Padding(0, 8, 14, 0);
+            Flat(cutCut, L("剪掉", "Cut"), (s, e) => SetCut(false, 0));
+            Flat(cut2, L("快放 2×", "Speed 2×"), (s, e) => SetCut(true, 2));
+            Flat(cut4, "4×", (s, e) => SetCut(true, 4));
+            Flat(cut8, "8×", (s, e) => SetCut(true, 8));
+            cutLen.AutoSize = true; cutLen.ForeColor = Theme.Secondary; cutLen.Margin = new Padding(8, 8, 0, 0);
+            Flat(cutDelete, "🗑 " + L("删除", "Delete"), (s, e) => DeleteSelected());
+            flow.Controls.AddRange(new Control[] { cutTitle, cutTime, cutCut, cut2, cut4, cut8, cutLen });
+            cutInspector.Controls.Add(flow);
+            cutDelete.Dock = DockStyle.Right;
+            cutInspector.Controls.Add(cutDelete);
+        }
+
+        public void SetCut(bool speed, double rate)
+        {
+            var id = SelectedCut;
+            Edit(p => { var c = p.Cuts.FirstOrDefault(x => x.Id == id); if (c != null) { c.Speed = speed; if (speed) c.Rate = rate; } });
+            Changed?.Invoke();
+        }
+
         void SetMode(bool fix) { var id = Selected; Edit(p => { var sg = p.Segments.FirstOrDefault(x => x.Id == id); if (sg != null) sg.Fixed = fix; }); if (!fix) Picking = false; Changed?.Invoke(); }
 
         void Flat(Button b, string text, EventHandler click)
@@ -253,13 +292,27 @@ namespace ScreenRecorder
         {
             if (IsDisposed) return;
             undoBtn.Enabled = undo.Count > 0; redoBtn.Enabled = redo.Count > 0;
-            double len = Project.TrimEnd - Project.TrimStart;
-            timeLabel.Text = Clock(Time - Project.TrimStart) + " / " + Clock(len);
+            // 时间按成片算（剪掉的不算、快放的按压短后的长度），同 Mac 版
+            var map = new TimeMap(Project);
+            double len = map.Out(Project.TrimEnd) - Project.TrimStart;
+            timeLabel.Text = Clock(map.Out(Math.Max(Time, Project.TrimStart)) - Project.TrimStart) + " / " + Clock(len);
+            var cut = Project.Cuts.FirstOrDefault(c => c.Id == SelectedCut);
+            cutInspector.Visible = cut != null;
+            if (cut != null)
+            {
+                cutTitle.Text = cut.Speed ? L("快放", "Speed-up") : L("剪掉", "Cut");
+                cutTime.Text = Clock(cut.Start) + " – " + Clock(cut.End);
+                foreach (var (b, on) in new[] { (cutCut, !cut.Speed), (cut2, cut.Speed && cut.Rate == 2), (cut4, cut.Speed && cut.Rate == 4), (cut8, cut.Speed && cut.Rate == 8) })
+                { b.BackColor = on ? Theme.Accent : Theme.Control; b.ForeColor = on ? Color.White : Theme.Text; }
+                double d = cut.End - cut.Start;
+                cutLen.Text = cut.Speed ? L($"{d:0.0} 秒 → {d / cut.Rate:0.0} 秒", $"{d:0.0}s → {d / cut.Rate:0.0}s") : L($"成片少 {d:0.0} 秒", $"{d:0.0}s removed");
+            }
+            optBtn.Text = "⚙ " + ExportOpt.Summary(L);
             playBtn.Invalidate();
             tlMinus.Enabled = Timeline.Scale > 1.001; tlPlus.Enabled = Timeline.Scale < 7.999;
             int sv = (int)Math.Round(Timeline.Scale * 100); if (tlScale.Value != sv) tlScale.Value = Math.Min(800, Math.Max(100, sv));
             var seg = Project.Segments.FirstOrDefault(s => s.Id == Selected);
-            inspector.Visible = seg != null;
+            inspector.Visible = seg != null && cut == null;
             if (seg != null)
             {
                 insTime.Text = Clock(seg.Start) + " – " + Clock(seg.End);
@@ -317,6 +370,7 @@ namespace ScreenRecorder
             Project = p;
             if (lookChanged) Rebuild(); else if (segsChanged) Replan();
             saveTimer.Stop(); saveTimer.Start();
+            if (AudioSig(p) != audioSig) { audioTimer.Stop(); audioTimer.Start(); }
             Recompose();
             Changed?.Invoke();
         }
@@ -357,12 +411,48 @@ namespace ScreenRecorder
             if (m.At(t, out var mx, out var my, out _)) { fx = mx / Track.Width; fy = 1 - my / Track.Height; }
             var seg = new ZoomSegment { Start = s0, End = e0, FixedX = fx, FixedY = fy };
             Edit(p => { p.Segments.Add(seg); p.Segments = p.Segments.OrderBy(x => x.Start).ToList(); });
-            Selected = seg.Id;
+            Selected = seg.Id; SelectedCut = null;
+            Changed?.Invoke();
+        }
+
+        // ---- 剪掉 / 快放 ----
+        // 某一段剪辑能占的范围：不压到前后两段剪辑、不出修剪范围
+        public (double lo, double hi) CutRoom(string id, StudioProject p)
+        {
+            var cuts = p.Cuts.OrderBy(c => c.Start).ToList();
+            int i = cuts.FindIndex(c => c.Id == id);
+            if (i < 0) return (p.TrimStart, p.TrimEnd);
+            double lo = Math.Max(p.TrimStart, i > 0 ? cuts[i - 1].End : 0);
+            double hi = Math.Min(p.TrimEnd, i + 1 < cuts.Count ? cuts[i + 1].Start : Duration);
+            return (lo, Math.Max(lo, hi));
+        }
+
+        public void AddCut(double t)
+        {
+            const double len = 2.0;
+            var cuts = Project.Cuts.OrderBy(c => c.Start).ToList();
+            if (cuts.Any(c => t >= c.Start && t < c.End)) { System.Media.SystemSounds.Beep.Play(); return; }
+            double lo = Math.Max(Project.TrimStart, cuts.LastOrDefault(c => c.End <= t)?.End ?? 0);
+            double hi = Math.Min(Project.TrimEnd, cuts.FirstOrDefault(c => c.Start > t)?.Start ?? Duration);
+            if (hi - lo < 0.3) { System.Media.SystemSounds.Beep.Play(); return; }
+            double s0 = Math.Max(lo, t), e0 = Math.Min(hi, s0 + len);
+            s0 = Math.Max(lo, e0 - len);
+            var c0 = new CutSegment { Start = s0, End = e0 };
+            Edit(p => { p.Cuts.Add(c0); p.Cuts = p.Cuts.OrderBy(x => x.Start).ToList(); });
+            SelectedCut = c0.Id; Selected = null; Picking = false;
             Changed?.Invoke();
         }
 
         public void DeleteSelected()
         {
+            if (SelectedCut != null)
+            {
+                var cid = SelectedCut;
+                Edit(p => p.Cuts.RemoveAll(c => c.Id == cid));
+                SelectedCut = null;
+                Changed?.Invoke();
+                return;
+            }
             var id = Selected;
             if (id == null) return;
             Edit(p => p.Segments.RemoveAll(s => s.Id == id));
@@ -479,17 +569,41 @@ namespace ScreenRecorder
         public void ScrubBegin() { scrub.Begin(); if (Playing) StopPlayback(); }
         public void ScrubEnd() => scrub.End();
 
-        // ---- 播放：从播放头开始连续解码（每秒 30 张），按时钟推进，声音用 MCI 放抽出来的 wav ----
+        // ---- 播放：剪掉的跳过、快放的快放（同 Mac 版）。画面一块一块地解（每块从它的起点开始，快放块按倍数取帧），按成片时钟推进；
+        // 声音放「预览声音」：和导出同一套做法提前做好的整条 wav（剪掉 / 快放 / 音量 / 点击声都在里面），从成片时间开始放 ----
         Process player; Thread playThread; volatile bool stopPlay;
-        string audioWav; Task audioPrep;
+        string audioWav; string audioSig; int audioGen;
         readonly int playFps = 30;
+        readonly System.Windows.Forms.Timer audioTimer = new System.Windows.Forms.Timer { Interval = 400 };
 
+        static string AudioSig(StudioProject p) =>
+            p.Audio.ToJson() + "|" + string.Join(";", p.Cuts.Select(c => $"{c.Start:R},{c.End:R},{c.Speed},{c.Rate:R}")) + "|" + p.TrimStart.ToString("R") + "," + p.TrimEnd.ToString("R") + "|" + p.Look.ClickSound + p.Look.ClickStyle;
+
+        // 预览声音过期了（改了音量、剪辑、修剪、点击声）：后台重做一份，做好换上
         void StartAudioPrep()
         {
-            if (!Info.HasAudio) return;
+            var p = Project.Clone(); var sig = AudioSig(p); int gen = ++audioGen;
+            audioSig = sig;
             var wav = Path.Combine(Path.GetTempPath(), "studio-preview-" + Guid.NewGuid().ToString("N") + ".wav");
-            audioPrep = Task.Run(() => { if (Studio.ExtractAudio(Raw, wav)) audioWav = wav; });
+            Task.Run(() =>
+            {
+                bool ok = false;
+                try { ok = Studio.RenderAudio(Dir, Info, Track, p, wav); } catch { }
+                try
+                {
+                    BeginInvoke((Action)(() =>
+                    {
+                        if (!ok || gen != audioGen) { try { File.Delete(wav); } catch { } return; }
+                        var old = audioWav; audioWav = wav; AudioReady++;
+                        if (old != null && !Playing) try { File.Delete(old); } catch { }
+                        else if (old != null) oldWavs.Add(old);
+                    }));
+                }
+                catch { }
+            });
         }
+        readonly List<string> oldWavs = new List<string>();
+        public int AudioReady;   // 自测用：预览声音做好过几次
 
         public void TogglePlay()
         {
@@ -501,36 +615,48 @@ namespace ScreenRecorder
         void StartPlayback(double t0)
         {
             StopPlayback();
+            var map = new TimeMap(Project);
+            // 播放头落在剪掉段里：从剪掉段的终点开始
+            if (map.At(t0) is TimeMap.Piece pc && pc.Rate == 0) t0 = pc.End;
             Playing = true; stopPlay = false;
             Changed?.Invoke();
-            var proc = Studio.StartDecode(Raw, t0, pw, ph, playFps, Info.Matrix);
-            player = proc;
-            proc.ErrorDataReceived += (s, e) => { }; proc.BeginErrorReadLine();
-            if (audioWav != null) Mci.Play(audioWav, t0);
-            playThread = new Thread(() => PlayLoop(proc, t0)) { IsBackground = true, Name = "studio-preview" };
+            if (audioWav != null) Mci.Play(audioWav, map.Out(t0) - Project.TrimStart);
+            var spans = map.Spans(t0, Project.TrimEnd);
+            double o0 = map.Out(t0);
+            playThread = new Thread(() => PlayLoop(spans, map, o0)) { IsBackground = true, Name = "studio-preview" };
             playThread.Start();
         }
 
-        void PlayLoop(Process proc, double t0)
+        void PlayLoop(List<(double start, double end, double rate)> spans, TimeMap map, double o0)
         {
             int bytes = pw * ph * 4;
             var sw = Stopwatch.StartNew();
-            var stream = proc.StandardOutput.BaseStream;
-            double end = Project.TrimEnd;
-            for (int k = 0; !stopPlay; k++)
+            double end = Project.TrimEnd, t = spans.Count > 0 ? spans[0].start : end;
+            foreach (var sp in spans)
             {
-                var buf = new byte[bytes]; int got = 0;
-                while (got < bytes) { int n = stream.Read(buf, got, bytes - got); if (n <= 0) break; got += n; }
-                if (got < bytes) break;
-                double t = t0 + k / (double)playFps;
-                if (t >= end) break;
-                // 赶不上就跳过这张（按时钟走，不拖慢）
-                double due = k / (double)playFps, now = sw.Elapsed.TotalSeconds;
-                if (now > due + 0.1) continue;
-                if (due > now) Thread.Sleep((int)((due - now) * 1000));
-                srcFrame = buf; srcTime = t;
-                ShowFrame(buf, t);
-                try { BeginInvoke((Action)(() => { if (!stopPlay) { Time = t; Changed?.Invoke(); Timeline.FollowPlayhead(); } })); } catch { return; }
+                if (stopPlay) break;
+                double fps = playFps * sp.rate;   // 快放块：按倍数多取帧，每帧照样按 1/30 秒放
+                var proc = Studio.StartDecode(Raw, sp.start, pw, ph, (int)Math.Round(fps), Info.Matrix);
+                player = proc;
+                proc.ErrorDataReceived += (s, e) => { }; proc.BeginErrorReadLine();
+                var stream = proc.StandardOutput.BaseStream;
+                for (int k = 0; !stopPlay; k++)
+                {
+                    t = sp.start + k / fps;
+                    if (t >= sp.end - 1e-6) break;
+                    var buf = new byte[bytes]; int got = 0;
+                    while (got < bytes) { int n = stream.Read(buf, got, bytes - got); if (n <= 0) break; got += n; }
+                    if (got < bytes) break;
+                    // 赶不上就跳过这张（按成片时钟走，不拖慢）
+                    double due = map.Out(t) - o0, now = sw.Elapsed.TotalSeconds;
+                    if (now > due + 0.1) continue;
+                    if (due > now) Thread.Sleep((int)((due - now) * 1000));
+                    srcFrame = buf; srcTime = t;
+                    ShowFrame(buf, t);
+                    double tt = t;
+                    try { BeginInvoke((Action)(() => { if (!stopPlay) { Time = tt; Changed?.Invoke(); Timeline.FollowPlayhead(); } })); } catch { return; }
+                }
+                try { if (!proc.HasExited) proc.Kill(); } catch { }
             }
             try { BeginInvoke((Action)(() => { if (!stopPlay) { StopPlayback(); if (Time >= end - 0.1) Time = end; Changed?.Invoke(); } })); } catch { }
         }
@@ -542,6 +668,8 @@ namespace ScreenRecorder
             Mci.Stop();
             try { if (player != null && !player.HasExited) player.Kill(); } catch { }
             player = null;
+            foreach (var w in oldWavs) try { File.Delete(w); } catch { }
+            oldWavs.Clear();
         }
 
         public void Step(int n)
@@ -571,25 +699,35 @@ namespace ScreenRecorder
             if (exporting) return;
             saveTimer.Stop(); SaveNow();
             exporting = true; exported = null;
-            exportBtn.Enabled = false; exportBar.Visible = true; exportBar.Value = 0;
+            exportBtn.Enabled = false; optBtn.Enabled = false; exportBar.Visible = true; exportBar.Value = 0; cancelBtn.Visible = true;
             openBtn.Visible = showBtn.Visible = false;
             exportStatus.Text = ""; exportStatus.ForeColor = Theme.Secondary;
             var p = Project.Clone();
-            var outPath = Unique(OutPath);
+            var opt = ExportOpt.Clone();
+            var outPath = Unique(opt.Gif ? Path.ChangeExtension(OutPath, ".gif") : OutPath);
+            exportCancel = new CancellationTokenSource();
+            var token = exportCancel.Token;
             Task.Run(() =>
             {
-                string err = null; RenderStats stats = null;
-                try { stats = Studio.Render(Dir, outPath, new StudioStyle(), v => { try { BeginInvoke((Action)(() => { exportBar.Value = (int)Math.Min(100, v * 100); exportStatus.Text = (int)(v * 100) + "%"; })); } catch { } }, CursorTracker.LoadCursor, null, p); }
+                string err = null; RenderStats stats = null; bool cancelled = false;
+                try { stats = Studio.Render(Dir, outPath, new StudioStyle(), v => { try { BeginInvoke((Action)(() => { exportBar.Value = (int)Math.Min(100, v * 100); exportStatus.Text = (int)(v * 100) + "%"; })); } catch { } }, CursorTracker.LoadCursor, null, p, opt, token); }
+                catch (OperationCanceledException) { cancelled = true; }
                 catch (Exception e) { err = e.Message; }
                 try
                 {
                     BeginInvoke((Action)(() =>
                     {
-                        exporting = false; exportBtn.Enabled = true; exportBar.Visible = false;
+                        exporting = false; exportBtn.Enabled = true; optBtn.Enabled = true; exportBar.Visible = false; cancelBtn.Visible = false;
+                        if (cancelled) { exportStatus.Text = L("已取消导出", "Export cancelled"); LastExportCancelled = true; return; }
                         if (err != null) { exportStatus.Text = L("导出失败：", "Export failed: ") + err; exportStatus.ForeColor = Color.FromArgb(200, 30, 30); return; }
                         exported = outPath;
                         string how = stats != null && (stats.Gpu || stats.Encoder != "libx264") ? L("显卡", "GPU") : "CPU";
                         exportStatus.Text = L($"已导出到桌面，用时 {stats?.TotalSeconds:0} 秒（{how}）", $"Exported to Desktop in {stats?.TotalSeconds:0} s ({how})");
+                        if (opt.CopyToClipboard)
+                        {
+                            try { var files = new System.Collections.Specialized.StringCollection { outPath }; Clipboard.SetFileDropList(files); exportStatus.Text += L("，已复制到剪贴板", " · copied to clipboard"); }
+                            catch { }
+                        }
                         openBtn.Visible = showBtn.Visible = true;
                         Exported?.Invoke(outPath);
                     }));
@@ -597,6 +735,39 @@ namespace ScreenRecorder
                 catch { }
             });
         }
+        public bool LastExportCancelled;
+        public void ScrollStyleTo(string what) => style.ScrollTo(what);
+        public void CancelExport() => exportCancel?.Cancel();
+
+        // 导出设置菜单：分辨率 / 帧率 / 画质 / 格式 / 复制到剪贴板，选了马上记住
+        void ShowExportMenu()
+        {
+            var m = new ContextMenuStrip();
+            void Group(string title, IEnumerable<(string text, bool on, Action set)> items)
+            {
+                if (m.Items.Count > 0) m.Items.Add(new ToolStripSeparator());
+                m.Items.Add(new ToolStripLabel(title) { ForeColor = Theme.Secondary, Font = new Font(Font, FontStyle.Bold) });
+                foreach (var (text, on, set) in items)
+                {
+                    var it = new ToolStripMenuItem(text) { Checked = on };
+                    it.Click += (s, e) => { set(); SaveExportOpt(); };
+                    m.Items.Add(it);
+                }
+            }
+            var o = ExportOpt;
+            Group(L("格式", "Format"), new[] { (L("视频（mp4）", "Video (mp4)"), !o.Gif, (Action)(() => o.Gif = false)), ("GIF", o.Gif, () => o.Gif = true) });
+            Group(L("分辨率", "Resolution"), ExportOptions.Resolutions.Select(r => (r == "original" ? L("原始", "Original") : r == "4k" ? "4K" : r + "p" + (r == "1440" ? L("（推荐）", " (recommended)") : r == "1080" ? L("（发微信、抖音够用）", " (good for sharing)") : ""), o.Resolution == r, (Action)(() => o.Resolution = r))));
+            Group(L("帧率", "Frame rate"), new[] { ("60", o.Fps == 60, (Action)(() => o.Fps = 60)), ("30", o.Fps == 30, () => o.Fps = 30) });
+            Group(L("画质", "Quality"), new[] { (L("高", "High"), o.Quality == "high", (Action)(() => o.Quality = "high")), (L("标准", "Standard"), o.Quality == "standard", () => o.Quality = "standard"), (L("小文件", "Small file"), o.Quality == "small", () => o.Quality = "small") });
+            m.Items.Add(new ToolStripSeparator());
+            var clip = new ToolStripMenuItem(L("导出后复制到剪贴板", "Copy to clipboard after export")) { Checked = o.CopyToClipboard };
+            clip.Click += (s, e) => { o.CopyToClipboard = !o.CopyToClipboard; SaveExportOpt(); };
+            m.Items.Add(clip);
+            if (o.Gif) m.Items.Add(new ToolStripLabel(L("GIF：宽 960、每秒 15 帧、没有声音", "GIF: 960 wide, 15 fps, no sound")) { ForeColor = Theme.Secondary });
+            m.Show(optBtn, new Point(0, optBtn.Height));
+        }
+        void SaveExportOpt() { Settings.SetString("exportOptions", ExportOpt.Save()); Changed?.Invoke(); }
+
         public event Action<string> Exported;
         public bool Exporting => exporting;
         public string ExportStatusText => exportStatus.Text;
@@ -614,8 +785,8 @@ namespace ScreenRecorder
                 case Keys.Right: Step(1); return true;
                 case Keys.Control | Keys.Z: Undo(); return true;
                 case Keys.Control | Keys.Y: case Keys.Control | Keys.Shift | Keys.Z: Redo(); return true;
-                case Keys.Delete: case Keys.Back: if (Selected != null) { DeleteSelected(); return true; } break;
-                case Keys.Escape: if (Picking) { Picking = false; Changed?.Invoke(); return true; } if (Selected != null) { Selected = null; Changed?.Invoke(); return true; } break;
+                case Keys.Delete: case Keys.Back: if (Selected != null || SelectedCut != null) { DeleteSelected(); return true; } break;
+                case Keys.Escape: if (Picking) { Picking = false; Changed?.Invoke(); return true; } if (Selected != null || SelectedCut != null) { Selected = null; SelectedCut = null; Changed?.Invoke(); return true; } break;
             }
             return base.ProcessCmdKey(ref msg, keyData);
         }
@@ -636,8 +807,9 @@ namespace ScreenRecorder
         {
             base.OnFormClosed(e);
             shown?.Dispose();
-            var wav = audioWav;
-            if (wav != null) Task.Run(() => { Thread.Sleep(500); try { File.Delete(wav); } catch { } });
+            var wavs = new List<string>(oldWavs); if (audioWav != null) wavs.Add(audioWav);
+            audioGen++;
+            Task.Run(() => { Thread.Sleep(500); foreach (var w in wavs) try { File.Delete(w); } catch { } });
         }
 
         protected override void OnHandleCreated(EventArgs e)

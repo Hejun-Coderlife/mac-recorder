@@ -341,7 +341,7 @@ jobs:
           $out = Join-Path $env:RUNNER_TEMP "studio/editor"; New-Item -ItemType Directory -Force $out | Out-Null
           $proj = Join-Path $env:RUNNER_TEMP "studio/project"
           function Shot($name, $vars) {
-            foreach ($k in "APP_LANG", "EDITOR_WIDTH", "EDITOR_SELECT", "EDITOR_TLZOOM", "EDITOR_LOOK") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+            foreach ($k in "APP_LANG", "EDITOR_WIDTH", "EDITOR_SELECT", "EDITOR_TLZOOM", "EDITOR_LOOK", "EDITOR_DEMOCUTS") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
             foreach ($k in $vars.Keys) { Set-Item "env:$k" $vars[$k] }
             $env:EDITOR = $proj; $env:EDITORSHOT = (Join-Path $out "$name.png")
             $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
@@ -353,7 +353,9 @@ jobs:
           Shot "zh-1920-tlzoom" @{ APP_LANG = "zh"; EDITOR_WIDTH = "1920"; EDITOR_TLZOOM = "3" }
           Shot "en-1440-gradient-9x16" @{ APP_LANG = "en"; EDITOR_WIDTH = "1440"; EDITOR_LOOK = '{"aspect":"9:16","background":"gradient","gradient0":{"r":1,"g":0.76,"b":0.62},"gradient1":{"r":0.97,"g":0.46,"b":0.62},"gradientAngle":160,"cursorScale":1.8,"clickSound":true,"hideIdleCursor":true}' }
           Shot "zh-1440-wallpaper" @{ APP_LANG = "zh"; EDITOR_WIDTH = "1440"; EDITOR_LOOK = '{"background":"wallpaper"}' }
-          foreach ($k in "APP_LANG", "EDITOR_WIDTH", "EDITOR_SELECT", "EDITOR_TLZOOM", "EDITOR_LOOK", "EDITOR", "EDITORSHOT") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          Shot "zh-1440-cuts-sound" @{ APP_LANG = "zh"; EDITOR_WIDTH = "1440"; EDITOR_DEMOCUTS = "1" }
+          Shot "en-1920-cuts-sound" @{ APP_LANG = "en"; EDITOR_WIDTH = "1920"; EDITOR_DEMOCUTS = "1" }
+          foreach ($k in "APP_LANG", "EDITOR_WIDTH", "EDITOR_SELECT", "EDITOR_TLZOOM", "EDITOR_LOOK", "EDITOR_DEMOCUTS", "EDITOR", "EDITORSHOT") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
           Get-ChildItem $out | Format-Table Name, Length
 
       - name: Studio editor - real mouse / keyboard (trim drag, undo / redo, add zoom, drag its edge, play, frame step, timeline zoom, export, save)
@@ -403,6 +405,126 @@ jobs:
           $ms = MaxVol $styled; $mp = MaxVol $plain
           Write-Host "clicks in range: $clicks  max volume with click sound: $ms dB  without: $mp dB"
           if ($clicks -gt 0 -and $ms -lt $mp + 6) { throw "click sound not audible in export" }
+
+      - name: Studio cuts / speed-up, volume, click sounds after cuts, export options (resolution, fps, GIF, cancel, clipboard)
+        run: |
+          foreach ($k in "AUTOTEST", "AUTOSTUDIO", "AUTOINPUT", "AUTOAUDIO", "AUTOOUT", "STUDIO_COMPOSE", "STUDIO_ENCODER", "STUDIO") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $proj = Join-Path $env:RUNNER_TEMP "studio/project"
+          $root = Join-Path $env:RUNNER_TEMP "studio/w1"; New-Item -ItemType Directory -Force $root | Out-Null
+          Add-Type -AssemblyName System.Drawing
+          function Dur($f) { return [double](ffprobe -v error -show_entries format=duration -of csv=p=0 $f) }
+          function Variant($name, $json, $vars) {
+            $dir = Join-Path $root $name; Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue; Copy-Item $proj $dir -Recurse
+            Remove-Item "$dir\project.json" -ErrorAction SilentlyContinue
+            Set-Content "$dir\project.json" $json -Encoding utf8NoBOM
+            foreach ($k in "STUDIO_RES", "STUDIO_FPS", "STUDIO_QUALITY", "STUDIO_FORMAT", "STUDIO_CANCEL", "STUDIO_CLIP") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+            foreach ($k in $vars.Keys) { Set-Item "env:$k" $vars[$k] }
+            $ext = if ($vars.STUDIO_FORMAT -eq "gif") { "gif" } else { "mp4" }
+            $env:STUDIO = $dir; $env:STUDIO_OUT = (Join-Path $root "$name.$ext")
+            $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+            $res = Get-Content "$env:TEMP\recorder_test.txt" -Raw
+            Write-Host "[$name] exit=$($p.ExitCode)`n$res"
+            foreach ($k in "STUDIO_RES", "STUDIO_FPS", "STUDIO_QUALITY", "STUDIO_FORMAT", "STUDIO_CANCEL", "STUDIO_CLIP", "STUDIO", "STUDIO_OUT") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+            return @{ exit = $p.ExitCode; res = $res; out = (Join-Path $root "$name.$ext") }
+          }
+          $D = Dur (Join-Path $proj "raw.mp4")
+          $c1 = 0.2 * $D; $c2 = 0.35 * $D; $s1 = 0.5 * $D; $s2 = 0.75 * $D
+          $inv = [Globalization.CultureInfo]::InvariantCulture
+          function N($v) { return $v.ToString("0.###", $inv) }
+          $base = '"segments":[],"segmentsEdited":true,"trimStart":0,"trimEnd":' + (N $D) + ',"look":{"blur":"off","clickSound":false}'
+          $cuts = '"cuts":[{"id":"C1","start":' + (N $c1) + ',"end":' + (N $c2) + ',"mode":"cut","rate":4},{"id":"C2","start":' + (N $s1) + ',"end":' + (N $s2) + ',"mode":"speed","rate":4}]'
+          # 1) 剪掉 / 快放：时长、剪掉段的画面不出现、快放段对上
+          $plain = Variant "plain" ('{' + $base + '}') @{ STUDIO_RES = "720"; STUDIO_FPS = "30" }
+          $cut = Variant "cut" ('{' + $base + ',' + $cuts + ',"voiceovers":[{"id":"V","file":"voice/x.m4a","start":1,"trimIn":0,"trimOut":1,"fileLength":1,"volume":1}]}') @{ STUDIO_RES = "720"; STUDIO_FPS = "30" }
+          if ($plain.exit -ne 0 -or $cut.exit -ne 0) { throw "cut / plain render failed" }
+          $want = $D - ($c2 - $c1) - ($s2 - $s1) * 0.75
+          $got = Dur $cut.out
+          Write-Host "duration with cuts: $got (expected $want; plain $(Dur $plain.out))"
+          if ([Math]::Abs($got - $want) -gt 0.1) { throw "duration with cuts is wrong" }
+          function Gray($f, $t, $o) { ffmpeg -v error -y -ss (N $t) -i $f -frames:v 1 -vf "scale=320:-2,format=gray" $o }
+          function Psnr($a, $b) { $l = (ffmpeg -hide_banner -i $a -i $b -lavfi psnr -f null - 2>&1 | Select-String "average:").ToString(); return [double](($l -replace '.*average:([\d.inf]+).*', '$1') -replace 'inf', '99') }
+          $pairs = @( @(($c1 + 0.3), ($c2 + 0.3), "after the cut"), @(($c1 + ($s1 - $c2) + ($s2 - $s1) / 8), ($s1 + ($s2 - $s1) / 2), "middle of the 4x part") )
+          foreach ($pr in $pairs) {
+            Gray $cut.out $pr[0] (Join-Path $root "a.png"); Gray $plain.out $pr[1] (Join-Path $root "b.png"); Gray $plain.out $pr[0] (Join-Path $root "c.png")
+            $good = Psnr (Join-Path $root "a.png") (Join-Path $root "b.png"); $bad = Psnr (Join-Path $root "a.png") (Join-Path $root "c.png")
+            Write-Host "$($pr[2]): out $(N $pr[0])s vs source $(N $pr[1])s PSNR $good dB (unmapped $bad dB)"
+            if ($good -lt 30 -or $good -lt $bad) { throw "frame mapping wrong ($($pr[2]))" }
+          }
+          # Windows 不认识的字段（讲解）没丢
+          $pj = Get-Content (Join-Path $root "cut/project.json") -Raw
+          # 2) 剪掉之后的点击声：录到的声音静音、只留点击声，峰值落在换算后的时间上，剪掉段里的点击没声音
+          $clk = Variant "clicks" ('{' + ($base -replace '"clickSound":false', '"clickSound":true,"clickStyle":"wood"') + ',' + $cuts + ',"audio":{"system":1,"mic":1,"clicks":1,"muted":true}}') @{ STUDIO_RES = "720"; STUDIO_FPS = "30" }
+          if ($clk.exit -ne 0) { throw "clicks render failed" }
+          $raw = Join-Path $root "clicks.f32"
+          ffmpeg -v error -y -i $clk.out -vn -ac 1 -ar 48000 -f f32le $raw
+          $bytes = [IO.File]::ReadAllBytes($raw); $n = [int]($bytes.Length / 4)
+          $peaks = New-Object System.Collections.Generic.List[double]
+          for ($i = 0; $i -lt $n - 480; $i += 480) {
+            $m = 0.0; for ($j = 0; $j -lt 480; $j += 8) { $v = [Math]::Abs([BitConverter]::ToSingle($bytes, ($i + $j) * 4)); if ($v -gt $m) { $m = $v } }
+            if ($m -gt 0.05 -and ($peaks.Count -eq 0 -or $i / 48000.0 - $peaks[$peaks.Count - 1] -gt 0.15)) { $peaks.Add($i / 48000.0) }
+          }
+          $track = Get-Content (Join-Path $proj "track.json") -Raw | ConvertFrom-Json
+          function Out($s) { $d = 0.0; foreach ($pc in @(@($c1, $c2, 0), @($s1, $s2, 4))) { if ($s -le $pc[0]) { break }; $e = [Math]::Min($s, $pc[1]); $L = $e - $pc[0]; $d += $L - $(if ($pc[2] -eq 0) { 0 } else { $L / $pc[2] }) }; return $s - $d }
+          $exp = @($track.clicks | Where-Object { -not ($_[0] -ge $c1 -and $_[0] -lt $c2) } | ForEach-Object { Out $_[0] } | Where-Object { $_ -lt $got - 0.1 })
+          $dropped = @($track.clicks | Where-Object { $_[0] -ge $c1 -and $_[0] -lt $c2 }).Count
+          Write-Host "expected clicks: $(($exp | ForEach-Object { N $_ }) -join ', ')  (dropped in cut: $dropped)"
+          Write-Host "audio peaks:     $(($peaks | ForEach-Object { N $_ }) -join ', ')"
+          foreach ($e in $exp) { if (-not ($peaks | Where-Object { [Math]::Abs($_ - $e) -lt 0.05 })) { throw "no click sound at $(N $e)s" } }
+          if ($peaks.Count -gt $exp.Count) { throw "extra click sounds (clicks inside the cut should be silent)" }
+          # 3) 音量：0.6 振幅的正弦，50% / 100% / 200%（软限幅，不削波）
+          $vdir = Join-Path $root "vol"; New-Item -ItemType Directory -Force $vdir | Out-Null
+          ffmpeg -v error -y -f lavfi -i "color=c=gray:s=640x360:r=30:d=4" -f lavfi -i "sine=f=300:d=4:sample_rate=48000" -filter_complex "[1:a]volume=4.8,aformat=channel_layouts=stereo[a]" -map 0:v -map "[a]" -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac -b:a 320k (Join-Path $vdir "raw.mp4")
+          Set-Content (Join-Path $vdir "track.json") '{"width":640,"height":360,"pixelsPerPoint":1,"moves":[[0,320,180,0,0]],"clicks":[],"keys":[],"cursors":[{"file":"c.png","hotX":0,"hotY":0,"w":16,"h":16,"arrow":true}]}' -Encoding utf8NoBOM
+          foreach ($v in "0.5", "1", "2") {
+            Set-Content (Join-Path $vdir "project.json") ('{"segments":[],"segmentsEdited":true,"trimStart":0,"trimEnd":4,"audio":{"system":' + $v + ',"mic":1,"clicks":1,"muted":false}}') -Encoding utf8NoBOM
+            $env:STUDIO = $vdir; $env:STUDIO_OUT = (Join-Path $root "vol-$v.mp4"); $env:STUDIO_RES = "720"
+            $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+            Remove-Item env:STUDIO; Remove-Item env:STUDIO_OUT; Remove-Item env:STUDIO_RES
+            if ($p.ExitCode -ne 0) { throw "volume $v render failed: $(Get-Content "$env:TEMP\recorder_test.txt" -Raw)" }
+            $pk = ((ffmpeg -hide_banner -ss 1 -t 2 -i (Join-Path $root "vol-$v.mp4") -af astats=measure_overall=Peak_level -vn -f null - 2>&1 | Select-String "Peak level dB" | Select-Object -Last 1).ToString() -replace '.*Peak level dB:\s*(-?[\d.]+).*', '$1')
+            $lin = [Math]::Pow(10, [double]$pk / 20)
+            Write-Host "volume $v -> peak $([Math]::Round($lin, 3))"
+            $target = [Math]::Min(0.6 * [double]$v, 0.95)
+            if ($v -ne "2" -and [Math]::Abs($lin - 0.6 * [double]$v) -gt 0.05) { throw "volume $v wrong: $lin" }
+            if ($v -eq "2" -and ($lin -gt 0.97 -or $lin -lt 0.8)) { throw "200% should be soft-limited below 0.95: $lin" }
+          }
+          # 4) 导出设置：720p / 30 帧；GIF；取消；剪贴板
+          $o = Variant "res720" ('{' + $base + '}') @{ STUDIO_RES = "720"; STUDIO_FPS = "30"; STUDIO_QUALITY = "small"; STUDIO_CLIP = "1" }
+          $info = ffprobe -v error -select_streams v -show_entries "stream=width,height,r_frame_rate" -of json $o.out | ConvertFrom-Json
+          $s0 = $info.streams[0]; Write-Host "720p: $($s0.width)x$($s0.height) $($s0.r_frame_rate)"
+          if ([Math]::Min($s0.width, $s0.height) -gt 720 -or $s0.r_frame_rate -ne "30/1" -or ($s0.width % 2) -ne 0) { throw "720p / 30 fps not applied" }
+          if ($o.res -notmatch "clipboard=OK") { throw "clipboard does not hold the exported file" }
+          $g = Variant "gif" ('{' + $base + ',' + $cuts + '}') @{ STUDIO_FORMAT = "gif" }
+          if ($g.exit -ne 0) { throw "gif failed" }
+          $gi = ffprobe -v error -count_frames -show_entries "stream=width,height,nb_read_frames" -of json $g.out | ConvertFrom-Json
+          $gs = $gi.streams[0]; $wantFrames = [Math]::Floor($want * 15)
+          Write-Host "gif: $($gs.width)x$($gs.height) frames $($gs.nb_read_frames) (expected ~$wantFrames) size $((Get-Item $g.out).Length)"
+          if ($gs.width -gt 960 -or [Math]::Abs([int]$gs.nb_read_frames - $wantFrames) -gt 3) { throw "gif size / frame count wrong" }
+          $sp = Join-Path $root "long"; New-Item -ItemType Directory -Force $sp | Out-Null
+          ffmpeg -v error -y -f lavfi -i "testsrc2=s=1920x1080:r=30:d=30" -f lavfi -i "sine=f=440:d=30" -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac (Join-Path $sp "raw.mp4")
+          $env:STUDIO = $sp; $env:STUDIO_OUT = (Join-Path $root "cancel.mp4"); $env:STUDIO_CANCEL = "3"; $env:STUDIO_RES = "original"; $env:STUDIO_FAKETRACK = "1"
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          foreach ($k in "STUDIO", "STUDIO_OUT", "STUDIO_CANCEL", "STUDIO_RES", "STUDIO_FAKETRACK") { Remove-Item "env:$k" }
+          $res = Get-Content "$env:TEMP\recorder_test.txt" -Raw
+          Write-Host "cancel: exit=$($p.ExitCode) $res"
+          if ($p.ExitCode -ne 0 -or -not $res.StartsWith("CANCELLED") -or (Test-Path (Join-Path $root "cancel.mp4"))) { throw "cancel did not stop / clean up" }
+          Get-ChildItem $root -File | Format-Table Name, Length
+
+      - name: Main window - recent Studio footage list
+        run: |
+          $videos = [Environment]::GetFolderPath("MyVideos")
+          $sf = Join-Path $videos "录屏\Studio 素材"; New-Item -ItemType Directory -Force $sf | Out-Null
+          $proj = Join-Path $env:RUNNER_TEMP "studio/project"
+          foreach ($n in "Recording A", "Recording B") { $d = Join-Path $sf $n; if (-not (Test-Path $d)) { Copy-Item $proj $d -Recurse } }
+          $out = Join-Path $env:RUNNER_TEMP "studio/editor"; New-Item -ItemType Directory -Force $out | Out-Null
+          foreach ($lang in "zh", "en") {
+            $env:APP_LANG = $lang; $env:MAINSHOT = (Join-Path $out "main-recents-$lang.png")
+            $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+            $txt = Get-Content "$env:TEMP\mainshot.txt" -Raw
+            Write-Host "[$lang] exit=$($p.ExitCode) $txt"
+            if ($p.ExitCode -ne 0 -or -not $txt.StartsWith("OK")) { throw "recents list missing" }
+          }
+          Remove-Item env:MAINSHOT; Remove-Item env:APP_LANG
 
       - name: Countdown overlay + hide desktop icons
         run: |

@@ -9,14 +9,28 @@ using ScreenRecorder;
 Studio.FfmpegPath = Environment.GetEnvironmentVariable("FFMPEG") ?? "/opt/homebrew/bin/ffmpeg";
 if (args.Length > 0 && args[0] == "render")
 {
-    Studio.Render(args[1], args[2], new StudioStyle(), p => { }, null, Console.WriteLine);
+    ExportOptions opt = null;
+    string E(string k) => Environment.GetEnvironmentVariable(k);
+    if (E("STUDIO_RES") != null || E("STUDIO_FPS") != null || E("STUDIO_QUALITY") != null || E("STUDIO_FORMAT") != null)
+        opt = new ExportOptions { Resolution = E("STUDIO_RES") ?? "1440", Fps = int.TryParse(E("STUDIO_FPS"), out var f) ? f : 60, Quality = E("STUDIO_QUALITY") ?? "high", Gif = E("STUDIO_FORMAT") == "gif" };
+    var cts = new System.Threading.CancellationTokenSource();
+    if (double.TryParse(E("STUDIO_CANCEL"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cs)) cts.CancelAfter(TimeSpan.FromSeconds(cs));
+    try { Studio.Render(args[1], args[2], new StudioStyle(), p => { }, null, Console.WriteLine, null, opt, cts.Token); }
+    catch (OperationCanceledException) { Console.WriteLine("CANCELLED exists=" + File.Exists(args[2])); return 3; }
+    return 0;
+}
+if (args.Length > 0 && args[0] == "audio")
+{
+    var info = Studio.Probe(Path.Combine(args[1], "raw.mp4")); var tr = Studio.LoadTrack(args[1], info);
+    var pj = StudioProject.Load(args[1], tr, info.Duration);
+    Console.WriteLine("RenderAudio " + Studio.RenderAudio(args[1], info, tr, pj, args[2]));
     return 0;
 }
 if (args.Length > 0 && args[0] == "test")
 {
     string dir = args.Length > 1 ? args[1] : null, mac = args.Length > 2 ? File.ReadAllText(args[2]) : null;
     bool ok = true;
-    foreach (var res in new[] { StudioTests.Plan(dir), StudioTests.Project(mac), StudioTests.Scrub(), StudioTests.Presets(), StudioTests.Looks(Studio.LoadCover) })
+    foreach (var res in new[] { StudioTests.Plan(dir), StudioTests.Project(mac), StudioTests.Scrub(), StudioTests.Presets(), StudioTests.Looks(Studio.LoadCover), StudioTests.Cuts() })
     { Console.Write(res); ok &= res.TrimEnd().EndsWith(" OK"); }
     if (dir != null) { var b = StudioTests.Blur(dir); Console.Write(b); ok &= b.TrimEnd().EndsWith(" OK"); }
     return ok ? 0 : 1;

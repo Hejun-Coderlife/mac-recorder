@@ -1,0 +1,501 @@
+<!doctype html>
+<!-- 录屏 功能介绍视频：旁白 voice/voice.json 决定每句时长 → 排出每段画面；frame(t) 画出第 t 秒（record.mjs 逐帧截图）
+     画面都是真实界面：st/*.png（录屏.app 离屏截图，2940×1638 中文浅色），card/ tut/ dy/ pO/ pS/（录屏.app 真导出的成片帧）；
+     桌面、Windows、聊天窗口、摄像头人像、Dock 是示意画法 -->
+<html lang="zh-CN"><head><meta charset="utf-8"><title>录屏 功能介绍</title>
+<style>
+  html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #eceef2; font-family: "PingFang SC", -apple-system, sans-serif; }
+  #bg { position: absolute; inset: 0; background: radial-gradient(1400px 900px at 50% 40%, #f6f7f9, #e6e8ee); }
+  .layer { position: absolute; inset: 0; display: none; }
+  /* 剪辑窗口截图舞台：图按原始像素摆，整体用镜头变换 */
+  #ed { overflow: hidden; }
+  #edCam { position: absolute; left: 0; top: 0; width: 2940px; height: 1638px; transform-origin: 0 0; }
+  #edCam .win { position: absolute; left: 0; top: 0; width: 2940px; height: 1638px; border-radius: 22px; overflow: hidden;
+    box-shadow: 0 40px 120px rgba(20,30,60,.22), 0 0 0 2px rgba(0,0,0,.06); background: #fff; }
+  #edCam img.st { position: absolute; left: 0; top: 0; width: 2940px; height: 1638px; }
+  .spot { position: absolute; border-radius: 18px; box-shadow: 0 0 0 9999px rgba(15,20,35,.22); outline: 5px solid #0a84ff; outline-offset: 4px; opacity: 0; }
+  .ripple { position: absolute; width: 90px; height: 90px; margin: -45px 0 0 -45px; border-radius: 50%; border: 5px solid rgba(10,132,255,.9); opacity: 0; }
+  #cur { position: absolute; left: 0; top: 0; width: 34px; height: 50px; pointer-events: none; z-index: 50; filter: drop-shadow(0 3px 5px rgba(0,0,0,.35)); }
+  /* 字幕：底部一行，白字 + 半透明深色圆角底条 */
+  #sub { position: absolute; left: 50%; bottom: 46px; transform: translateX(-50%); z-index: 90; padding: 12px 30px; border-radius: 16px;
+    background: rgba(18,18,22,.74); color: #fff; font-size: 36px; font-weight: 500; letter-spacing: .5px; white-space: nowrap; opacity: 0; }
+  body.nosub #sub { display: none; }
+  /* 通用卡片 */
+  .card { position: absolute; border-radius: 22px; overflow: hidden; box-shadow: 0 34px 100px rgba(20,30,60,.22), 0 0 0 1px rgba(0,0,0,.05); background: #fff; }
+  .card img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .wall { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .kc { display: inline-flex; align-items: center; justify-content: center; min-width: 84px; height: 84px; padding: 0 22px; margin: 0 8px; box-sizing: border-box;
+    border-radius: 18px; background: rgba(255,255,255,.92); box-shadow: 0 8px 0 rgba(0,0,0,.12), 0 14px 30px rgba(0,0,0,.18); font: 600 40px -apple-system, "PingFang SC"; color: #1d1d1f; }
+  #keys { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); z-index: 60; opacity: 0; white-space: nowrap; }
+  .chk { position: absolute; width: 30px; height: 30px; margin: -15px 0 0 -15px; border-radius: 7px; background: #0a84ff; opacity: 0; }
+  .chk::after { content: ""; position: absolute; left: 10px; top: 4px; width: 8px; height: 16px; border: solid #fff; border-width: 0 4px 4px 0; transform: rotate(45deg); }
+</style></head>
+<body>
+<div id="bg"></div>
+
+<!-- 片头 / 片尾：图标 -->
+<div class="layer" id="L_icon"><img id="icon" src="img/icon.png" style="position:absolute;left:50%;top:44%;width:300px;height:300px;margin:-150px 0 0 -150px">
+  <div id="iconName" style="position:absolute;left:0;right:0;top:63%;text-align:center;font:600 54px 'PingFang SC';color:#1d1d1f;letter-spacing:4px">录屏</div></div>
+
+<!-- 桌面：主窗口 / 选区域 / 倒计时 / 最近素材 / 自动更新 -->
+<div class="layer" id="L_desk">
+  <img class="wall" src="img/wp_Sonoma.jpg">
+  <div id="deskScreen" class="card" style="left:150px;top:96px;width:1620px;height:1013px;border-radius:14px;display:none"><img id="deskShot" src="card/c0001.jpg"></div>
+  <div id="mainCam" style="position:absolute;left:0;top:0;width:1920px;height:1080px;transform-origin:0 0">
+    <div id="mainWin" class="card" style="left:600px;top:70px;width:720px;height:820px;border-radius:20px">
+      <div style="position:absolute;left:0;right:0;top:0;height:56px;background:#f2f2f4;border-bottom:1px solid #ddd">
+        <div style="position:absolute;left:20px;top:20px;width:14px;height:14px;border-radius:50%;background:#ff5f57;box-shadow:24px 0 0 #febc2e,48px 0 0 #28c840"></div>
+        <div style="position:absolute;left:0;right:0;top:15px;text-align:center;font:600 20px 'PingFang SC';color:#444">录屏</div></div>
+      <img src="st/main.png" style="position:absolute;left:0;top:56px;width:720px;height:760px;object-fit:fill">
+      <!-- 盖住列表（截图里是真实窗口名），换成演示用的几项 -->
+      <div id="list" style="position:absolute;left:28px;top:118px;width:664px;height:308px;background:#fff">
+        <div class="row" data-i="0">🖥️<b>整个屏幕</b><i>2880 × 1800 · 主屏幕</i></div>
+        <div class="row" data-i="1">🗒️<b>待办</b><i>演示 App · 1440 × 900</i></div>
+        <div class="row" data-i="2">📝<b>备忘录</b><i>备忘录 · 1200 × 820</i></div>
+        <div class="row" data-i="3">📁<b>访达</b><i>访达 · 960 × 620</i></div>
+      </div>
+      <div id="chkMic" class="chk" style="left:96px;top:556px"></div>
+      <div id="chkCam" class="chk" style="left:451px;top:556px"></div>
+      <div id="chkHide" class="chk" style="left:239px;top:596px"></div>
+      <div id="chkDnd" class="chk" style="left:386px;top:596px"></div>
+      <div id="cd3" style="position:absolute;left:135px;top:582px;width:58px;height:30px;border-radius:7px;background:#d8d8dc;display:none;font:500 15px 'PingFang SC';text-align:center;line-height:30px;color:#222">3 秒</div>
+      <div id="updBar" style="position:absolute;left:24px;right:24px;top:676px;height:46px;border-radius:12px;background:#eaf3ff;display:none;font:500 17px 'PingFang SC';color:#1d1d1f;line-height:46px;padding:0 16px">
+        ⬇︎ 新版本 v1.6 已下载，退出后自动换上 <span style="float:right;color:#0a66d8">现在重启</span></div>
+    </div>
+  </div>
+  <!-- 摄像头小窗（示意人像） -->
+  <div id="camBub" style="position:absolute;right:70px;bottom:70px;width:220px;height:220px;border-radius:50%;overflow:hidden;opacity:0;box-shadow:0 18px 40px rgba(0,0,0,.3);border:5px solid #fff;background:linear-gradient(160deg,#cfd8e6,#9fb0c8)">
+    <svg viewBox="0 0 100 100" style="position:absolute;inset:0"><circle cx="50" cy="40" r="17" fill="#f1d3bd"/><path d="M18 100c2-24 16-34 32-34s30 10 32 34z" fill="#5a6f8f"/><path d="M33 36c0-12 8-19 17-19s17 7 17 19c-3-6-9-9-17-9s-14 3-17 9z" fill="#3b2f2a"/></svg></div>
+  <!-- 选区域：遮罩 + 框 + 底部工具条 -->
+  <div id="pick" style="position:absolute;inset:0;display:none">
+    <div id="pkBox" style="position:absolute;border:2px dashed rgba(255,255,255,.95);box-shadow:0 0 0 9999px rgba(0,0,0,.35)"></div>
+    <div id="pkBar" style="position:absolute;left:50%;bottom:110px;transform:translateX(-50%);height:56px;padding:0 10px;border-radius:14px;background:rgba(40,40,44,.86);display:flex;align-items:center;gap:18px;color:#fff;font:600 20px -apple-system">
+      <span style="width:30px;height:30px;border-radius:50%;background:rgba(255,255,255,.25);text-align:center;line-height:30px">✕</span><span id="pkSize">1240 × 760</span>
+      <span style="padding:7px 18px;border-radius:9px;background:rgba(255,255,255,.18)">录制</span></div></div>
+  <!-- 倒计时（同录屏.app 的样子：深色圆 + 白字） -->
+  <div id="count" style="position:absolute;left:50%;top:50%;width:260px;height:260px;margin:-130px 0 0 -130px;border-radius:50%;background:rgba(40,40,44,.78);color:#fff;font:600 150px -apple-system;text-align:center;line-height:260px;opacity:0"></div>
+  <!-- Dock（示意） -->
+  <div id="dock" style="position:absolute;left:50%;bottom:-140px;transform:translateX(-50%);height:118px;padding:0 22px;border-radius:30px;background:rgba(255,255,255,.42);backdrop-filter:blur(20px);display:flex;align-items:center;gap:20px;box-shadow:0 10px 40px rgba(0,0,0,.2)">
+    <div class="dk" style="background:linear-gradient(#5ac8fa,#007aff)"></div><div class="dk" style="background:linear-gradient(#ffd60a,#ff9f0a)"></div>
+    <img id="dockIcon" src="img/icon.png" style="width:92px;height:92px;border-radius:22px"><div class="dk" style="background:linear-gradient(#34c759,#248a3d)"></div></div>
+  <div id="folder" style="position:absolute;width:110px;opacity:0;text-align:center;font:500 16px 'PingFang SC';color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.6)">
+    <svg viewBox="0 0 100 80" width="110"><path d="M4 14q0-6 6-6h26l8 8h46q6 0 6 6v48q0 6-6 6H10q-6 0-6-6z" fill="#5ab0f7"/><path d="M4 26h92v44q0 6-6 6H10q-6 0-6-6z" fill="#7cc4fa"/></svg><div>录屏 2026-10-29</div></div>
+</div>
+
+<!-- 剪辑窗口截图舞台 -->
+<div class="layer" id="ed"><div id="edCam"><div class="win"><img class="st" id="stA"><img class="st" id="stB"></div>
+  <div class="spot" id="spot"></div><div class="ripple" id="rip"></div>
+  <img id="exPop" src="st/expopts.png" style="position:absolute;left:2380px;top:80px;width:640px;height:550px;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.25);opacity:0">
+  <div id="exProg" style="position:absolute;left:2000px;top:16px;width:600px;height:58px;display:none;align-items:center;gap:20px;background:#fff;font:500 26px 'PingFang SC';color:#666">
+    <div style="flex:1;height:12px;border-radius:6px;background:#e5e5ea;overflow:hidden"><div id="exBar" style="height:100%;width:0;background:#0a84ff"></div></div><span id="exPct">0%</span>
+    <span style="padding:8px 20px;border-radius:10px;background:#e9e9ee;color:#222">取消</span></div>
+</div></div>
+
+<!-- 视频卡片舞台：Studio 前后对比 / 运动模糊 / 横竖屏 / 摄像头布局 -->
+<div class="layer" id="vid">
+  <div class="card" id="vA"><img id="vAi"></div><div class="card" id="vB"><img id="vBi"></div>
+  <div id="camP" style="position:absolute;overflow:hidden;border-radius:50%;opacity:0;box-shadow:0 16px 40px rgba(0,0,0,.28);border:6px solid #fff;background:linear-gradient(160deg,#cfd8e6,#9fb0c8)">
+    <svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMax slice" style="position:absolute;inset:0;width:100%;height:100%"><circle cx="50" cy="42" r="16" fill="#f1d3bd"/><path d="M16 100c2-24 17-36 34-36s32 12 34 36z" fill="#5a6f8f"/><path d="M34 38c0-12 7-18 16-18s16 6 16 18c-3-6-8-8-16-8s-13 2-16 8z" fill="#3b2f2a"/></svg></div>
+</div>
+
+<!-- Windows（示意）：桌面 + 待办窗口 + 聊天窗口 + 截图 -->
+<div class="layer" id="L_win" style="background:linear-gradient(135deg,#1a4d9e,#3f8ee8 55%,#a8d1ff)">
+  <div class="card" style="left:120px;top:110px;width:1060px;height:690px;border-radius:10px"><div style="height:44px;background:#f3f3f3;border-bottom:1px solid #ddd;font:500 18px 'Microsoft YaHei','PingFang SC';line-height:44px;padding-left:16px">待办</div>
+    <img src="card/c0300.jpg" style="top:44px;height:calc(100% - 44px)"></div>
+  <div class="card" id="chat" style="left:1240px;top:110px;width:560px;height:690px;border-radius:10px;background:#f5f5f5">
+    <div style="height:56px;background:#ededed;border-bottom:1px solid #ddd;font:600 20px 'PingFang SC';line-height:56px;padding-left:20px">小王</div>
+    <div style="position:absolute;left:20px;top:80px;padding:12px 16px;border-radius:10px;background:#fff;font:400 20px 'PingFang SC'">今天的待办发我一下？</div>
+    <div id="chatImg" style="position:absolute;right:20px;top:160px;width:320px;height:158px;border-radius:10px;overflow:hidden;opacity:0;box-shadow:0 2px 6px rgba(0,0,0,.15)"><img src="img/snip.jpg" style="width:100%;height:100%"></div>
+    <div style="position:absolute;left:0;right:0;bottom:0;height:120px;background:#fff;border-top:1px solid #ddd"></div></div>
+  <div style="position:absolute;left:0;right:0;bottom:0;height:64px;background:rgba(240,240,245,.85);backdrop-filter:blur(20px);display:flex;justify-content:center;align-items:center;gap:16px">
+    <div class="dk" style="width:40px;height:40px;border-radius:8px;background:linear-gradient(#5ac8fa,#007aff)"></div><img src="img/icon.png" style="width:44px;height:44px;border-radius:10px"><div class="dk" style="width:40px;height:40px;border-radius:8px;background:linear-gradient(#34c759,#248a3d)"></div></div>
+  <div id="wSel" style="position:absolute;border:3px solid #fff;box-shadow:0 0 0 9999px rgba(0,0,0,.35);display:none"></div>
+  <div id="wFlash" style="position:absolute;inset:0;background:#fff;opacity:0"></div>
+  <div id="wThumb" style="position:absolute;width:300px;height:148px;border-radius:12px;overflow:hidden;box-shadow:0 14px 40px rgba(0,0,0,.35);border:3px solid #fff;opacity:0"><img src="img/snip.jpg" style="width:100%;height:100%"></div>
+</div>
+
+<!-- 聊天里粘贴成片（示意） -->
+<div class="layer" id="L_paste" style="background:radial-gradient(1400px 900px at 50% 40%, #f6f7f9, #e6e8ee)">
+  <div class="card" style="left:460px;top:80px;width:1000px;height:860px;border-radius:18px;background:#f5f5f5">
+    <div style="height:70px;background:#ededed;border-bottom:1px solid #ddd;font:600 26px 'PingFang SC';line-height:70px;padding-left:28px">小王</div>
+    <div style="position:absolute;left:28px;top:100px;padding:16px 22px;border-radius:12px;background:#fff;font:400 26px 'PingFang SC'">教程录好了吗？</div>
+    <div id="pv" style="position:absolute;right:28px;top:190px;width:560px;height:315px;border-radius:14px;overflow:hidden;opacity:0;box-shadow:0 3px 10px rgba(0,0,0,.18)"><img id="pvImg" src="tut/t0200.jpg" style="width:100%;height:100%;object-fit:cover">
+      <div style="position:absolute;left:50%;top:50%;width:90px;height:90px;margin:-45px;border-radius:50%;background:rgba(0,0,0,.45)"><div style="position:absolute;left:35px;top:26px;border-style:solid;border-width:19px 0 19px 30px;border-color:transparent transparent transparent #fff"></div></div></div>
+    <div style="position:absolute;left:0;right:0;bottom:0;height:150px;background:#fff;border-top:1px solid #ddd"></div></div>
+</div>
+
+<div id="keys"></div>
+<svg id="cur" viewBox="0 0 24 36"><path d="M2 2v28l7-6.5 4.6 10.5 4.4-2-4.5-10H22z" fill="#000" stroke="#fff" stroke-width="2.2" stroke-linejoin="round"/></svg>
+<div id="sub"></div>
+
+<style>
+  .row { display: flex; align-items: center; gap: 14px; height: 70px; padding: 0 16px; border-radius: 12px; font-size: 26px; }
+  .row b { font: 600 20px "PingFang SC"; color: #1d1d1f; } .row i { font: 400 15px "PingFang SC"; color: #8a8a8e; font-style: normal; margin-left: 4px; }
+  .row.sel { background: #2b6fe3; } .row.sel b, .row.sel i { color: #fff; }
+  .dk { width: 92px; height: 92px; border-radius: 22px; }
+</style>
+<script>
+const $ = id => document.getElementById(id);
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const ease = x => { x = clamp(x); return x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; };
+const easeOut = x => 1 - Math.pow(1 - clamp(x), 3);
+const lerp = (a, b, k) => a + (b - a) * k;
+const show = (el, on) => { el.style.display = on ? 'block' : 'none'; };
+if (location.search.includes('nosub')) document.body.classList.add('nosub');
+
+// ———— 剪辑窗口里的位置（截图原始像素 2940×1638）————
+const TB = 946, AT = 1056, SEGY = 1272;
+const FULL = [0, 0, 2940, 1638], PREV = [480, 110, 1600, 790], RIGHT = [1660, 0, 1280, 1100], LOWER = [0, 870, 2940, 768];
+// 每段画面。beats[i] 对应这段第 i 句旁白：img 换图、cam 镜头框、cur 鼠标路径 [相对秒, x, y, 'c' 点击]、spot 高亮框、swap [相对秒, 图]
+const ED = {
+  ov: [
+    { img: 'ov', cam: FULL },
+    { spot: [28, 118, 2284, 748] },
+    { spot: [20, 1100, 2296, 520] },
+    { spot: [2330, 90, 600, 1000] }],
+  zoom: [
+    { img: 'ov', spot: [430, 1236, 790, 76] },
+    { cur: [[0, 1300, 700], [.6, 1194, 1272], [.9, 1194, 1272, 'd'], [1.8, 900, 1272, 'u']], swap: [1.8, 'short'] },
+    { cur: [[0, 900, 1272], [.4, 700, 1272, 'd'], [1.4, 820, 1272, 'u']], swap: [1.4, 'moved'] },
+    { img: 'ov', cur: [[0, 1600, 900], [.7, 2400, 1272], [.9, 2400, 1272, 'c'], [1.05, 2400, 1272, 'c']], swap: [1.1, 'added'] },
+    { img: 'ov', cur: [[0, 2400, 1272], [.4, 1784, 1272, 'c'], [1.0, 2239, AT], [1.25, 2239, AT, 'c']], swap: [1.3, 'deleted'] },
+    { img: 'ov', cur: [[0, 1200, 900], [.6, 500, AT], [.8, 500, AT, 'd'], [1.8, 620, AT, 'u']], swap: [1.6, 'z3'], spot: [28, 118, 2284, 748] },
+    { img: 'z3', cur: [[0, 620, AT], [.6, 1143, AT], [.8, 1143, AT, 'c']], swap: [.9, 'fixed'] },
+    { img: 'fixed', spot: [28, 118, 2284, 748] },
+    { img: 'zspeed', cur: [[0, 1600, 700], [.8, 2822, 456], [1.0, 2822, 456, 'c']], spot: [2340, 380, 590, 160] }],
+  cut: [
+    { img: 'ov', cur: [[0, 1500, 900], [.6, 2304, 1340], [.8, 2304, 1340, 'd'], [1.9, 1848, 1340, 'u']], swap: [1.9, 'trim'] },
+    { img: 'ov', cur: [[0, 1700, 1300], [.7, 272, TB], [.9, 272, TB, 'c']], swap: [1.0, 'cuts'] },
+    { img: 'cuts', spot: [430, 1180, 230, 44] },
+    { img: 'cuts', spot: [1210, 1180, 330, 44] },
+    { img: 'cuts', cur: [[0, 1400, 1200], [.6, 872, AT], [.8, 872, AT, 'c']] },
+    { img: 'ov', cur: [[0, 900, AT], [.6, 1554, TB], [.8, 1554, TB, 'c']], swap: [.9, 'suggest'] },
+    { img: 'suggest', cur: [[0, 1554, TB], [.6, 998, 1202], [.8, 998, 1202, 'c']], spot: [700, 1176, 380, 52] }],
+  sound: [
+    { img: 'audio', spot: [2330, 470, 600, 230] },
+    { cur: [[0, 1500, 800], [.6, 2530, 664], [.8, 2530, 664, 'd'], [1.6, 2620, 664, 'u']], swap: [1.6, 'audioN'] },
+    { img: 'audioN', cur: [[0, 2620, 664], [.6, 2708, 758], [.8, 2708, 758, 'c']], spot: [2330, 660, 600, 130] },
+    { img: 'audioN' },
+    { img: 'audioN', cur: [[0, 2700, 760], [.9, 456, TB]] },
+    { img: 'audioN', cur: [[0, 456, TB], [.2, 456, TB, 'c']], swap: [.3, 'voicerec'] },
+    { img: 'voice', spot: [240, 1324, 1500, 60] },
+    { img: 'music', spot: [130, 1560, 600, 50] },
+    { img: 'music', spot: [2330, 760, 600, 160] }],
+  caption: [
+    { img: 'ov', cur: [[0, 1400, 700], [.7, 636, TB], [.9, 636, TB, 'c']], swap: [1.0, 'caption'] },
+    { img: 'caption', cam: PREV },
+    { img: 'caption', cam: FULL, spot: [400, 1396, 900, 60] },
+    { img: 'caption', spot: [2330, 400, 600, 760] }],
+  style: [
+    { img: 'ov', cam: FULL, cur: [[0, 1500, 700], [.7, 2640, 200], [.9, 2640, 200, 'c']] },
+    { cur: [[0, 2640, 200], [.3, 2640, 200]], swap: [.2, 'douyin'] },
+    { img: 'douyin', cur: [[0, 2640, 260], [.6, 2748, 448], [.8, 2748, 448, 'c']], swap: [.9, 'd11'] },
+    { img: 'd11', cur: [[0, 2748, 448], [.5, 2638, 584], [.7, 2638, 584, 'c'], [1.4, 2456, 638], [1.6, 2456, 638, 'c']], swap: [.8, 'colr'], swap2: [1.7, 'wallp'] },
+    { img: 'wallp', cur: [[0, 2456, 638], [.6, 2606, 956], [.8, 2606, 956, 'd'], [1.6, 2706, 956, 'u']], swap: [1.6, 'mintF'] },
+    { img: 'cursor', cur: [[0, 2706, 956], [.6, 2700, 460], [.8, 2700, 460, 'd'], [1.4, 2750, 460, 'u'], [1.9, 2386, 554], [2.1, 2386, 554, 'c']], spot: [2340, 420, 590, 160] },
+    { img: 'cursor', cur: [[0, 2386, 554], [.5, 2386, 696], [.7, 2386, 696, 'c']], spot: [2340, 670, 590, 100] },
+    { img: 'cursor', cur: [[0, 2386, 696], [.5, 2386, 798], [.7, 2386, 798, 'c']], spot: [2340, 776, 590, 110] },
+    { img: 'blur', spot: [2340, 1120, 590, 140] }],
+  mark: [
+    { img: 'ov', cam: PREV },
+    { img: 'redact', cam: FULL, cur: [[0, 1400, 700], [.6, 800, TB], [.8, 800, TB, 'c']], spot: [700, 280, 380, 170] },
+    { img: 'mosaic', cam: PREV },
+    { img: 'arrow', cam: PREV },
+    { img: 'text', cam: PREV },
+    { img: 'keys', cam: FULL, spot: [2340, 400, 590, 280] },
+    { img: 'keys', cam: [1100, 520, 1300, 520] }],
+  export: [
+    { img: 'ov', cam: FULL, cur: [[0, 1400, 700], [.8, 2860, 44], [1.0, 2860, 44, 'c']] },
+    { img: 'ov', cur: [[0, 2860, 44], [.5, 2660, 44], [.7, 2660, 44, 'c']], pop: 'expopts' },
+    { img: 'ov', pop: 'expopts', cam: [1800, 0, 1140, 700] },
+    { img: 'ov', pop: 'expgif', cam: [1800, 0, 1140, 700] },
+    { img: 'ov', cam: [1500, 0, 1440, 560], prog: true },
+    { img: 'ov', pop: 'expopts', cam: [1800, 0, 1140, 700], spot: [2400, 520, 600, 70] },
+    { paste: true }],
+};
+// 段落顺序（和 lines.mjs 的 SCENES 同名）
+const KIND = { intro: 'icon', outro: 'icon', main: 'desk', picker: 'desk', opts: 'desk', count: 'desk', recent: 'desk', update: 'desk',
+  studio: 'vid', blur: 'vid', show: 'vid', cam: 'vid', win: 'win', ov: 'ed', zoom: 'ed', cut: 'ed', sound: 'ed', caption: 'ed', style: 'ed', mark: 'ed', export: 'ed' };
+
+let V, SC = [], LINES = [], END;
+async function build() {
+  V = await (await fetch('voice/voice.json')).json();
+  let t = .6, cur = null;
+  for (const l of V) {
+    if (!cur || cur.id !== l.scene) {
+      if (cur) { cur.end = t + 1.1; t = cur.end + .25; }
+      cur = { id: l.scene, start: t, lines: [] }; SC.push(cur); t += .7;
+    }
+    const L = { ...l, start: t, end: t + l.dur, scene: cur, idx: cur.lines.length };
+    cur.lines.push(L); LINES.push(L); t = L.end + .45;
+  }
+  cur.end = t + 1.6; END = cur.end + .2;
+  // 有动作的句子，留足动作时间（鼠标路径最长那一下 + 1 秒看清）
+  let shift = 0;
+  for (const s of SC) {
+    s.start += shift;
+    for (const L of s.lines) {
+      L.start += shift; L.end += shift;
+      const b = ED[s.id]?.[L.idx], need = b?.cur ? Math.max(...b.cur.map(p => p[0])) + 1.1 : 0;
+      const extra = Math.max(0, need - L.dur - .45); shift += extra; L.slot = L.dur + .45 + extra;
+    }
+    s.end += shift;
+  }
+  END += shift;
+  window.PROMO = { END, frame, lines: LINES.map(l => ({ key: l.key, text: l.text, start: l.start, end: l.end })),
+    clicks: () => CLICKS, swaps: () => SWAPS };
+  collectEvents();
+  window.READY = true;
+}
+
+// ———— 画一帧 ————
+const loaded = new Map();
+function setImg(el, src) { if (el.getAttribute('src') !== src) el.src = src; }
+const waits = [];
+const need = el => { if (el.complete && el.naturalWidth) return; waits.push(el.decode().catch(() => {})); };
+const pad = n => String(n).padStart(4, '0');
+
+function sceneAt(t) { for (const s of SC) if (t < s.end + .25) return s; return SC[SC.length - 1]; }
+function lineIn(s, t) { let L = null; for (const l of s.lines) if (t >= l.start - .05) L = l; return L; }
+
+let CLICKS = [], SWAPS = [];
+function collectEvents() {
+  for (const s of SC) { const bs = ED[s.id]; if (!bs) continue;
+    s.lines.forEach((L, i) => { const b = bs[i]; if (!b) return;
+      for (const p of b.cur || []) if (p[3] === 'c') CLICKS.push(L.start + p[0]);
+      if (b.swap) SWAPS.push(L.start + b.swap[0]); if (b.swap2) SWAPS.push(L.start + b.swap2[0]); }); }
+  for (const s of SC) extraEvents(s);
+}
+// 非剪辑窗口段落的点击（主窗口、选区域等），和画面里的动作同一张表
+const DESK_CLICKS = { main: [[1, 1.3]], opts: [[0, 1.0], [2, 1.0], [3, 1.0], [4, 1.0], [5, 1.0], [6, 1.0]], recent: [[2, .9]] };
+function extraEvents(s) { for (const [i, dt] of DESK_CLICKS[s.id] || []) if (s.lines[i]) CLICKS.push(s.lines[i].start + dt); }
+
+function camRect(r) { // 把截图里的框 r 放进画面（留边），返回 scale 和平移
+  const W = 1860, H = 1000, s = Math.min(W / r[2], H / r[3]);
+  return { s, x: 960 - (r[0] + r[2] / 2) * s, y: 520 - (r[1] + r[3] / 2) * s };
+}
+function curPos(path, rt) { // 鼠标在相对时间 rt 的位置
+  if (!path?.length) return null;
+  if (rt <= path[0][0]) return { x: path[0][1], y: path[0][2] };
+  for (let i = 1; i < path.length; i++) if (rt <= path[i][0]) {
+    const a = path[i - 1], b = path[i], k = ease((rt - a[0]) / Math.max(.01, b[0] - a[0]));
+    return { x: lerp(a[1], b[1], k), y: lerp(a[2], b[2], k), down: a[3] === 'd' };
+  }
+  const z = path[path.length - 1]; return { x: z[1], y: z[2] };
+}
+
+async function frame(t) {
+  waits.length = 0;
+  const s = sceneAt(t), kind = KIND[s.id], L = lineIn(s, t);
+  for (const id of ['L_icon', 'L_desk', 'ed', 'vid', 'L_win', 'L_paste']) show($(id), false);
+  $('cur').style.display = 'none'; $('keys').style.opacity = 0;
+  // 段落之间：淡入淡出 0.35 秒（同一种画面连续时不淡）
+  const fadeIn = clamp((t - s.start + .25) / .35), fadeOut = clamp((s.end + .25 - t) / .35);
+  const prev = SC[SC.indexOf(s) - 1], next = SC[SC.indexOf(s) + 1];
+  let op = 1;
+  if (!(prev && KIND[prev.id] === kind && kind !== 'vid')) op = Math.min(op, fadeIn);
+  if (!(next && KIND[next.id] === kind && kind !== 'vid')) op = Math.min(op, fadeOut);
+  const rt = L ? t - L.start : 0;
+  if (kind === 'icon') drawIcon(s, t, op);
+  else if (kind === 'desk') drawDesk(s, L, rt, t, op);
+  else if (kind === 'ed') drawEd(s, L, rt, t, op);
+  else if (kind === 'vid') drawVid(s, L, rt, t, op);
+  else if (kind === 'win') drawWin(s, L, rt, t, op);
+  // 字幕
+  const sub = $('sub'), SL = LINES.find(l => t >= l.start - .08 && t < l.end + .25);
+  if (SL) { sub.textContent = SL.text; sub.style.opacity = Math.min(clamp((t - SL.start + .08) / .12), clamp((SL.end + .25 - t) / .12)); }
+  else sub.style.opacity = 0;
+  await Promise.all(waits);
+}
+
+function drawIcon(s, t, op) {
+  const el = $('L_icon'); show(el, true); el.style.opacity = op;
+  const k = easeOut((t - s.start + .2) / .9);
+  $('icon').style.transform = `scale(${lerp(.82, 1, k)})`; $('icon').style.opacity = k;
+  $('iconName').style.opacity = clamp((t - s.start - .3) / .6);
+}
+
+function cursorAt(x, y, down) { const c = $('cur'); c.style.display = 'block'; c.style.transform = `translate(${x - 4}px,${y - 3}px) scale(${down ? .9 : 1})`; }
+
+// ———— 桌面段落 ————
+function drawDesk(s, L, rt, t, op) {
+  const el = $('L_desk'); show(el, true); el.style.opacity = op;
+  const i = L ? L.idx : 0, id = s.id;
+  const scr = $('deskScreen'), win = $('mainWin'), pick = $('pick'), cnt = $('count'), cam = $('mainCam');
+  show(scr, id === 'picker' || id === 'count'); show(pick, id === 'picker'); cnt.style.opacity = 0;
+  win.style.display = (id === 'main' || id === 'opts' || id === 'recent' || id === 'update') ? 'block' : 'none';
+  $('camBub').style.opacity = 0; $('dock').style.bottom = '-140px'; $('folder').style.opacity = 0; $('updBar').style.display = 'none';
+  for (const r of document.querySelectorAll('.row')) r.classList.toggle('sel', false);
+  ['chkMic', 'chkCam', 'chkHide', 'chkDnd'].forEach(c => $(c).style.opacity = 0); $('cd3').style.display = 'none';
+  let camS = 1, camX = 0, camY = 0;                       // 主窗口镜头
+  const wx = 600, wy = 70;                                // 主窗口左上角
+  const P = (x, y) => [wx + x, wy + 56 + y];              // 主窗口里截图坐标（720×760 逻辑）→ 画面
+  if (id === 'main') {
+    const sel = i === 0 ? 0 : (i === 1 ? (rt > 1.3 ? 1 : 0) : 1);
+    document.querySelectorAll('.row')[sel].classList.add('sel');
+    if (i === 1) { const a = P(300, 100), b = P(300, 170), k = ease((rt - .3) / .9); cursorAt(lerp(a[0], b[0], k), lerp(a[1], b[1], k)); }
+    if (i === 2) { const a = P(300, 170), b = P(625, 35), k = ease(rt / .9); cursorAt(lerp(a[0], b[0], k), lerp(a[1], b[1], k)); }
+    if (i === 1 && rt > 1.3) document.querySelectorAll('.row')[1].classList.add('sel');
+  }
+  if (id === 'opts') {
+    document.querySelectorAll('.row')[1].classList.add('sel');
+    // 镜头推到下面的勾选区
+    const k = ease((t - s.start) / 1.0); camS = lerp(1, 1.55, k); camX = lerp(0, -560, k); camY = lerp(0, -560, k);
+    const tgt = [[96, 500], [96, 500], [451, 500], [135, 540], [239, 540], [386, 540], [100, 610]][i];
+    const from = i > 0 ? [[96, 500], [96, 500], [451, 500], [135, 540], [239, 540], [386, 540], [100, 610]][i - 1] : [300, 300];
+    const k2 = ease(rt / .9), cx = lerp(from[0], tgt[0], k2), cy = lerp(from[1], tgt[1], k2);
+    const on = (ln, dt = 1.0) => i > ln || (i === ln && rt > dt);
+    if (on(0)) $('chkMic').style.opacity = 1; if (on(2)) { $('chkCam').style.opacity = 1; $('camBub').style.opacity = clamp((rt - 1) / .4 + (i > 2 ? 1 : 0)); }
+    if (on(3)) $('cd3').style.display = 'block'; if (on(4)) $('chkHide').style.opacity = 1; if (on(5)) $('chkDnd').style.opacity = 1;
+    const sx = (wx + cx) * camS + camX, sy = (wy + 56 + cy) * camS + camY; cursorAt(sx, sy);
+    if (i === 6 && rt > 1.1) { const k3 = easeOut((rt - 1.1) / .4); $('keys').innerHTML = '<span class="kc">⌥</span><span class="kc">⌘</span><span class="kc">R</span>'; $('keys').style.opacity = k3; }
+  }
+  if (id === 'picker') {
+    const k = ease(rt / 1.6), x0 = 520, y0 = 230, w = lerp(60, 880, k), h = lerp(40, 560, k);
+    Object.assign($('pkBox').style, { left: x0 + 'px', top: y0 + 'px', width: w + 'px', height: h + 'px' });
+    $('pkSize').textContent = `${Math.round(w * 1.5)} × ${Math.round(h * 1.5)}`;
+    cursorAt(x0 + w, y0 + h, k < 1);
+  }
+  if (id === 'count') {
+    const n = i === 0 ? 3 - Math.floor(clamp(rt / .9, 0, 2.99)) : 0;
+    if (i === 0 && rt < 2.7) { cnt.textContent = n; const f = (rt / .9) % 1; cnt.style.opacity = Math.min(clamp(f / .15), clamp((1 - f) / .2)); cnt.style.transform = `scale(${lerp(.9, 1, easeOut(f / .3))})`; }
+    if (i === 1) { $('keys').innerHTML = '<span class="kc">⌥</span><span class="kc">⌘</span><span class="kc">R</span>'; $('keys').style.opacity = clamp((rt - .4) / .3) * clamp((2.4 - rt) / .3); }
+    // 录制中：右上角小红点（示意）
+  }
+  if (id === 'recent') {
+    document.querySelectorAll('.row')[1].classList.add('sel');
+    if (i <= 2) { const k = ease((t - s.start) / 1.0); camS = lerp(1, 1.5, k); camX = lerp(0, -500, k); camY = lerp(0, -860, k);
+      const a = [400, 760], b = [560, 715], k2 = ease((rt - .2) / .7), c = i === 2 ? [lerp(a[0], b[0], k2), lerp(a[1], b[1], k2)] : (i === 1 ? a : [600, 500]);
+      cursorAt((wx + c[0]) * camS + camX, (wy + 56 + c[1]) * camS + camY); }
+    else { // 拖到程序坞
+      const k = ease((t - s.lines[3].start) / .8); $('dock').style.bottom = lerp(-140, 24, k) + 'px';
+      const f = $('folder'), k2 = ease((t - s.lines[3].start - .9) / 1.4), fx = lerp(320, 905, k2), fy = lerp(420, 900, k2);
+      f.style.opacity = clamp((t - s.lines[3].start - .6) / .3) * (i === 4 && rt > 1.0 ? clamp(1 - (rt - 1) / .3) : 1);
+      f.style.left = fx + 'px'; f.style.top = fy + 'px'; cursorAt(fx + 70, fy + 60, k2 > 0 && k2 < 1);
+      if (i === 4) $('dockIcon').style.transform = `translateY(${-24 * Math.sin(Math.PI * clamp(rt / .6))}px)`;
+    }
+  }
+  if (id === 'update') {
+    $('updBar').style.display = 'block'; $('updBar').style.opacity = clamp((t - s.start - .3) / .4);
+    const k = ease((t - s.start) / 1.0); camS = lerp(1, 1.5, k); camX = lerp(0, -500, k); camY = lerp(0, -560, k);
+  }
+  cam.style.transform = `translate(${camX}px,${camY}px) scale(${camS})`;
+}
+
+// ———— 剪辑窗口段落 ————
+let lastCam = null;
+function drawEd(s, L, rt, t, op) {
+  const el = $('ed'), bs = ED[s.id]; show(el, true); el.style.opacity = op;
+  const i = L ? L.idx : 0;
+  // 这一句之前最近一次指定的图 / 镜头（含跨段落：同为剪辑窗口时接着上一段）
+  const hist = [];
+  for (const sc of SC) { if (KIND[sc.id] !== 'ed') continue; const b2 = ED[sc.id];
+    sc.lines.forEach((l, j) => { const b = b2[j]; if (b && (sc.start < s.start || (sc === s && j <= i))) hist.push({ l, b }); }); }
+  let img = 'ov', cam = FULL, camFrom = FULL, camAt = 0;
+  for (const { l, b } of hist) {
+    if (b.img) img = b.img;
+    const swT = b.swap && t >= l.start + b.swap[0], sw2 = b.swap2 && t >= l.start + b.swap2[0];
+    if (b.swap && (l !== L || swT)) img = b.swap[1];
+    if (b.swap2 && (l !== L || sw2)) img = b.swap2[1];
+    if (b.cam) { camFrom = cam; cam = b.cam; camAt = l.start; }
+  }
+  // 换图：0.25 秒交叉淡（同一个窗口、同样的布局，只有变了的地方在变）
+  const A = $('stA'), B = $('stB');
+  let prevImg = img, swapT = -9;
+  for (const { l, b } of hist) for (const sw of [b.swap, b.swap2]) if (sw && t >= l.start + sw[0]) { swapT = l.start + sw[0]; }
+  // 找换图前的那张
+  if (t - swapT < .25) { let pi = 'ov'; for (const { l, b } of hist) { if (b.img && l.start <= swapT - .01) pi = b.img; for (const sw of [b.swap, b.swap2]) if (sw && l.start + sw[0] < swapT - .01) pi = sw[1]; } prevImg = pi; }
+  setImg(A, `st/${prevImg}.png`); setImg(B, `st/${img}.png`); need(A); need(B);
+  B.style.opacity = prevImg === img ? 1 : clamp((t - swapT) / .25);
+  // 镜头：换框时 1 秒缓动过去，到位静止
+  const kc = ease((t - camAt) / 1.0), c0 = camRect(camFrom), c1 = camRect(cam);
+  const sc = lerp(c0.s, c1.s, kc), cx = lerp(c0.x, c1.x, kc), cy = lerp(c0.y, c1.y, kc);
+  $('edCam').style.transform = `translate(${cx}px,${cy}px) scale(${sc})`;
+  const b = bs[i] || {};
+  // 高亮框
+  const sp = $('spot');
+  if (b.spot) { Object.assign(sp.style, { left: b.spot[0] + 'px', top: b.spot[1] + 'px', width: b.spot[2] + 'px', height: b.spot[3] + 'px' });
+    sp.style.opacity = Math.min(clamp((rt - .25) / .35), L ? clamp((L.slot - rt - .1) / .3) : 1); sp.style.outlineWidth = 5 / sc * .62 + 'px'; }
+  else sp.style.opacity = 0;
+  // 鼠标
+  const path = b.cur;
+  let lastP = null; // 上一句最后的位置，开场接着
+  if (path) { const p = curPos(path, rt); cursorAt(cx + p.x * sc, cy + p.y * sc, p.down);
+    const rip = $('rip'); rip.style.opacity = 0;
+    for (const q of path) if (q[3] === 'c' && rt >= q[0] && rt < q[0] + .45) { const k = (rt - q[0]) / .45;
+      Object.assign(rip.style, { left: q[1] + 'px', top: q[2] + 'px', opacity: 1 - k, transform: `scale(${lerp(.4, 1.4, k)})` }); }
+  } else $('rip').style.opacity = 0;
+  // 导出设置弹出框、进度
+  const pop = $('exPop');
+  if (b.pop) { setImg(pop, `st/${b.pop}.png`); need(pop); pop.style.opacity = clamp((rt - (b.cur ? .8 : 0)) / .25); } else pop.style.opacity = 0;
+  const pg = $('exProg');
+  if (b.prog) { pg.style.display = 'flex'; const k = clamp(rt / (L.slot - .6)); $('exBar').style.width = (k * 100) + '%'; $('exPct').textContent = Math.round(k * 100) + '%'; } else pg.style.display = 'none';
+  // 最后一句：聊天里粘贴（示意）
+  if (b.paste) { show(el, false); const P = $('L_paste'); show(P, true); P.style.opacity = op;
+    const pv = $('pv'), k = easeOut((rt - .8) / .5); pv.style.opacity = k; pv.style.transform = `translateY(${lerp(30, 0, k)}px)`;
+    if (rt > .3 && rt < .8 + 1.2) { $('keys').innerHTML = '<span class="kc">⌘</span><span class="kc">V</span>'; $('keys').style.opacity = clamp((rt - .3) / .25) * clamp((1.8 - rt) / .3); } }
+}
+
+// ———— 视频卡片段落 ————
+function frameOf(dir, prefix, i, n) { return `${dir}/${prefix}${pad(Math.max(1, Math.min(n, i)))}.jpg`; }
+function place(el, x, y, w, h, r = 22) { Object.assign(el.style, { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px', borderRadius: r + 'px', display: 'block' }); }
+function drawVid(s, L, rt, t, op) {
+  const el = $('vid'); show(el, true); el.style.opacity = op;
+  const st = t - s.start, A = $('vA'), B = $('vB'), Ai = $('vAi'), Bi = $('vBi'), cp = $('camP');
+  A.style.display = B.style.display = 'none'; cp.style.opacity = 0; A.style.opacity = B.style.opacity = 1;
+  if (s.id === 'studio') {
+    // 左：原样录下的（不推近、原始鼠标）；右：Studio 成片。同一时刻同步播放（30 帧/秒）
+    const fi = Math.floor(st * 30) + 60;
+    place(A, 70, 230, 860, 538, 18); place(B, 990, 225, 860, 484 + 64, 18);
+    Ai.style.objectFit = 'cover'; setImg(Ai, frameOf('card', 'c', fi, 870)); setImg(Bi, frameOf('tut', 't', fi, 870)); need(Ai); need(Bi);
+    const k = easeOut(st / .7); A.style.transform = B.style.transform = `translateY(${lerp(40, 0, k)}px)`;
+    const i = L ? L.idx : 0; A.style.opacity = i === 2 ? .45 : 1; B.style.opacity = i === 1 ? .45 : 1;
+  }
+  if (s.id === 'blur') {
+    // 运动模糊：先「关」（原样）再「强」，同一段快速推近，慢放
+    const i = L ? L.idx : 0, dir = i === 0 ? 'pO' : 'pS', n = 108, rt2 = clamp(rt / Math.max(1, L.slot - .3)), fi = Math.floor(rt2 * (n - 1)) + 1;
+    place(A, 160, 70, 1600, 900, 22); Ai.style.objectFit = 'cover'; setImg(Ai, `${dir}/b${pad(fi)}.jpg`); need(Ai);
+  }
+  if (s.id === 'show') {
+    const fi = Math.floor(st * 30) + 1;
+    const k = easeOut(st / .8);
+    place(A, 80, 170, 1140, 641, 20); place(B, 1320, 80, 520, 925, 20);
+    Ai.style.objectFit = 'cover'; Bi.style.objectFit = 'cover';
+    setImg(Ai, frameOf('tut', 't', fi + 120, 870)); setImg(Bi, frameOf('dy', 'd', fi, 240)); need(Ai); need(Bi);
+    A.style.transform = `translateX(${lerp(-60, 0, k)}px)`; B.style.opacity = clamp((t - (s.lines[1]?.start ?? 0) + .3) / .4); B.style.transform = `translateY(${lerp(40, 0, easeOut((t - (s.lines[1]?.start ?? 0) + .3) / .5))}px)`;
+  }
+  if (s.id === 'cam') {
+    // 摄像头布局：小窗 → 分屏 → 全屏（人像是示意）
+    const fi = Math.floor(st * 30) + 300; Ai.style.objectFit = 'cover'; setImg(Ai, frameOf('tut', 't', fi, 870)); need(Ai);
+    const l1 = s.lines[1]?.start ?? 99, kA = ease((t - l1 - .3) / .5), kB = ease((t - l1 - 2.0) / .5);
+    const fullR = [160, 90, 1600, 900], split = [160, 90, 1080, 900];
+    place(A, lerp(fullR[0], split[0], kA), 90, lerp(fullR[2], split[2], kA), 900, 22);
+    A.style.opacity = 1 - kB;
+    const bub = [1520, 760, 200, 200, 100], sp = [1270, 90, 490, 900, 22], fu = [160, 90, 1600, 900, 22];
+    const r = kB > 0 ? sp.map((v, j) => lerp(v, fu[j], kB)) : bub.map((v, j) => lerp(v, sp[j], kA));
+    Object.assign(cp.style, { left: r[0] + 'px', top: r[1] + 'px', width: r[2] + 'px', height: r[3] + 'px', borderRadius: (kA < .5 ? '50%' : r[4] + 'px'), opacity: clamp(st / .4) });
+  }
+}
+
+// ———— Windows 段落（示意）————
+function drawWin(s, L, rt, t, op) {
+  const el = $('L_win'); show(el, true); el.style.opacity = op;
+  const i = L ? L.idx : 0, sel = $('wSel'), th = $('wThumb'), ci = $('chatImg');
+  show(sel, false); th.style.opacity = 0; ci.style.opacity = 0; $('wFlash').style.opacity = 0;
+  if (i === 1) {
+    $('keys').innerHTML = '<span class="kc">Ctrl</span><span class="kc">Alt</span><span class="kc">X</span>'; $('keys').style.opacity = clamp(rt / .3) * clamp((1.6 - rt) / .3);
+    if (rt > 1.6) { show(sel, true); const k = ease((rt - 1.7) / 1.2), w = lerp(40, 640, k), h = lerp(30, 316, k);
+      Object.assign(sel.style, { left: '260px', top: '220px', width: w + 'px', height: h + 'px' }); cursorAt(260 + w, 220 + h, k < 1);
+      if (rt > 3.0) $('wFlash').style.opacity = clamp(1 - (rt - 3.0) / .3) * .7; }
+  }
+  if (i >= 2) {
+    const k = easeOut((t - s.lines[2].start) / .5); let x = lerp(1900, 1580, k), y = 860;
+    if (i === 3) { const k2 = ease((rt - .4) / 1.3); x = lerp(1580, 1440, k2); y = lerp(860, 300, k2); cursorAt(x + 150, y + 74, k2 > 0 && k2 < 1);
+      th.style.opacity = rt > 1.7 ? clamp(1 - (rt - 1.7) / .2) : 1; ci.style.opacity = clamp((rt - 1.7) / .25); }
+    else { th.style.opacity = 1; cursorAt(900, 600); }
+    th.style.left = x + 'px'; th.style.top = y + 'px';
+    if (i === 2) th.style.opacity = k;
+  }
+}
+build();
+</script></body></html>

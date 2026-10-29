@@ -147,6 +147,81 @@ namespace ScreenRecorder
             return r.Done("PROJTEST");
         }
 
+        // ---- CUTTEST：剪掉 / 快放的时间换算、切块、轨迹和推近段换到成片时间、Mac 的字段原样留着；导出设置的换算 ----
+        public static string Cuts()
+        {
+            var r = new Report();
+            var p = new StudioProject { TrimStart = 0, TrimEnd = 34.933 };
+            p.Cuts.Add(new CutSegment { Start = 5, End = 8 });
+            p.Cuts.Add(new CutSegment { Start = 10, End = 14, Speed = true, Rate = 4 });
+            var m = new TimeMap(p);
+            r.Check("out before cuts", Math.Abs(m.Out(4) - 4) < 1e-9);
+            r.Check("out inside cut = cut start", Math.Abs(m.Out(6.5) - 5) < 1e-9, F(m.Out(6.5)));
+            r.Check("out after cut", Math.Abs(m.Out(9) - 6) < 1e-9, F(m.Out(9)));
+            r.Check("out in speed piece", Math.Abs(m.Out(12) - 7.5) < 1e-9, F(m.Out(12)));
+            r.Check("out after speed piece", Math.Abs(m.Out(15) - 9) < 1e-9, F(m.Out(15)));
+            r.Check("total length 28.933", Math.Abs(m.Out(p.TrimEnd) - 28.933) < 1e-6, F(m.Out(p.TrimEnd)));
+            bool inv = true; foreach (var ot in new[] { 0.0, 4.9, 5.1, 6.5, 7.25, 8.5, 20.0 }) inv &= Math.Abs(m.Out(m.Src(ot)) - ot) < 1e-9;
+            r.Check("src is the inverse of out", inv);
+            r.Check("src 5.5 -> 8.5 (after the cut)", Math.Abs(m.Src(5.5) - 8.5) < 1e-9, F(m.Src(5.5)));
+            r.Check("src 7.5 -> 12 (speed x4)", Math.Abs(m.Src(7.5) - 12) < 1e-9, F(m.Src(7.5)));
+            var sp = m.Spans(0, p.TrimEnd);
+            r.Check("spans: keep / keep / speed / keep", sp.Count == 4 && sp[0].start == 0 && sp[0].end == 5 && sp[1].start == 8 && sp[1].end == 10 && sp[1].rate == 1 && sp[2].start == 10 && sp[2].rate == 4 && sp[3].start == 14 && Math.Abs(sp[3].end - 34.933) < 1e-9,
+                string.Join(" ", sp.Select(x => $"{F(x.start)}-{F(x.end)}x{F(x.rate)}")));
+            var sp2 = m.Spans(6.5, 12);
+            r.Check("spans from inside a cut", sp2.Count == 2 && Math.Abs(sp2[0].start - 8) < 1e-9 && sp2[1].rate == 4 && Math.Abs(sp2[1].end - 12) < 1e-9, string.Join(" ", sp2.Select(x => $"{F(x.start)}-{F(x.end)}x{F(x.rate)}")));
+            // 修剪起点之前的剪辑不算、剪辑超出修剪范围的部分不算
+            var q = new StudioProject { TrimStart = 2, TrimEnd = 10 }; q.Cuts.Add(new CutSegment { Start = 1, End = 3 }); q.Cuts.Add(new CutSegment { Start = 9, End = 12 });
+            var mq = new TimeMap(q);
+            r.Check("cut clipped to trim", mq.Pieces.Count == 2 && Math.Abs(mq.Pieces[0].Start - 2) < 1e-9 && Math.Abs(mq.Pieces[1].End - 10) < 1e-9 && Math.Abs(mq.Out(2) - 2) < 1e-9);
+            // 轨迹：剪掉段里的点击、按键去掉，其余换时间
+            var tr = new Track { Width = 100, Height = 100 };
+            tr.Clicks.Add(new[] { 4.0, 1, 1 }); tr.Clicks.Add(new[] { 6.0, 1, 1 }); tr.Clicks.Add(new[] { 12.0, 1, 1 }); tr.Clicks.Add(new[] { 20.0, 1, 1 });
+            tr.Keys.AddRange(new[] { 7.0, 9.0 });
+            var w = m.Warp(tr);
+            r.Check("warped clicks", w.Clicks.Count == 3 && Math.Abs(w.Clicks[1][0] - 7.5) < 1e-9 && Math.Abs(w.Clicks[2][0] - 14) < 1e-9, string.Join(",", w.Clicks.Select(c => F(c[0]))));
+            r.Check("warped keys", w.Keys.Count == 1 && Math.Abs(w.Keys[0] - 6) < 1e-9);
+            r.Check("original track untouched", tr.Clicks.Count == 4 && tr.Clicks[2][0] == 12);
+            p.Segments.Add(new ZoomSegment { Start = 1, End = 4 }); p.Segments.Add(new ZoomSegment { Start = 5.5, End = 7.5 }); p.Segments.Add(new ZoomSegment { Start = 15, End = 18 });
+            var wp = m.Warp(p);
+            r.Check("warped segments (one fully cut away)", wp.Segments.Count == 2 && Math.Abs(wp.Segments[1].Start - 9) < 1e-9 && Math.Abs(wp.TrimEnd - 28.933) < 1e-6 && wp.Cuts.Count == 0, SegList(wp.Segments));
+            // Mac 写的工程：cuts / audio 读得懂，Windows 不认识的字段（讲解、字幕、样式里的新键、推近段的 speed）存回去还在
+            var mac = "{\"segments\":[{\"id\":\"A\",\"start\":1,\"end\":3,\"zoom\":2,\"mode\":\"follow\",\"fixedX\":0.5,\"fixedY\":0.5,\"speed\":\"fast\"}],\"trimStart\":0,\"trimEnd\":10,\"segmentsEdited\":true," +
+                      "\"look\":{\"aspect\":\"16:9\",\"background\":\"transparent\",\"keysShow\":true,\"zoomSpeed\":\"slow\"}," +
+                      "\"cuts\":[{\"id\":\"C1\",\"start\":2,\"end\":4,\"mode\":\"speed\",\"rate\":8}],\"audio\":{\"system\":1.5,\"mic\":0.5,\"clicks\":0.8,\"muted\":false,\"voice\":0.7,\"duck\":true,\"denoise\":\"medium\"}," +
+                      "\"voiceovers\":[{\"id\":\"V\",\"file\":\"voice/a.m4a\",\"start\":1,\"trimIn\":0,\"trimOut\":2,\"fileLength\":2,\"volume\":1}],\"captions\":[{\"start\":1,\"end\":2,\"text\":\"你好\"}],\"music\":{\"clips\":[]}}";
+            var mp = StudioProject.FromJson(mac);
+            r.Check("mac cuts read", mp.Cuts.Count == 1 && mp.Cuts[0].Speed && mp.Cuts[0].Rate == 8 && mp.Cuts[0].Id == "C1");
+            r.Check("mac audio read", Math.Abs(mp.Audio.System - 1.5) < 1e-9 && Math.Abs(mp.Audio.Mic - 0.5) < 1e-9 && Math.Abs(mp.Audio.Clicks - 0.8) < 1e-9);
+            var back = (Dictionary<string, object>)Json.Parse(mp.ToJson());
+            r.Check("mac-only fields kept", back.ContainsKey("voiceovers") && back.ContainsKey("captions") && back.ContainsKey("music") && ((List<object>)back["voiceovers"]).Count == 1);
+            r.Check("caption text kept", ((string)((Dictionary<string, object>)((List<object>)back["captions"])[0])["text"]) == "你好");
+            var bl = (Dictionary<string, object>)back["look"]; var ba = (Dictionary<string, object>)back["audio"];
+            r.Check("unknown look keys kept", bl.ContainsKey("keysShow") && (string)bl["zoomSpeed"] == "slow");
+            r.Check("mac transparent stays transparent", (string)bl["background"] == "transparent");
+            r.Check("unknown audio keys kept", (string)ba["denoise"] == "medium" && (bool)ba["duck"] && Math.Abs((double)ba["voice"] - 0.7) < 1e-9);
+            r.Check("segment speed kept", (string)((Dictionary<string, object>)((List<object>)back["segments"])[0])["speed"] == "fast");
+            var bc = (Dictionary<string, object>)((List<object>)back["cuts"])[0];
+            r.Check("cut has every key Mac needs", new[] { "id", "start", "end", "mode", "rate" }.All(bc.ContainsKey) && (string)bc["mode"] == "speed");
+            r.Check("roundtrip with extras", StudioProject.FromJson(mp.ToJson()).Same(mp));
+            var old = StudioProject.FromJson("{\"segments\":[],\"trimStart\":0,\"trimEnd\":10}");
+            r.Check("old project: no cuts, default audio", old.Cuts.Count == 0 && old.Audio.System == 1 && !old.Audio.Muted);
+            // 导出设置
+            var o = new ExportOptions();
+            r.Check("default 1440p 60fps high", o.Resolution == "1440" && o.Fps == 60 && o.Quality == "high");
+            r.Check("1440p scale on a 3420x2224 canvas", Math.Abs(o.CanvasScale(3420, 2224) - 1440.0 / 2224) < 1e-9);
+            o.Resolution = "4k"; r.Check("4k = long side 3840, no upscaling", o.CanvasScale(3420, 2224) == 1 && Math.Abs(o.CanvasScale(5000, 3000) - 3840.0 / 5000) < 1e-9);
+            o.Resolution = "720"; o.Fps = 30; o.Quality = "small"; o.Gif = true; o.CopyToClipboard = true;
+            var o2 = ExportOptions.Load(o.Save());
+            r.Check("options save / load", o2.Resolution == "720" && o2.Fps == 30 && o2.Quality == "small" && o2.Gif && o2.CopyToClipboard, o.Save());
+            r.Check("bad saved options -> defaults", ExportOptions.Load("x,y").Resolution == "1440");
+            var trk = new Track { Width = 2940, Height = 1912, PixelsPerPoint = 2 };
+            var lay0 = new StudioLayout(trk, new StudioLook());
+            var lay = new StudioLayout(trk, new StudioLook(), new ExportOptions { Resolution = "720" }.CanvasScale(lay0.cw, lay0.ch));
+            r.Check("scaled layout is even and ~720 high", lay.ch % 2 == 0 && lay.cw % 2 == 0 && Math.Abs(lay.ch - 720) <= 2, $"{lay.cw}x{lay.ch}");
+            return r.Done("CUTTEST");
+        }
+
         // ---- SCRUBTEST：拖动逻辑（不碰界面） ----
         public static string Scrub()
         {

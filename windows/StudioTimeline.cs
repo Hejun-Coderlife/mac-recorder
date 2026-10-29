@@ -15,11 +15,11 @@ namespace ScreenRecorder
         readonly StudioEditor ed;
         public double Scale = 1, Offset;      // 放大倍数（1–8）、内容滚出左边的像素
         public int ViewWidth => Math.Max(1, ClientSize.Width);
-        const int RulerH = 22, SegY = 38, SegH = 46, HandleW = 16, Bar = 4, EdgeW = 9;
+        const int RulerH = 22, CutY = 36, CutH = 22, SegY = 64, SegH = 46, HandleW = 16, Bar = 4, EdgeW = 9;
         readonly ToolTip tip = new ToolTip { InitialDelay = 500 };
         string tipText;
 
-        enum Hit { None, Ruler, TrimStart, TrimEnd, SegStart, SegEnd, SegBody, Empty }
+        enum Hit { None, Ruler, TrimStart, TrimEnd, SegStart, SegEnd, SegBody, CutStart, CutEnd, CutBody, Empty }
         Hit drag = Hit.None;
         string dragSeg;
         int downX;
@@ -75,6 +75,34 @@ namespace ScreenRecorder
             // 点击、打字的时刻
             using (var dot = new SolidBrush(Color.FromArgb(140, Theme.Secondary)))
                 foreach (var t in ed.Events) { float x = X(t); if (x >= -3 && x <= ClientSize.Width + 3) g.FillEllipse(dot, x - 2, RulerH + 7, 4, 4); }
+            // 剪辑轨：剪掉 = 红色斜纹，快放 = 蓝色斜纹 + 倍数
+            using (var lane = new SolidBrush(Color.FromArgb(Theme.Dark ? 30 : 18, Theme.Secondary))) g.FillRectangle(lane, 1, CutY, ClientSize.Width - 2, CutH);
+            foreach (var c in p.Cuts)
+            {
+                float x0 = X(c.Start), x1 = Math.Max(x0 + 6, X(c.End));
+                if (x1 < -2 || x0 > ClientSize.Width + 2) continue;
+                bool sel = c.Id == ed.SelectedCut;
+                var col = c.Speed ? Color.FromArgb(40, 120, 230) : Color.FromArgb(225, 60, 60);
+                var r = new RectangleF(x0, CutY, x1 - x0, CutH);
+                using (var path = Theme.Round(r, 5))
+                {
+                    using (var b = new SolidBrush(Color.FromArgb(sel ? 235 : 170, col))) g.FillPath(b, path);
+                    using (var hb = new HatchBrush(HatchStyle.WideUpwardDiagonal, Color.FromArgb(90, Color.White), Color.Transparent)) g.FillPath(hb, path);
+                    if (sel) using (var pen = new Pen(Color.White, 2)) g.DrawPath(pen, path);
+                }
+                using (var hb = new SolidBrush(Color.FromArgb(225, Color.White)))
+                {
+                    g.FillRectangle(hb, x0 + 3, CutY + CutH / 2 - 5, 2, 10);
+                    g.FillRectangle(hb, x1 - 5, CutY + CutH / 2 - 5, 2, 10);
+                }
+                string label = c.Speed ? "▶▶ " + c.Rate.ToString("0") + "×" : "✂";
+                using (var f = new Font("Segoe UI", 8f, FontStyle.Bold))
+                {
+                    var sz = g.MeasureString(label, f);
+                    if (sz.Width + 14 < r.Width)
+                        using (var w = new SolidBrush(Color.White)) g.DrawString(label, f, w, r.X + (r.Width - sz.Width) / 2, r.Y + (r.Height - sz.Height) / 2);
+                }
+            }
             // 推近段
             foreach (var s in p.Segments)
             {
@@ -142,6 +170,15 @@ namespace ScreenRecorder
             if (pt.X >= ts - 4 && pt.X <= ts + HandleW - 2) return Hit.TrimStart;
             if (pt.X >= te - HandleW + 2 && pt.X <= te + 4) return Hit.TrimEnd;
             if (pt.Y < RulerH) return Hit.Ruler;
+            if (pt.Y >= CutY && pt.Y <= CutY + CutH)
+                foreach (var c in p.Cuts)
+                {
+                    float x0 = X(c.Start), x1 = Math.Max(x0 + 6, X(c.End));
+                    if (pt.X < x0 - 2 || pt.X > x1 + 2) continue;
+                    seg = c.Id;
+                    if (x1 - x0 > EdgeW * 2.5f) { if (pt.X <= x0 + EdgeW) return Hit.CutStart; if (pt.X >= x1 - EdgeW) return Hit.CutEnd; }
+                    return Hit.CutBody;
+                }
             if (pt.Y >= SegY && pt.Y <= SegY + SegH)
                 foreach (var s in p.Segments)
                 {
@@ -165,10 +202,13 @@ namespace ScreenRecorder
             baseTrimS = p.TrimStart; baseTrimE = p.TrimEnd;
             var sg = p.Segments.FirstOrDefault(s => s.Id == dragSeg);
             if (sg != null) { baseStart = sg.Start; baseEnd = sg.End; }
+            var cg = p.Cuts.FirstOrDefault(c => c.Id == dragSeg);
+            if (cg != null && (drag == Hit.CutStart || drag == Hit.CutEnd || drag == Hit.CutBody)) { baseStart = cg.Start; baseEnd = cg.End; }
             switch (drag)
             {
                 case Hit.Ruler: ed.ScrubBegin(); ed.Seek(T(e.X)); break;
-                case Hit.SegStart: case Hit.SegEnd: case Hit.SegBody: ed.Selected = dragSeg; ed.Picking = false; ed.Touch(); break;
+                case Hit.SegStart: case Hit.SegEnd: case Hit.SegBody: ed.Selected = dragSeg; ed.SelectedCut = null; ed.Picking = false; ed.Touch(); break;
+                case Hit.CutStart: case Hit.CutEnd: case Hit.CutBody: ed.SelectedCut = dragSeg; ed.Selected = null; ed.Picking = false; ed.Touch(); break;
                 case Hit.TrimStart: case Hit.TrimEnd: break;   // 单击把手什么都不做（别把播放头叫过来）
             }
             Capture = true;
@@ -180,8 +220,9 @@ namespace ScreenRecorder
             if (drag == Hit.None)
             {
                 var h = HitTest(e.Location, out _);
-                Cursor = h == Hit.TrimStart || h == Hit.TrimEnd || h == Hit.SegStart || h == Hit.SegEnd ? Cursors.SizeWE : h == Hit.SegBody ? Cursors.SizeAll : Cursors.Default;
+                Cursor = h == Hit.TrimStart || h == Hit.TrimEnd || h == Hit.SegStart || h == Hit.SegEnd || h == Hit.CutStart || h == Hit.CutEnd ? Cursors.SizeWE : h == Hit.SegBody || h == Hit.CutBody ? Cursors.SizeAll : Cursors.Default;
                 string t = h == Hit.TrimStart ? L("拖动剪掉开头", "Drag to cut the start") : h == Hit.TrimEnd ? L("拖动剪掉结尾", "Drag to cut the end")
+                    : h == Hit.CutStart || h == Hit.CutEnd || h == Hit.CutBody ? L("拖两头改范围、拖中间挪；选中后可改成快放", "Drag the ends or the middle; select it to switch to speed-up")
                     : L("点选推近段来调整，空白处双击新加，两端黄条修剪；Ctrl + 滚轮缩放时间轴", "Click a zoom to edit it, double-click empty space to add one, drag the yellow bars to trim; Ctrl + scroll zooms the timeline");
                 if (t != tipText) { tipText = t; tip.SetToolTip(this, t); }
                 return;
@@ -213,6 +254,27 @@ namespace ScreenRecorder
                         s.Start = ns; s.End = ns + len;
                     });
                     break;
+                case Hit.CutBody:
+                    ed.DragBegin();
+                    ed.DragUpdate(p =>
+                    {
+                        var c = p.Cuts.FirstOrDefault(x => x.Id == id); if (c == null) return;
+                        var room = ed.CutRoom(id, p); double len = baseEnd - baseStart;
+                        double ns = Math.Min(Math.Max(baseStart + dt, room.lo), room.hi - len);
+                        c.Start = ns; c.End = ns + len;
+                    });
+                    break;
+                case Hit.CutStart: case Hit.CutEnd:
+                    bool cs = drag == Hit.CutStart;
+                    ed.DragBegin();
+                    ed.DragUpdate(p =>
+                    {
+                        var c = p.Cuts.FirstOrDefault(x => x.Id == id); if (c == null) return;
+                        var room = ed.CutRoom(id, p);
+                        if (cs) c.Start = Math.Min(Math.Max(baseStart + dt, room.lo), baseEnd - 0.2);
+                        else c.End = Math.Max(Math.Min(baseEnd + dt, room.hi), baseStart + 0.2);
+                    });
+                    break;
                 case Hit.SegStart: case Hit.SegEnd:
                     bool st = drag == Hit.SegStart;
                     ed.DragBegin();
@@ -236,14 +298,18 @@ namespace ScreenRecorder
             if (ed.IsDragging) { ed.DragEnd(); return; }
             // 双击加了一段：WinForms 在双击之后还会来一次 MouseUp，别把刚加的那段又取消选中
             if (justAdded) { justAdded = false; return; }
-            if (!moved && was == Hit.Empty) { ed.Selected = null; ed.Picking = false; ed.Seek(T(e.X)); }
-            if (!moved && (was == Hit.SegBody || was == Hit.SegStart || was == Hit.SegEnd)) ed.Touch();
+            if (!moved && was == Hit.Empty) { ed.Selected = null; ed.SelectedCut = null; ed.Picking = false; ed.Seek(T(e.X)); }
+            if (!moved && (was == Hit.SegBody || was == Hit.SegStart || was == Hit.SegEnd || was == Hit.CutBody || was == Hit.CutStart || was == Hit.CutEnd)) ed.Touch();
         }
 
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
             base.OnMouseDoubleClick(e);
-            if (HitTest(e.Location, out _) == Hit.Empty) { ed.AddSegment(T(e.X)); justAdded = true; }
+            if (HitTest(e.Location, out _) == Hit.Empty)
+            {
+                if (e.Y >= CutY && e.Y <= CutY + CutH) ed.AddCut(T(e.X)); else ed.AddSegment(T(e.X));   // 剪辑轨上双击 = 加一段剪掉
+                justAdded = true;
+            }
         }
 
         // ---- 滚轮 / 触控板 ----

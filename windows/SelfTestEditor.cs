@@ -41,7 +41,7 @@ namespace ScreenRecorder
             try
             {
                 string dir = Env("STUDIOTESTS_DIR"), mac = Env("MACPROJECT");
-                foreach (var res in new[] { StudioTests.Plan(dir), StudioTests.Project(mac != null && File.Exists(mac) ? File.ReadAllText(mac) : null), StudioTests.Scrub(), StudioTests.Presets(), StudioTests.Looks(Studio.LoadCover) })
+                foreach (var res in new[] { StudioTests.Plan(dir), StudioTests.Project(mac != null && File.Exists(mac) ? File.ReadAllText(mac) : null), StudioTests.Scrub(), StudioTests.Presets(), StudioTests.Looks(Studio.LoadCover), StudioTests.Cuts() })
                 { sb.Append(res); ok &= res.TrimEnd().EndsWith(" OK"); }
                 if (dir != null) { var b = StudioTests.Blur(dir); sb.Append(b); ok &= b.TrimEnd().EndsWith(" OK"); }
             }
@@ -65,6 +65,15 @@ namespace ScreenRecorder
                 if (Env("EDITOR_SELECT") == "1" && ed.Project.Segments.Count > 0) { ed.Selected = ed.Project.Segments[0].Id; ed.Touch(); }
                 if (double.TryParse(Env("EDITOR_TLZOOM"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var z)) ed.SetTimelineScale(z, ed.Timeline.ViewWidth * 0.6);
                 if (Env("EDITOR_LOOK") is string lj) { var nl = StudioLook.FromJson(lj); ed.Edit(p => p.Look = nl); Pump(2); }
+                // EDITOR_DEMOCUTS=1：放一段剪掉、一段 4× 快放，选中快放那段；声音分组滚到顶上
+                if (Env("EDITOR_DEMOCUTS") == "1")
+                {
+                    double d = ed.Duration;
+                    ed.Edit(p => { p.Cuts.Add(new CutSegment { Start = d * 0.2, End = d * 0.3 }); p.Cuts.Add(new CutSegment { Start = d * 0.5, End = d * 0.65, Speed = true, Rate = 4 }); p.Audio.System = 1.4; p.Look.ClickSound = true; });
+                    ed.SelectedCut = ed.Project.Cuts[1].Id; ed.Selected = null; ed.Touch();
+                    ed.ScrollStyleTo(App.L("声音", "Sound"));
+                    Pump(2);
+                }
                 Pump(1.5);
                 using (var bmp = new Bitmap(ed.Width, ed.Height))
                 {
@@ -134,13 +143,49 @@ namespace ScreenRecorder
                 if (sg != null)
                 {
                     double end0 = sg.End; float ex = Math.Max(tl.X(sg.Start) + 6, tl.X(sg.End)) - 4;
-                    In.Move(Screen(ex, 60)); Pump(0.15); In.Down();
-                    for (int i = 1; i <= 10; i++) { In.Move(Screen(ex + 4 * i, 60)); Pump(0.03); }
+                    In.Move(Screen(ex, 86)); Pump(0.15); In.Down();
+                    for (int i = 1; i <= 10; i++) { In.Move(Screen(ex + 4 * i, 86)); Pump(0.03); }
                     In.Up(); Pump(0.3);
                     var sg2 = ed.Project.Segments.First(s => s.Id == sg.Id);
                     Check("drag zoom edge", sg2.End > end0 + 0.05, $"{end0:0.00} -> {sg2.End:0.00}");
                     Check("project marked edited", ed.Project.SegmentsEdited);
                 }
+
+                // 3b) 剪辑轨上双击：加一段剪掉（选中）；拖它的右边把手；Ctrl+Z 撤销拖动；改成 4× 快放
+                int cuts0 = ed.Project.Cuts.Count;
+                float cx0 = tl.X(ed.Project.TrimStart + (ed.Project.TrimEnd - ed.Project.TrimStart) * 0.3);
+                In.Move(Screen(cx0, 47)); Pump(0.15); In.Click(); Pump(0.05); In.Click(); Pump(0.5);
+                Check("double-click on the cut lane adds a cut", ed.Project.Cuts.Count == cuts0 + 1 && ed.SelectedCut != null, $"{cuts0} -> {ed.Project.Cuts.Count}");
+                var cg = ed.Project.Cuts.FirstOrDefault(c => c.Id == ed.SelectedCut);
+                if (cg != null)
+                {
+                    double ce0 = cg.End; float cex = Math.Max(tl.X(cg.Start) + 6, tl.X(cg.End)) - 4;
+                    In.Move(Screen(cex, 47)); Pump(0.15); In.Down();
+                    for (int i = 1; i <= 10; i++) { In.Move(Screen(cex + 4 * i, 47)); Pump(0.03); }
+                    In.Up(); Pump(0.3);
+                    var cg2 = ed.Project.Cuts.First(c => c.Id == cg.Id);
+                    Check("drag cut edge", cg2.End > ce0 + 0.05, $"{ce0:0.00} -> {cg2.End:0.00}");
+                    In.Combo(0x11, 0x5A); Pump(0.3);
+                    Check("Ctrl+Z undoes the cut drag", Math.Abs(ed.Project.Cuts.First(c => c.Id == cg.Id).End - ce0) < 1e-6);
+                    ed.SetCut(true, 4); Pump(0.3);
+                    var cg3 = ed.Project.Cuts.First(c => c.Id == cg.Id);
+                    Check("switch to 4x speed-up", cg3.Speed && cg3.Rate == 4);
+                    ed.SetCut(false, 0); Pump(0.3);
+                    // 播放穿过剪掉段：播放头不会停在剪掉段里面
+                    var cut = ed.Project.Cuts.First(c => c.Id == cg.Id);
+                    ed.Seek(Math.Max(ed.Project.TrimStart, cut.Start - 0.6)); Pump(0.5);
+                    var times = new List<double>();
+                    In.Key(0x20);
+                    var until = DateTime.Now.AddSeconds(2.2);
+                    while (DateTime.Now < until) { Application.DoEvents(); System.Threading.Thread.Sleep(15); if (ed.Playing) times.Add(ed.Time); }
+                    In.Key(0x20); Pump(0.3);
+                    bool skipped = times.Count > 5 && times.All(t => t < cut.Start + 0.02 || t >= cut.End - 0.02) && times.Max() > cut.End;
+                    Check("playback skips the cut", skipped, $"cut {cut.Start:0.00}-{cut.End:0.00}, saw {times.FirstOrDefault():0.00}..{(times.Count > 0 ? times.Max() : 0):0.00} ({times.Count} ticks)");
+                }
+                // 3c) 改音量：预览声音在后台重做
+                int ready = ed.AudioReady;
+                ed.Edit(p => p.Audio.System = 0.5);
+                Check("preview audio rebuilt after a volume change", PumpUntil(() => ed.AudioReady > ready, 30), $"ready {ready} -> {ed.AudioReady}");
 
                 // 4) 空格播放 1 秒，播放头往前走；再按停
                 ed.Seek(ed.Project.TrimStart); Pump(0.5);
@@ -172,7 +217,7 @@ namespace ScreenRecorder
                 if (outFile != null)
                 {
                     var info = Studio.Probe(outFile);
-                    double want = ed.Project.TrimEnd - ed.Project.TrimStart;
+                    double want = new TimeMap(ed.Project).Out(ed.Project.TrimEnd) - ed.Project.TrimStart;   // 剪掉的不算
                     Check("export length = trimmed length", Math.Abs(info.Duration - want) < 0.15, $"{info.Duration:0.00} vs {want:0.00}");
                     Check("export is 1:1", Math.Abs(info.Width - info.Height) <= 2, $"{info.Width}x{info.Height}");
                     log.AppendLine("export " + outFile);
@@ -181,11 +226,34 @@ namespace ScreenRecorder
                 ed.Close(); Pump(0.5);
                 var saved = StudioProject.FromJson(File.ReadAllText(StudioProject.PathIn(dir)));
                 Check("project.json saved on close", saved.Look.Background == "gradient" && saved.SegmentsEdited);
+                Check("cuts and audio saved", saved.Cuts.Count >= 1 && Math.Abs(saved.Audio.System - 0.5) < 1e-9, $"cuts {saved.Cuts.Count} system {saved.Audio.System}");
             }
             catch (Exception e) { log.AppendLine("FAIL exception " + e); ok = false; }
             finally { try { ed?.Close(); } catch { } }
             File.WriteAllText(Tmp("editor_test.txt"), (ok ? "OK" : "FAIL") + Environment.NewLine + log);
             return ok ? 0 : 1;
+        }
+
+        // ---- 主窗口截图（最近的 Studio 素材）：MAINSHOT=图片路径 ----
+        public static int MainShot()
+        {
+            try
+            {
+                var f = new MainForm();
+                f.StartPosition = FormStartPosition.Manual; f.Location = new Point(0, 0);
+                f.Show();
+                PumpUntil(() => false, 4);   // 等缩略图在后台做完
+                using (var bmp = new Bitmap(f.Width, f.Height))
+                {
+                    f.DrawToBitmap(bmp, new Rectangle(0, 0, f.Width, f.Height));
+                    bmp.Save(Env("MAINSHOT"), ImageFormat.Png);
+                }
+                int n = f.Recents.Count; bool vis = f.Recents.Visible;
+                File.WriteAllText(Tmp("mainshot.txt"), $"{(n > 0 && vis ? "OK" : "FAIL")} recents={n} visible={vis} list={string.Join(" | ", RecentStrip.List().Select(Path.GetFileName))}");
+                f.Close();
+                return n > 0 ? 0 : 1;
+            }
+            catch (Exception e) { File.WriteAllText(Tmp("mainshot.txt"), "FAIL " + e); return 1; }
         }
 
         // ---- 倒计时 ----

@@ -409,8 +409,29 @@ namespace ScreenRecorder
                 if (!File.Exists(Path.Combine(dir, "track.json")) && Environment.GetEnvironmentVariable("STUDIO_FAKETRACK") == "1") FakeTrack(dir);
                 var log = new System.Text.StringBuilder();
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                Studio.Render(dir, outPath, new StudioStyle(), p => { }, CursorTracker.LoadCursor, m => log.AppendLine(m));
-                File.WriteAllText(result, $"OK {outPath}{Environment.NewLine}render={sw.Elapsed.TotalSeconds:0.0}s{Environment.NewLine}{log}");
+                // 导出设置（自测）：STUDIO_RES=original|4k|1440|1080|720 STUDIO_FPS=60|30 STUDIO_QUALITY=high|standard|small STUDIO_FORMAT=video|gif；
+                // STUDIO_CANCEL=秒 → 这么久后取消，结果写 CANCELLED、检查文件删掉了；STUDIO_CLIP=1 → 导出后放进剪贴板再读回来
+                string E(string k) => Environment.GetEnvironmentVariable(k);
+                ExportOptions opt = null;
+                if (E("STUDIO_RES") != null || E("STUDIO_FPS") != null || E("STUDIO_QUALITY") != null || E("STUDIO_FORMAT") != null)
+                    opt = new ExportOptions { Resolution = E("STUDIO_RES") ?? "1440", Fps = E("STUDIO_FPS") == "30" ? 30 : 60, Quality = E("STUDIO_QUALITY") ?? "high", Gif = E("STUDIO_FORMAT") == "gif" };
+                var cts = new System.Threading.CancellationTokenSource();
+                if (double.TryParse(E("STUDIO_CANCEL"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cs)) cts.CancelAfter(TimeSpan.FromSeconds(cs));
+                try { Studio.Render(dir, outPath, new StudioStyle(), p => { }, CursorTracker.LoadCursor, m => log.AppendLine(m), null, opt, cts.Token); }
+                catch (OperationCanceledException)
+                {
+                    System.Threading.Thread.Sleep(300);
+                    File.WriteAllText(result, $"CANCELLED after {sw.Elapsed.TotalSeconds:0.0}s fileExists={File.Exists(outPath)}{Environment.NewLine}{log}");
+                    return File.Exists(outPath) ? 1 : 0;
+                }
+                string clip = "";
+                if (E("STUDIO_CLIP") == "1")
+                {
+                    System.Windows.Forms.Clipboard.SetFileDropList(new System.Collections.Specialized.StringCollection { outPath });
+                    var back = System.Windows.Forms.Clipboard.GetFileDropList();
+                    clip = $"clipboard={(back.Count == 1 && string.Equals(back[0], outPath, StringComparison.OrdinalIgnoreCase) ? "OK" : "FAIL")}{Environment.NewLine}";
+                }
+                File.WriteAllText(result, $"OK {outPath}{Environment.NewLine}render={sw.Elapsed.TotalSeconds:0.0}s{Environment.NewLine}{clip}{log}");
                 return 0;
             }
             catch (Exception e)
