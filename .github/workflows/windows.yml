@@ -473,7 +473,9 @@ jobs:
           if ($peaks.Count -gt $exp.Count) { throw "extra click sounds (clicks inside the cut should be silent)" }
           # 3) 音量：0.6 振幅的正弦，50% / 100% / 200%（软限幅，不削波）
           $vdir = Join-Path $root "vol"; New-Item -ItemType Directory -Force $vdir | Out-Null
-          ffmpeg -v error -y -f lavfi -i "color=c=gray:s=640x360:r=30:d=4" -f lavfi -i "sine=f=300:d=4:sample_rate=48000" -filter_complex "[1:a]volume=4.8,aformat=channel_layouts=stereo[a]" -map 0:v -map "[a]" -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac -b:a 320k (Join-Path $vdir "raw.mp4")
+          ffmpeg -v error -y -f lavfi -i "color=c=gray:s=640x360:r=30:d=4" -f lavfi -i "aevalsrc=0.6*sin(2*PI*300*t)|0.6*sin(2*PI*300*t):s=48000:d=4" -map 0:v -map 1:a -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac -b:a 320k (Join-Path $vdir "raw.mp4")
+          function PeakLin($f) { $l = (ffmpeg -hide_banner -ss 1 -t 2 -i $f -af astats=measure_overall=Peak_level -vn -f null - 2>&1 | Select-String "Peak level dB" | Select-Object -Last 1).ToString() -replace '.*Peak level dB:\s*(-?[\d.]+).*', '$1'; return [Math]::Pow(10, [double]$l / 20) }
+          $src = PeakLin (Join-Path $vdir "raw.mp4"); Write-Host "source peak $([Math]::Round($src, 3))"
           Set-Content (Join-Path $vdir "track.json") '{"width":640,"height":360,"pixelsPerPoint":1,"moves":[[0,320,180,0,0]],"clicks":[],"keys":[],"cursors":[{"file":"c.png","hotX":0,"hotY":0,"w":16,"h":16,"arrow":true}]}' -Encoding utf8NoBOM
           foreach ($v in "0.5", "1", "2") {
             Set-Content (Join-Path $vdir "project.json") ('{"segments":[],"segmentsEdited":true,"trimStart":0,"trimEnd":4,"audio":{"system":' + $v + ',"mic":1,"clicks":1,"muted":false}}') -Encoding utf8NoBOM
@@ -481,11 +483,9 @@ jobs:
             $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
             Remove-Item env:STUDIO; Remove-Item env:STUDIO_OUT; Remove-Item env:STUDIO_RES
             if ($p.ExitCode -ne 0) { throw "volume $v render failed: $(Get-Content "$env:TEMP\recorder_test.txt" -Raw)" }
-            $pk = ((ffmpeg -hide_banner -ss 1 -t 2 -i (Join-Path $root "vol-$v.mp4") -af astats=measure_overall=Peak_level -vn -f null - 2>&1 | Select-String "Peak level dB" | Select-Object -Last 1).ToString() -replace '.*Peak level dB:\s*(-?[\d.]+).*', '$1')
-            $lin = [Math]::Pow(10, [double]$pk / 20)
-            Write-Host "volume $v -> peak $([Math]::Round($lin, 3))"
-            $target = [Math]::Min(0.6 * [double]$v, 0.95)
-            if ($v -ne "2" -and [Math]::Abs($lin - 0.6 * [double]$v) -gt 0.05) { throw "volume $v wrong: $lin" }
+            $lin = PeakLin (Join-Path $root "vol-$v.mp4")
+            Write-Host "volume $v -> peak $([Math]::Round($lin, 3)) (source $([Math]::Round($src, 3)))"
+            if ($v -ne "2" -and [Math]::Abs($lin - $src * [double]$v) -gt 0.05) { throw "volume $v wrong: $lin" }
             if ($v -eq "2" -and ($lin -gt 0.97 -or $lin -lt 0.8)) { throw "200% should be soft-limited below 0.95: $lin" }
           }
           # 4) 导出设置：720p / 30 帧；GIF；取消；剪贴板
