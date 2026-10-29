@@ -178,7 +178,10 @@ jobs:
           if ($running.Count -lt 1) { throw "app did not reopen after applying the staged update" }
           # 「已更新到」只提示一次
           $settings = Join-Path $env:APPDATA "录屏\settings.txt"
-          $lines = @(Get-Content $settings -ErrorAction SilentlyContinue | Where-Object { $_ -notlike "updatedTo=*" }) + "updatedTo=1.4"
+          # 「已更新到」只认和程序自己一样的版本号：按这次构建的版本写
+          $ver = ([xml](Get-Content windows/ScreenRecorder.csproj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+          $ver = ($ver -replace '\.0$', '')
+          $lines = @(Get-Content $settings -ErrorAction SilentlyContinue | Where-Object { $_ -notlike "updatedTo=*" }) + "updatedTo=$ver"
           Set-Content $settings $lines
           $env:UPDATESTATE_TEST = "1"
           Start-Process -FilePath "$dir\录屏.exe" -Wait
@@ -187,7 +190,7 @@ jobs:
           $second = Get-Content "$env:TEMP\update_state.txt" -Raw
           Remove-Item env:UPDATESTATE_TEST
           Write-Host "first: $first second: $second"
-          if ($first -notmatch "updatedTo=1\.4") { throw "updated notice missing" }
+          if ($first -notmatch "updatedTo=$([regex]::Escape($ver))") { throw "updated notice missing (expected $ver)" }
           if ($second -notmatch "updatedTo=\s*$") { throw "updated notice should show only once" }
 
       - name: Self-test (screen / region / window, no audio)

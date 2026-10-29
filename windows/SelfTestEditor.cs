@@ -100,7 +100,7 @@ namespace ScreenRecorder
 
                 // 1) 拖结尾修剪把手往左 30%：拖动中 trimEnd 只减不增（不回跳），松手后算一步撤销
                 double before = ed.Project.TrimEnd;
-                float hx = tl.X(before) + 3, hy = tl.ClientSize.Height / 2f;
+                float hx = tl.X(before) - 2, hy = tl.ClientSize.Height / 2f;   // 结尾把手的竖杠在修剪点左边
                 In.Move(Screen(hx, hy)); Pump(0.2); In.Down(); Pump(0.05);
                 var seen = new List<double>();
                 int steps = 30; float dx = -tl.ClientSize.Width * 0.3f;

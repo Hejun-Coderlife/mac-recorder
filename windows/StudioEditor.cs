@@ -415,7 +415,13 @@ namespace ScreenRecorder
             ShowFrame(src, t);
         }
 
+        readonly object composeGate = new object();   // 合成器的临时缓存不能两个线程同时用（拖动解码、播放、改样式重画）
         void ShowFrame(byte[] src, double t)
+        {
+            lock (composeGate) ShowFrameLocked(src, t);
+        }
+
+        void ShowFrameLocked(byte[] src, double t)
         {
             StudioScene sc; FramePlan[] pl;
             lock (sceneGate) { sc = scene; pl = plan; }

@@ -70,7 +70,7 @@ namespace ScreenRecorder
                     if (x < -40 || x > ClientSize.Width + 40) continue;
                     g.DrawLine(tick, x, 0, x, 6);
                     string s = step < 1 ? $"{(int)t / 60}:{t % 60:00.0}" : $"{(int)t / 60}:{(int)t % 60:00}";
-                    g.DrawString(s, font, txt, x + (t == 0 ? 8 : 1), 6);   // 0:00 别被左边的修剪把手挡住
+                    g.DrawString(s, font, txt, x + (t == 0 ? 10 : 1), 6);   // 0:00 别被左边的修剪把手挡住
                 }
             // 点击、打字的时刻
             using (var dot = new SolidBrush(Color.FromArgb(140, Theme.Secondary)))
@@ -120,14 +120,15 @@ namespace ScreenRecorder
             using (var kb = new SolidBrush(pc)) g.FillPath(kb, knob);
         }
 
+        // 竖杠画在留下的那一侧（开头的在右、结尾的在左），修剪点在最边上时也看得见；上下小横杠朝成片那一侧伸出去
         static void DrawBracket(Graphics g, float x, bool isStart, int h)
         {
             using (var y = new SolidBrush(Color.FromArgb(255, 204, 0)))
             {
-                float barX = isStart ? x - Bar : x;
+                float barX = isStart ? x : x - Bar;
+                float armX = isStart ? x : x - 9;
                 g.FillRectangle(y, barX, 0, Bar, h);
-                float armX = isStart ? x - Bar : x - 9 + Bar;
-                g.FillRectangle(y, isStart ? x - Bar : x - 9 + Bar, 0, 9, 3);
+                g.FillRectangle(y, armX, 0, 9, 3);
                 g.FillRectangle(y, armX, h - 3, 9, 3);
             }
         }
@@ -138,8 +139,8 @@ namespace ScreenRecorder
             seg = null;
             var p = ed.Project;
             float ts = X(p.TrimStart), te = X(p.TrimEnd);
-            if (pt.X >= ts - HandleW + 2 && pt.X <= ts + 4) return Hit.TrimStart;
-            if (pt.X >= te - 4 && pt.X <= te + HandleW - 2) return Hit.TrimEnd;
+            if (pt.X >= ts - 4 && pt.X <= ts + HandleW - 2) return Hit.TrimStart;
+            if (pt.X >= te - HandleW + 2 && pt.X <= te + 4) return Hit.TrimEnd;
             if (pt.Y < RulerH) return Hit.Ruler;
             if (pt.Y >= SegY && pt.Y <= SegY + SegH)
                 foreach (var s in p.Segments)
