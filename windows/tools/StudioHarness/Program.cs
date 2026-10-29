@@ -35,5 +35,18 @@ if (args.Length > 0 && args[0] == "test")
     if (dir != null) { var b = StudioTests.Blur(dir); Console.Write(b); ok &= b.TrimEnd().EndsWith(" OK"); }
     return ok ? 0 : 1;
 }
+if (args.Length > 0 && args[0] == "whisper")
+{
+    var res = StudioTestsW2.Whisper(args[1], wav => Whisper.Transcribe(wav, f => { }, System.Threading.CancellationToken.None));
+    var mk = StudioTestsW2.Maker("/tmp/w2maker", args[1], (wav, prog) => Whisper.Transcribe(wav, prog, System.Threading.CancellationToken.None));
+    Console.Write(res + mk); return res.TrimEnd().EndsWith(" OK") && mk.TrimEnd().EndsWith(" OK") ? 0 : 1;
+}
+if (args.Length > 0 && args[0] == "w2")
+{
+    bool ok = true;
+    foreach (var res in new[] { StudioTestsW2.Voice(), StudioTestsW2.Captions(), StudioTestsW2.Export(args.Length > 1 ? args[1] : "/tmp/w2work", args.Length > 2 ? args[2] : null) })
+    { Console.Write(res); ok &= res.TrimEnd().EndsWith(" OK"); }
+    return ok ? 0 : 1;
+}
 Console.WriteLine("usage: render <dir> <out.mp4> | test [dir] [mac project.json]");
 return 2;

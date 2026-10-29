@@ -38,6 +38,7 @@ namespace ScreenRecorder
                 Slider(L("阴影虚化", "Softness"), 0, 1, l => l.ShadowBlur, (l, v) => l.ShadowBlur = v, v => $"{Math.Round(v * 100)}%")));
             Section(L("鼠标", "Cursor"), CursorBox());
             Section(L("声音", "Sound"), SoundBox());
+            Section(L("字幕", "Captions"), CaptionBox());
             Section(L("运动模糊", "Motion Blur"), Box(
                 Chips(new[] { ("off", L("关", "Off")), ("light", L("轻", "Light")), ("medium", L("中", "Medium")), ("strong", L("强", "Strong")) }, 4, l => l.Blur, (l, v) => l.Blur = v),
                 Caption(L("只在镜头快速推拉、移动时有一点拖影，镜头停着时字是清楚的", "Only adds a little streak while the camera moves fast; text stays sharp when it's still"))));
@@ -376,6 +377,19 @@ namespace ScreenRecorder
             else items.Add(Caption(L("这段录制没有声音", "This recording has no sound")));
             var clicks = SliderP(L("点击声", "Clicks"), 0, 2, p => p.Audio.Clicks, (p, v) => p.Audio.Clicks = v, pct);
             items.Add(clicks);
+            // 讲解：总音量、讲解时压低原声音；录讲解的两个开关（记在设置里，不进工程）
+            items.Add(SliderP(L("讲解", "Voice-over"), 0, 2, p => p.Audio.Voice, (p, v) => p.Audio.Voice = v, pct));
+            var duck = CheckP(L("讲解时自动压低原声音", "Lower the original under voice-over"), p => p.Audio.Duck, (p, v) => p.Audio.Duck = v);
+            tips.SetToolTip(duck, L("有讲解的地方把录到的声音压低约 12 dB，讲完慢慢回来", "Lowers the recorded sound by about 12 dB while you talk, then brings it back"));
+            items.Add(duck);
+            items.Add(SettingCheck(L("录讲解前倒数 3 秒", "Count down 3 s before recording voice-over"), "voiceCountdown", true));
+            items.Add(SettingCheck(L("录讲解时原声音静音", "Mute the original while recording voice-over"), "voiceMute", false));
+            // 降噪：麦克风和讲解；Mac 录的电脑声音是单独一条，可以另外打开
+            items.Add(new Label { Text = L("降噪", "Noise reduction"), AutoSize = true, Margin = new Padding(0, 6, 0, 2) });
+            items.Add(ChipsP(new[] { ("off", L("关", "Off")), ("light", L("轻", "Light")), ("medium", L("中", "Medium")), ("strong", L("强", "Strong")) }, 4, p => p.Audio.Denoise, (p, v) => p.Audio.Denoise = v));
+            if (a.Count > 1 && a.Any(c => c != 1)) items.Add(CheckP(L("电脑声音也降噪", "Also clean the computer audio"), p => p.Audio.DenoiseSystem, (p, v) => p.Audio.DenoiseSystem = v));
+            items.Add(Caption(a.Count > 1 ? L("去掉键盘、风扇、空调这类持续的杂音；作用在麦克风和讲解上", "Removes steady background noise (fans, hum); applies to the microphone and voice-overs")
+                                          : L("去掉键盘、风扇、空调这类持续的杂音；作用在录到的声音（含麦克风）和讲解上", "Removes steady background noise (fans, hum); applies to the recorded sound and voice-overs")));
             items.Add(Caption(L("预览里听到的就是成片的声音；改了音量、剪辑后稍等一两秒生效", "The preview plays the final mix; after changing volume or cuts it updates in a second or two")));
             syncs.Add(() =>
             {
@@ -383,6 +397,69 @@ namespace ScreenRecorder
                 clicks.Visible = ed.Project.Look.ClickSound;
             });
             return Box(items.ToArray());
+        }
+
+        // ---- 字幕样式：显示、粗细、字号、颜色、描边、阴影、底色条、位置（同 Mac 版 CaptionStyle） ----
+        Control CaptionBox()
+        {
+            CaptionStyle C(StudioProject p) => p.CaptionStyle;
+            var items = new List<Control>
+            {
+                CheckP(L("显示字幕", "Show captions"), p => C(p).Show, (p, v) => C(p).Show = v),
+                ChipsP(new[] { ("regular", L("常规", "Regular")), ("medium", L("中粗", "Medium")), ("semibold", L("粗", "Bold")) }, 3, p => C(p).Weight, (p, v) => C(p).Weight = v),
+                SliderP(L("字号", "Size"), 0.03, 0.09, p => C(p).Size, (p, v) => C(p).Size = v, v => $"{Math.Round(v * 100)}%"),
+                ChipsP(new[] { ("white", L("白字", "White")), ("yellow", L("黄字", "Yellow")), ("black", L("黑字", "Black")) }, 3,
+                       p => C(p).Color.Same(RGB.White) ? "white" : C(p).Color.Same(new RGB(1, 0.85, 0.2)) ? "yellow" : C(p).Color.Same(new RGB(0.1, 0.1, 0.1)) ? "black" : "",
+                       (p, v) => C(p).Color = v == "yellow" ? new RGB(1, 0.85, 0.2) : v == "black" ? new RGB(0.1, 0.1, 0.1) : RGB.White),
+                CheckP(L("黑色描边", "Outline"), p => C(p).Outline, (p, v) => C(p).Outline = v),
+                CheckP(L("阴影", "Shadow"), p => C(p).Shadow, (p, v) => C(p).Shadow = v),
+                new Label { Text = L("底色条", "Background bar"), AutoSize = true, Margin = new Padding(0, 6, 0, 2) },
+                ChipsP(new[] { ("none", L("无", "None")), ("dark", L("深色", "Dark")), ("light", L("浅色", "Light")) }, 3, p => C(p).Box, (p, v) => C(p).Box = v),
+                ChipsP(new[] { ("bottom", L("在底部", "Bottom")), ("top", L("在顶部", "Top")) }, 2, p => C(p).Position, (p, v) => C(p).Position = v),
+                SliderP(L("离边", "Margin"), 0.02, 0.2, p => C(p).Margin, (p, v) => C(p).Margin = v, v => $"{Math.Round(v * 100)}%"),
+                Caption(L("点播放栏的「字幕」自动把说的话变成文字（在本机识别，不上传）；时间轴上双击字幕块改字", "Use Captions in the play bar to turn speech into text (on this PC, nothing uploaded); double-click a caption on the timeline to edit it")),
+            };
+            return Box(items.ToArray());
+        }
+
+        // 勾选框：改工程里样式以外的东西（声音、字幕样式），能撤销
+        CheckBox CheckP(string text, Func<StudioProject, bool> get, Action<StudioProject, bool> set)
+        {
+            var c = new CheckBox { Text = text, AutoSize = true, MaximumSize = new Size(W, 0), Margin = new Padding(0) };
+            c.CheckedChanged += (s, e) => { if (!syncing) ed.Edit(p => set(p, c.Checked)); };
+            syncs.Add(() => { if (c.Checked != get(ed.Project)) c.Checked = get(ed.Project); });
+            return c;
+        }
+
+        // 勾选框：记在设置里的开关（录讲解的倒数、静音）
+        CheckBox SettingCheck(string text, string key, bool def)
+        {
+            var c = new CheckBox { Text = text, AutoSize = true, MaximumSize = new Size(W, 0), Margin = new Padding(0), Checked = Settings.Get(key, def) };
+            c.CheckedChanged += (s, e) => Settings.Set(key, c.Checked);
+            return c;
+        }
+
+        // 小按钮组：改工程里样式以外的东西
+        Control ChipsP(IList<(string value, string text)> items, int columns, Func<StudioProject, string> get, Action<StudioProject, string> set)
+        {
+            int rows = (items.Count + columns - 1) / columns;
+            var t = new TableLayoutPanel { ColumnCount = columns, RowCount = rows, AutoSize = false, Width = W, Height = rows * 32, Margin = new Padding(0), Padding = new Padding(0) };
+            for (int i = 0; i < columns; i++) t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / columns));
+            for (int i = 0; i < rows; i++) t.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+            var buttons = new List<(Button b, string v)>();
+            foreach (var (v, text) in items)
+            {
+                var b = new Button { Text = text, Dock = DockStyle.Fill, AutoSize = false, Margin = new Padding(0, 0, 4, 4), FlatStyle = FlatStyle.Flat, Font = Font, TabStop = false, AutoEllipsis = true, Padding = new Padding(0) };
+                b.FlatAppearance.BorderSize = 0;
+                b.Click += (s, e) => { if (!syncing) ed.Edit(p => set(p, v)); };
+                buttons.Add((b, v)); t.Controls.Add(b);
+            }
+            syncs.Add(() =>
+            {
+                var cur = get(ed.Project);
+                foreach (var (b, v) in buttons) { bool on = v == cur; b.BackColor = on ? Theme.Accent : Color.FromArgb(232, 232, 236); b.ForeColor = on ? Color.White : Theme.Text; }
+            });
+            return t;
         }
 
         // 同 Slider，但改的是工程里样式以外的东西（声音）
@@ -421,7 +498,7 @@ namespace ScreenRecorder
         // 工程或预设变了：把各个控件的值对上（只在样式真变了时才做）
         public void Sync()
         {
-            var sig = Look.ToJson() + "|" + ed.Project.Audio.ToJson() + "|" + ed.Presets.DefaultKey + "|" + string.Join(",", ed.Presets.Presets.Select(p => p.Name));
+            var sig = Look.ToJson() + "|" + ed.Project.Audio.ToJson() + "|" + ed.Project.CaptionStyle.ToJson() + "|" + ed.Presets.DefaultKey + "|" + string.Join(",", ed.Presets.Presets.Select(p => p.Name));
             if (sig == lastSig) return;
             lastSig = sig;
             syncing = true;

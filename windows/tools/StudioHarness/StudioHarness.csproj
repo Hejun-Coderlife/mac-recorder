@@ -11,5 +11,8 @@
     <Compile Include="../../StudioCore.cs" />
     <Compile Include="../../StudioModel.cs" />
     <Compile Include="../../StudioTests.cs" />
+    <Compile Include="../../StudioVoice.cs" />
+    <Compile Include="../../StudioTestsW2.cs" />
+    <Compile Include="../../Whisper.cs" />
   </ItemGroup>
 </Project>

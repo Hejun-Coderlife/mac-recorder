@@ -15,16 +15,16 @@ namespace ScreenRecorder
         readonly StudioEditor ed;
         public double Scale = 1, Offset;      // 放大倍数（1–8）、内容滚出左边的像素
         public int ViewWidth => Math.Max(1, ClientSize.Width);
-        const int RulerH = 22, CutY = 36, CutH = 22, SegY = 64, SegH = 46, HandleW = 16, Bar = 4, EdgeW = 9;
+        const int RulerH = 22, CutY = 34, CutH = 20, SegY = 58, SegH = 38, VoiceY = 100, VoiceH = 22, CapY = 126, CapH = 22, HandleW = 16, Bar = 4, EdgeW = 9;
         readonly ToolTip tip = new ToolTip { InitialDelay = 500 };
         string tipText;
 
-        enum Hit { None, Ruler, TrimStart, TrimEnd, SegStart, SegEnd, SegBody, CutStart, CutEnd, CutBody, Empty }
+        enum Hit { None, Ruler, TrimStart, TrimEnd, SegStart, SegEnd, SegBody, CutStart, CutEnd, CutBody, VoiceStart, VoiceEnd, VoiceBody, CapStart, CapEnd, CapBody, Empty }
         Hit drag = Hit.None;
         string dragSeg;
         int downX;
         bool moved, justAdded;
-        double baseStart, baseEnd, baseTrimS, baseTrimE;
+        double baseStart, baseEnd, baseTrimS, baseTrimE, baseIn, baseOut;
 
         public TimelineView(StudioEditor ed)
         {
@@ -129,6 +129,61 @@ namespace ScreenRecorder
                         using (var w = new SolidBrush(Color.White)) g.DrawString(label, f, w, r.X + (r.Width - sz.Width) / 2, r.Y + (r.Height - sz.Height) / 2);
                 }
             }
+            // 讲解轨：绿色块 + 波形（块从讲解开头那一刻画到讲解结尾那一刻对应的素材时间）
+            var map = new TimeMap(p);
+            using (var lane = new SolidBrush(Color.FromArgb(Theme.Dark ? 30 : 18, Theme.Secondary))) { g.FillRectangle(lane, 1, VoiceY, ClientSize.Width - 2, VoiceH); g.FillRectangle(lane, 1, CapY, ClientSize.Width - 2, CapH); }
+            using (var lf = new Font("Segoe UI", 7f)) using (var lb = new SolidBrush(Color.FromArgb(150, Theme.Secondary)))
+            {
+                if (p.Voiceovers.Count == 0) g.DrawString(L("讲解（播放栏「录讲解」）", "Voice-over (Record in the play bar)"), lf, lb, 6, VoiceY + 4);
+                if (p.Captions.Count == 0) g.DrawString(L("字幕（播放栏「字幕」，或双击这里加一句）", "Captions (Captions in the play bar, or double-click here)"), lf, lb, 6, CapY + 4);
+            }
+            foreach (var v in p.Voiceovers)
+            {
+                float x0 = X(v.Start), x1 = Math.Max(x0 + 6, X(v.SrcEnd(map)));
+                if (x1 < -2 || x0 > ClientSize.Width + 2) continue;
+                bool sel = v.Id == ed.SelectedVoice;
+                var r = new RectangleF(x0, VoiceY, x1 - x0, VoiceH);
+                var col = Color.FromArgb(52, 168, 83);
+                using (var path = Theme.Round(r, 5))
+                {
+                    using (var b = new SolidBrush(Color.FromArgb(sel ? 235 : 175, col))) g.FillPath(b, path);
+                    var peaks = ed.Peaks(v.File);
+                    if (peaks != null && peaks.Length > 1)
+                    {
+                        var clip = g.Clip; g.SetClip(path);
+                        using (var wp = new Pen(Color.FromArgb(200, Color.White), 1))
+                            for (float x = Math.Max(x0 + 2, 0); x < Math.Min(x1 - 2, ClientSize.Width); x += 2)
+                            {
+                                double ft = v.TrimIn + (x - x0) / Math.Max(1, x1 - x0) * v.Length;   // 讲解里的第几秒（按块的长短摊开）
+                                int i = (int)(ft * 50); if (i < 0 || i >= peaks.Length) continue;
+                                float a = Math.Min(1, peaks[i] * 1.6f) * (VoiceH / 2f - 2);
+                                g.DrawLine(wp, x, VoiceY + VoiceH / 2f - a, x, VoiceY + VoiceH / 2f + a);
+                            }
+                        g.Clip = clip;
+                    }
+                    if (sel) using (var pen = new Pen(Color.White, 2)) g.DrawPath(pen, path);
+                }
+                using (var hb = new SolidBrush(Color.FromArgb(225, Color.White))) { g.FillRectangle(hb, x0 + 3, VoiceY + VoiceH / 2 - 5, 2, 10); g.FillRectangle(hb, x1 - 5, VoiceY + VoiceH / 2 - 5, 2, 10); }
+            }
+            // 正在录的讲解：红色块跟着播放头长出来
+            if (ed.RecordingVoice && ed.RecordStart is double rs0)
+                using (var rb = new SolidBrush(Color.FromArgb(200, 230, 50, 50))) { float x0 = X(rs0), x1 = Math.Max(x0 + 4, X(ed.Time)); g.FillRectangle(rb, x0, VoiceY, x1 - x0, VoiceH); }
+            // 字幕轨：一句一块，块里写字
+            using (var cf = new Font("Microsoft YaHei UI", 7.5f))
+                foreach (var c in p.Captions)
+                {
+                    float x0 = X(c.Start), x1 = Math.Max(x0 + 6, X(c.End));
+                    if (x1 < -2 || x0 > ClientSize.Width + 2) continue;
+                    bool sel = c.Id == ed.SelectedCaption;
+                    var r = new RectangleF(x0, CapY, x1 - x0, CapH);
+                    using (var path = Theme.Round(r, 4))
+                    {
+                        using (var b = new SolidBrush(Color.FromArgb(sel ? 240 : 190, 230, 140, 30))) g.FillPath(b, path);
+                        if (sel) using (var pen = new Pen(Color.White, 2)) g.DrawPath(pen, path);
+                    }
+                    if (r.Width > 18)
+                        TextRenderer.DrawText(g, c.Text, cf, Rectangle.Round(new RectangleF(r.X + 4, r.Y, r.Width - 8, r.Height)), Color.White, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+                }
             // 修剪范围外压暗
             using (var dim = new SolidBrush(Color.FromArgb(70, 0, 0, 0)))
             {
@@ -179,6 +234,27 @@ namespace ScreenRecorder
                     if (x1 - x0 > EdgeW * 2.5f) { if (pt.X <= x0 + EdgeW) return Hit.CutStart; if (pt.X >= x1 - EdgeW) return Hit.CutEnd; }
                     return Hit.CutBody;
                 }
+            if (pt.Y >= VoiceY && pt.Y <= VoiceY + VoiceH)
+            {
+                var map = new TimeMap(p);
+                foreach (var v in p.Voiceovers)
+                {
+                    float x0 = X(v.Start), x1 = Math.Max(x0 + 6, X(v.SrcEnd(map)));
+                    if (pt.X < x0 - 2 || pt.X > x1 + 2) continue;
+                    seg = v.Id;
+                    if (x1 - x0 > EdgeW * 2.5f) { if (pt.X <= x0 + EdgeW) return Hit.VoiceStart; if (pt.X >= x1 - EdgeW) return Hit.VoiceEnd; }
+                    return Hit.VoiceBody;
+                }
+            }
+            if (pt.Y >= CapY && pt.Y <= CapY + CapH)
+                foreach (var c in p.Captions)
+                {
+                    float x0 = X(c.Start), x1 = Math.Max(x0 + 6, X(c.End));
+                    if (pt.X < x0 - 2 || pt.X > x1 + 2) continue;
+                    seg = c.Id;
+                    if (x1 - x0 > EdgeW * 2.5f) { if (pt.X <= x0 + EdgeW) return Hit.CapStart; if (pt.X >= x1 - EdgeW) return Hit.CapEnd; }
+                    return Hit.CapBody;
+                }
             if (pt.Y >= SegY && pt.Y <= SegY + SegH)
                 foreach (var s in p.Segments)
                 {
@@ -204,11 +280,17 @@ namespace ScreenRecorder
             if (sg != null) { baseStart = sg.Start; baseEnd = sg.End; }
             var cg = p.Cuts.FirstOrDefault(c => c.Id == dragSeg);
             if (cg != null && (drag == Hit.CutStart || drag == Hit.CutEnd || drag == Hit.CutBody)) { baseStart = cg.Start; baseEnd = cg.End; }
+            var vg = p.Voiceovers.FirstOrDefault(v => v.Id == dragSeg);
+            if (vg != null && (drag == Hit.VoiceStart || drag == Hit.VoiceEnd || drag == Hit.VoiceBody)) { baseStart = vg.Start; baseIn = vg.TrimIn; baseOut = vg.TrimOut; }
+            var kg = p.Captions.FirstOrDefault(c => c.Id == dragSeg);
+            if (kg != null && (drag == Hit.CapStart || drag == Hit.CapEnd || drag == Hit.CapBody)) { baseStart = kg.Start; baseEnd = kg.End; }
             switch (drag)
             {
                 case Hit.Ruler: ed.ScrubBegin(); ed.Seek(T(e.X)); break;
-                case Hit.SegStart: case Hit.SegEnd: case Hit.SegBody: ed.Selected = dragSeg; ed.SelectedCut = null; ed.Picking = false; ed.Touch(); break;
-                case Hit.CutStart: case Hit.CutEnd: case Hit.CutBody: ed.SelectedCut = dragSeg; ed.Selected = null; ed.Picking = false; ed.Touch(); break;
+                case Hit.SegStart: case Hit.SegEnd: case Hit.SegBody: ed.Select("seg", dragSeg); break;
+                case Hit.CutStart: case Hit.CutEnd: case Hit.CutBody: ed.Select("cut", dragSeg); break;
+                case Hit.VoiceStart: case Hit.VoiceEnd: case Hit.VoiceBody: ed.Select("voice", dragSeg); break;
+                case Hit.CapStart: case Hit.CapEnd: case Hit.CapBody: ed.Select("cap", dragSeg); break;
                 case Hit.TrimStart: case Hit.TrimEnd: break;   // 单击把手什么都不做（别把播放头叫过来）
             }
             Capture = true;
@@ -220,9 +302,12 @@ namespace ScreenRecorder
             if (drag == Hit.None)
             {
                 var h = HitTest(e.Location, out _);
-                Cursor = h == Hit.TrimStart || h == Hit.TrimEnd || h == Hit.SegStart || h == Hit.SegEnd || h == Hit.CutStart || h == Hit.CutEnd ? Cursors.SizeWE : h == Hit.SegBody || h == Hit.CutBody ? Cursors.SizeAll : Cursors.Default;
+                Cursor = h == Hit.TrimStart || h == Hit.TrimEnd || h == Hit.SegStart || h == Hit.SegEnd || h == Hit.CutStart || h == Hit.CutEnd || h == Hit.VoiceStart || h == Hit.VoiceEnd || h == Hit.CapStart || h == Hit.CapEnd ? Cursors.SizeWE
+                       : h == Hit.SegBody || h == Hit.CutBody || h == Hit.VoiceBody || h == Hit.CapBody ? Cursors.SizeAll : Cursors.Default;
                 string t = h == Hit.TrimStart ? L("拖动剪掉开头", "Drag to cut the start") : h == Hit.TrimEnd ? L("拖动剪掉结尾", "Drag to cut the end")
                     : h == Hit.CutStart || h == Hit.CutEnd || h == Hit.CutBody ? L("拖两头改范围、拖中间挪；选中后可改成快放", "Drag the ends or the middle; select it to switch to speed-up")
+                    : h == Hit.VoiceStart || h == Hit.VoiceEnd || h == Hit.VoiceBody ? L("讲解：拖中间挪位置，拖两头剪掉开头 / 结尾；选中后调音量、删除", "Voice-over: drag to move, drag the ends to trim; select it for volume / delete")
+                    : h == Hit.CapStart || h == Hit.CapEnd || h == Hit.CapBody ? L("字幕：双击改字，拖两头改时间、拖中间挪", "Caption: double-click to edit, drag the ends or the middle")
                     : L("点选推近段来调整，空白处双击新加，两端黄条修剪；Ctrl + 滚轮缩放时间轴", "Click a zoom to edit it, double-click empty space to add one, drag the yellow bars to trim; Ctrl + scroll zooms the timeline");
                 if (t != tipText) { tipText = t; tip.SetToolTip(this, t); }
                 return;
@@ -275,6 +360,49 @@ namespace ScreenRecorder
                         else c.End = Math.Max(Math.Min(baseEnd + dt, room.hi), baseStart + 0.2);
                     });
                     break;
+                case Hit.VoiceBody:
+                    ed.DragBegin();
+                    ed.DragUpdate(p =>
+                    {
+                        var v = p.Voiceovers.FirstOrDefault(x => x.Id == id); if (v == null) return;
+                        v.Start = Math.Min(Math.Max(baseStart + dt, p.TrimStart), Math.Max(p.TrimStart, p.TrimEnd - 0.1));
+                    });
+                    break;
+                case Hit.VoiceStart: case Hit.VoiceEnd:
+                    bool vs = drag == Hit.VoiceStart;
+                    ed.DragBegin();
+                    ed.DragUpdate(p =>
+                    {
+                        var v = p.Voiceovers.FirstOrDefault(x => x.Id == id); if (v == null) return;
+                        var m = new TimeMap(p);
+                        if (vs)
+                        {
+                            // 拖开头：剪掉讲解的开头（或放回来），讲解后面的部分在成片里的位置不动
+                            double ni = Math.Min(Math.Max(baseIn + dt, 0), baseOut - 0.2);
+                            v.TrimIn = ni; v.Start = m.Src(Math.Max(m.Out(p.TrimStart), m.Out(baseStart) + (ni - baseIn)));
+                        }
+                        else v.TrimOut = Math.Max(Math.Min(baseOut + dt, v.FileLength > 0 ? v.FileLength : baseOut + dt), v.TrimIn + 0.2);
+                    });
+                    break;
+                case Hit.CapBody:
+                    ed.DragBegin();
+                    ed.DragUpdate(p =>
+                    {
+                        var c = p.Captions.FirstOrDefault(x => x.Id == id); if (c == null) return;
+                        double len = baseEnd - baseStart, ns = Math.Min(Math.Max(baseStart + dt, 0), Math.Max(0, ed.Duration - len));
+                        c.Start = ns; c.End = ns + len;
+                    });
+                    break;
+                case Hit.CapStart: case Hit.CapEnd:
+                    bool ks = drag == Hit.CapStart;
+                    ed.DragBegin();
+                    ed.DragUpdate(p =>
+                    {
+                        var c = p.Captions.FirstOrDefault(x => x.Id == id); if (c == null) return;
+                        if (ks) c.Start = Math.Min(Math.Max(baseStart + dt, 0), baseEnd - 0.3);
+                        else c.End = Math.Max(Math.Min(baseEnd + dt, ed.Duration), baseStart + 0.3);
+                    });
+                    break;
                 case Hit.SegStart: case Hit.SegEnd:
                     bool st = drag == Hit.SegStart;
                     ed.DragBegin();
@@ -298,16 +426,21 @@ namespace ScreenRecorder
             if (ed.IsDragging) { ed.DragEnd(); return; }
             // 双击加了一段：WinForms 在双击之后还会来一次 MouseUp，别把刚加的那段又取消选中
             if (justAdded) { justAdded = false; return; }
-            if (!moved && was == Hit.Empty) { ed.Selected = null; ed.SelectedCut = null; ed.Picking = false; ed.Seek(T(e.X)); }
-            if (!moved && (was == Hit.SegBody || was == Hit.SegStart || was == Hit.SegEnd || was == Hit.CutBody || was == Hit.CutStart || was == Hit.CutEnd)) ed.Touch();
+            if (!moved && was == Hit.Empty) { ed.Select(null, null); ed.Seek(T(e.X)); }
+            if (!moved && was != Hit.Empty && was != Hit.None && was != Hit.TrimStart && was != Hit.TrimEnd && was != Hit.Ruler) ed.Touch();
         }
 
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
             base.OnMouseDoubleClick(e);
-            if (HitTest(e.Location, out _) == Hit.Empty)
+            var h = HitTest(e.Location, out var id);
+            if (h == Hit.CapBody || h == Hit.CapStart || h == Hit.CapEnd) { ed.Select("cap", id); ed.EditCaptionText(); justAdded = true; return; }
+            if (h == Hit.Empty)
             {
-                if (e.Y >= CutY && e.Y <= CutY + CutH) ed.AddCut(T(e.X)); else ed.AddSegment(T(e.X));   // 剪辑轨上双击 = 加一段剪掉
+                if (e.Y >= CutY && e.Y <= CutY + CutH) ed.AddCut(T(e.X));          // 剪辑轨上双击 = 加一段剪掉
+                else if (e.Y >= CapY && e.Y <= CapY + CapH) ed.AddCaption(T(e.X)); // 字幕轨上双击 = 加一句
+                else if (e.Y >= VoiceY && e.Y <= VoiceY + VoiceH) return;           // 讲解只能录
+                else ed.AddSegment(T(e.X));
                 justAdded = true;
             }
         }

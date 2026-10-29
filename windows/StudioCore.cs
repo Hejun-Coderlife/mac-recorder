@@ -1057,7 +1057,7 @@ namespace ScreenRecorder
             long rate = Math.Max(opt?.MinRate ?? 10_000_000, (long)(CW * (double)CH * st.Fps * st.BitsPerPixel));
             // 声音：原声（剪掉 / 快放 / 修剪、按音量）+ 点击音效 混成一条，软限幅
             var clickTimes = proj.Look.ClickSound && proj.Audio.Clicks > 0.001 ? wtrack.Clicks.Select(c => c[0] - t0).Where(t => t >= 0 && t < len).ToList() : new List<double>();
-            var aud = AudioGraph(raw, info, proj, map, clickTimes, len, 1);
+            var aud = AudioGraph(raw, info, proj, map, clickTimes, len, 1, t0);
             string lenS = len.ToString("0.######", CultureInfo.InvariantCulture);
             if (aud != null) log?.Invoke("audio graph: " + aud.Graph);
             string audio = aud == null ? "-map 0:v" : $"{aud.Inputs} -filter_complex \"{aud.Graph}\" -map 0:v -map \"[aout]\" -c:a aac -b:a 192k";
@@ -1065,8 +1065,19 @@ namespace ScreenRecorder
             string input = comp.Nv12Out
                 ? $"-f rawvideo -pix_fmt nv12 -s {CW}x{CH} -r {st.Fps} -color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709 -i pipe:0"
                 : $"-f rawvideo -pix_fmt bgra -s {CW}x{CH} -r {st.Fps} -i pipe:0";
-            string vf = comp.Nv12Out ? (x264 ? "-vf format=yuv420p " : "")
-                                     : $"-vf \"scale=in_range=pc:out_range=tv:out_color_matrix=bt709,format={(x264 ? "yuv420p" : "nv12")}\" ";
+            // 字幕：写一份 ASS（画布像素坐标、成片时间从开头算 0），编码前用 ass 滤镜烧进去
+            string assFile = null, assF = "";
+            var capTrack = new CaptionTrack(proj.Captions, proj.CaptionStyle.Show, map, proj.TrimStart, proj.TrimEnd);
+            if (!capTrack.IsEmpty)
+            {
+                string fontsDir = OperatingSystemIsWindows() ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Fonts") : "/System/Library/Fonts";
+                assFile = Path.Combine(Path.GetTempPath(), "studio-captions-" + Guid.NewGuid().ToString("N") + ".ass");
+                File.WriteAllText(assFile, CaptionAss.Build(capTrack, proj.CaptionStyle, t0, CW, CH, CaptionAss.FontName(fontsDir)), new UTF8Encoding(false));
+                assF = $"ass=filename='{CaptionAss.FilterPath(assFile)}':fontsdir='{CaptionAss.FilterPath(fontsDir)}',";
+                log?.Invoke($"captions {capTrack.Items.Count} → {assFile}");
+            }
+            string vf = comp.Nv12Out ? (x264 || assF.Length > 0 ? $"-vf \"{assF}format={(x264 ? "yuv420p" : "nv12")}\" " : "")
+                                     : $"-vf \"scale=in_range=pc:out_range=tv:out_color_matrix=bt709,{assF}format={(x264 ? "yuv420p" : "nv12")}\" ";
             var enc = Start($"-v error -y {input} {audio} {vf}{EncoderArgs(encoder, rate, st.Fps, comp.Gpu)} " +
                             $"-colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv -t {lenS} -movflags +faststart \"{outPath}\"", true);
             var decErr = new StringBuilder(); var encErr = new StringBuilder();
@@ -1166,6 +1177,7 @@ namespace ScreenRecorder
             {
                 if (comp != cpu) comp.Dispose();
                 aud?.Cleanup();
+                if (assFile != null) try { File.Delete(assFile); } catch { }
             }
             stats.Frames = n; stats.Width = CW; stats.Height = CH; stats.Duration = len;
             stats.RenderSeconds = sw.Elapsed.TotalSeconds; stats.TotalSeconds = total.Elapsed.TotalSeconds;
@@ -1209,10 +1221,14 @@ namespace ScreenRecorder
             public void Cleanup() { foreach (var f in temp) try { File.Delete(f); } catch { } }
         }
 
-        // firstInput：raw 在 ffmpeg 里是第几个输入（导出时 0 是画面管道，raw 是 1）；clickTimes 是成片里相对开头的秒数
-        public static AudioPlan AudioGraph(string raw, VideoInfo info, StudioProject proj, TimeMap map, List<double> clickTimes, double len, int firstInput)
+        // firstInput：raw 在 ffmpeg 里是第几个输入（导出时 0 是画面管道，raw 是 1）；clickTimes 是成片里相对开头的秒数；
+        // t0 = 成片开头（修剪起点的成片时间）。讲解：每段解出来按成片时间放进一条 wav；有讲解的地方原声音乘上压低曲线（另一条 wav，amultiply）；
+        // 降噪：麦克风轨（Windows 录的那一条也算）在切块前先过 afftdn，按强度和原声混
+        public static AudioPlan AudioGraph(string raw, VideoInfo info, StudioProject proj, TimeMap map, List<double> clickTimes, double len, int firstInput, double t0 = double.NaN)
         {
             var a = proj.Audio;
+            if (double.IsNaN(t0)) t0 = map.Out(proj.TrimStart);
+            string dir = Path.GetDirectoryName(raw);
             var spans = map.Spans(proj.TrimStart, proj.TrimEnd);
             var streams = new List<(int idx, double vol)>();
             if (!a.Muted)
@@ -1222,36 +1238,103 @@ namespace ScreenRecorder
                     if (v > 0.001) streams.Add((i, v));
                 }
             bool clicks = clickTimes != null && clickTimes.Count > 0;
-            if (streams.Count == 0 && !clicks) return null;
             var plan = new AudioPlan();
-            var g = new StringBuilder(); var mix = new List<string>();
+            // 讲解：解出来、降噪（按强度）、按成片时间放好 → 一条 wav；同时记下讲解占的时间（压低用）
+            var vspans = new List<(double a, double b)>();
+            string voiceWav = null;
+            if (a.Voice > 0.001)
+            {
+                var clips = proj.Voiceovers.Where(c => c.Length > 0.01 && c.Volume > 0.001 && File.Exists(Path.Combine(dir, c.File))).ToList();
+                if (clips.Count > 0)
+                {
+                    const int sr = 48000;
+                    int n = Math.Max(1, (int)Math.Ceiling(len * sr));
+                    var buf = new float[n]; bool any = false;
+                    foreach (var c in clips)
+                    {
+                        var (os, oe) = c.OutRange(map);
+                        double s0 = os - t0;
+                        if (s0 + c.Length <= 0 || s0 >= len) continue;
+                        string vf = Path.Combine(dir, c.File);
+                        var pcm = DecodePcm(vf, sr, a.Denoise != "off" ? Denoise.Filter(a.Denoise, "0:a:0", "dn", "v", Denoise.NoiseFloor(DecodePcm(vf, 16000), 16000)) : null);
+                        if (pcm == null) continue;
+                        int from = (int)Math.Round(c.TrimIn * sr), to = Math.Min(pcm.Length, (int)Math.Round(c.TrimOut * sr)), at = (int)Math.Round(s0 * sr);
+                        float gain = (float)(c.Volume * a.Voice);
+                        for (int k = from; k < to; k++) { int j = at + k - from; if (j >= 0 && j < n) buf[j] += pcm[k] * gain; }
+                        vspans.Add((os, Math.Min(oe, os + (to - from) / (double)sr)));
+                        any = true;
+                    }
+                    if (any)
+                    {
+                        voiceWav = Path.Combine(Path.GetTempPath(), "studio-voice-" + Guid.NewGuid().ToString("N") + ".wav");
+                        File.WriteAllBytes(voiceWav, ClickSound.Wav(buf, sr));
+                        plan.Temp(voiceWav);
+                    }
+                }
+            }
+            if (streams.Count == 0 && !clicks && voiceWav == null) return null;
+            var g = new StringBuilder(); var mix = new List<string>(); var orig = new List<string>();
             string F(double v) => v.ToString("0.######", CultureInfo.InvariantCulture);
             const string fmt = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo";
+            bool mac2 = info.AudioChannels.Count > 1;
             foreach (var (idx, vol) in streams)
             {
-                string src = $"[{firstInput}:a:{idx}]aresample=48000:async=1:first_pts=0,{fmt}";
-                if (spans.Count == 1) g.Append(src).Append(Piece(spans[0], "")).Append($",volume={F(vol)}[s{idx}];\n");
+                // 降噪：麦克风轨（Mac 录的单声道那条；Windows 录的只有一条，电脑声音和麦克风混在一起，也算）；电脑声音轨要另外打开
+                bool micTrack = !mac2 || info.AudioChannels[idx] == 1;
+                bool dn = a.Denoise != "off" && (micTrack || a.DenoiseSystem);
+                string src;
+                if (dn)
+                {
+                    g.Append($"[{firstInput}:a:{idx}]aresample=48000:async=1:first_pts=0,{fmt}[r{idx}];");
+                    g.Append(Denoise.Filter(a.Denoise, $"r{idx}", $"n{idx}", $"d{idx}", NoiseFloorOf(raw, idx)));
+                    src = $"[n{idx}]anull";
+                }
+                else src = $"[{firstInput}:a:{idx}]aresample=48000:async=1:first_pts=0,{fmt}";
+                if (spans.Count == 1) g.Append(src).Append(Piece(spans[0])).Append($",volume={F(vol)}[s{idx}];\n");
                 else
                 {
                     g.Append(src).Append($",asplit={spans.Count}");
                     for (int j = 0; j < spans.Count; j++) g.Append($"[s{idx}p{j}]");
                     g.Append(";\n");
-                    for (int j = 0; j < spans.Count; j++) g.Append($"[s{idx}p{j}]").Append(Piece(spans[j], "").TrimStart(',')).Append($"[s{idx}q{j}];\n");
+                    for (int j = 0; j < spans.Count; j++) g.Append($"[s{idx}p{j}]").Append(Piece(spans[j]).TrimStart(',')).Append($"[s{idx}q{j}];\n");
                     for (int j = 0; j < spans.Count; j++) g.Append($"[s{idx}q{j}]");
                     g.Append($"concat=n={spans.Count}:v=0:a=1,volume={F(vol)}[s{idx}];\n");
                 }
-                mix.Add($"[s{idx}]");
+                orig.Add($"[s{idx}]");
             }
-            string inputs = $"-i \"{raw}\"";
+            string inputs = streams.Count > 0 ? $"-i \"{raw}\"" : "";
+            int next = streams.Count > 0 ? firstInput + 1 : firstInput;
+            string AddInput(string file) { inputs = (inputs.Length > 0 ? inputs + " " : "") + $"-i \"{file}\""; return (next++).ToString(); }
+            // 原声音：几条混成一条；有讲解、开了压低就乘上压低曲线
+            if (orig.Count > 0)
+            {
+                string o = orig[0];
+                if (orig.Count > 1) { g.Append(string.Concat(orig)).Append($"amix=inputs={orig.Count}:duration=longest:normalize=0[orig];"); o = "[orig]"; }
+                if (a.Duck && vspans.Count > 0)
+                {
+                    var env = Path.Combine(Path.GetTempPath(), "studio-duck-" + Guid.NewGuid().ToString("N") + ".wav");
+                    File.WriteAllBytes(env, Duck.Envelope(vspans, t0, len));
+                    plan.Temp(env);
+                    string ei = AddInput(env);
+                    g.Append($"[{ei}:a:0]aresample=48000,{fmt}[env];{o}[env]amultiply[ducked];");
+                    o = "[ducked]";
+                }
+                mix.Add(o);
+            }
             if (clicks)
             {
                 var wav = Path.Combine(Path.GetTempPath(), "studio-clicks-" + Guid.NewGuid().ToString("N") + ".wav");
                 File.WriteAllBytes(wav, ClickSound.Track(clickTimes, len, proj.Look.ClickStyle));
                 plan.Temp(wav);
-                int ci = streams.Count > 0 ? firstInput + 1 : firstInput;
-                if (streams.Count == 0) inputs = $"-i \"{wav}\""; else inputs += $" -i \"{wav}\"";
+                string ci = AddInput(wav);
                 g.Append($"[{ci}:a:0]{fmt},volume={F(proj.Audio.Clicks)}[clk];\n");
                 mix.Add("[clk]");
+            }
+            if (voiceWav != null)
+            {
+                string vi = AddInput(voiceWav);
+                g.Append($"[{vi}:a:0]{fmt}[voice];\n");
+                mix.Add("[voice]");
             }
             // 限幅（防破音）：超过 100% 时用 ffmpeg 的前瞻限幅器压在 0.9 以内，不自动抬音量；正常音量不受影响
             string soft = $"alimiter=limit=0.9:attack=2:release=60:level=0:latency=1,{fmt}";
@@ -1260,12 +1343,36 @@ namespace ScreenRecorder
             plan.Inputs = inputs; plan.Graph = g.ToString().Replace("\n", "");
             return plan;
 
-            string Piece((double start, double end, double rate) sp, string pre)
+            string Piece((double start, double end, double rate) sp)
             {
                 var t = $",atrim=start={F(sp.start)}:end={F(sp.end)},asetpts=PTS-STARTPTS";
                 if (sp.rate > 1.0001) t += $",atempo={F(Math.Min(100, sp.rate))}";
                 return t;
             }
+        }
+
+        // 一个声音文件解成单声道浮点（采样率 sr）；filter 不为空时先过这段滤镜图（输入标签 [0:a:0]，输出 [dn]）；stream = 第几条音轨
+        public static float[] DecodePcm(string file, int sr, string filter = null, int stream = 0)
+        {
+            string af = filter == null ? $"-map 0:a:{stream} -ac 1 -ar {sr}" : $"-filter_complex \"{filter.TrimEnd(';')}\" -map \"[dn]\" -ac 1 -ar {sr}";
+            var psi = new ProcessStartInfo(FfmpegPath, $"-v error -i \"{file}\" -vn {af} -f f32le pipe:1")
+            { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+            using (var p = Process.Start(psi))
+            {
+                p.ErrorDataReceived += (s, e) => { }; p.BeginErrorReadLine();
+                using (var ms = new MemoryStream()) { p.StandardOutput.BaseStream.CopyTo(ms); p.WaitForExit(); var b = ms.ToArray(); if (b.Length < 4) return null; var f = new float[b.Length / 4]; Buffer.BlockCopy(b, 0, f, 0, f.Length * 4); return f; }
+            }
+        }
+
+        // 素材第 idx 条音轨的噪声底（降噪用）：同一个文件算过就记住
+        static readonly Dictionary<string, double> noiseFloors = new Dictionary<string, double>();
+        public static double NoiseFloorOf(string raw, int idx)
+        {
+            string key = raw + "|" + idx + "|" + (File.Exists(raw) ? File.GetLastWriteTimeUtc(raw).Ticks : 0);
+            lock (noiseFloors) if (noiseFloors.TryGetValue(key, out var v)) return v;
+            double nf = Denoise.NoiseFloor(DecodePcm(raw, 16000, null, idx), 16000);
+            lock (noiseFloors) noiseFloors[key] = nf;
+            return nf;
         }
 
         // 第 i 条音轨用哪个音量：Windows 录的只有一条（电脑声音和麦克风混在一起）→ 用「电脑声音」；Mac 录的单声道 = 麦克风

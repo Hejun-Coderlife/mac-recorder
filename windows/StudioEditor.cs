@@ -18,7 +18,7 @@ using static ScreenRecorder.App;
 
 namespace ScreenRecorder
 {
-    sealed class StudioEditor : Form
+    sealed partial class StudioEditor : Form
     {
         // ---- 数据 ----
         public readonly string Dir, Raw;
@@ -28,6 +28,17 @@ namespace ScreenRecorder
         public StudioProject Project;
         public string Selected;               // 选中的推近段 id
         public string SelectedCut;            // 选中的剪掉 / 快放段 id（和推近段只能选一个）
+        public string SelectedVoice;          // 选中的讲解 id
+        public string SelectedCaption;        // 选中的字幕 id
+
+        // 选中一样东西（推近 / 剪辑 / 讲解 / 字幕只能选一个）；kind = null 全不选
+        public void Select(string kind, string id)
+        {
+            Selected = kind == "seg" ? id : null; SelectedCut = kind == "cut" ? id : null;
+            SelectedVoice = kind == "voice" ? id : null; SelectedCaption = kind == "cap" ? id : null;
+            Picking = false;
+            Changed?.Invoke();
+        }
         public bool Picking;                  // 正在「在预览上点一下设固定位置」
         public double Time;                   // 播放头（秒，素材时间）
         public bool Playing;
@@ -67,7 +78,7 @@ namespace ScreenRecorder
         public string OutPath;
         public ExportOptions ExportOpt = ExportOptions.Load(Settings.GetString("exportOptions", ""));
         CancellationTokenSource exportCancel;
-        readonly Button optBtn = new Button(), cancelBtn = new Button(), cutBtn = new Button();
+        readonly Button optBtn = new Button(), cancelBtn = new Button(), cutBtn = new Button(), voiceBtn = new Button(), capBtn = new Button();
 
         // 打开一个素材夹（Studio 录完、或主窗口「打开 Studio 素材…」）
         public static StudioEditor Open(string dir, string outPath = null)
@@ -140,7 +151,7 @@ namespace ScreenRecorder
             Flat(openBtn, L("打开", "Open"), (s, e) => { if (exported != null) Shell(exported); }); openBtn.Visible = false;
             Flat(showBtn, L("在资源管理器中显示", "Show in Explorer"), (s, e) => { if (exported != null) try { Process.Start("explorer.exe", $"/select,\"{exported}\""); } catch { } }); showBtn.Visible = false;
             Primary(exportBtn, L("导出", "Export"), (s, e) => Export());
-            Flat(cancelBtn, L("取消", "Cancel"), (s, e) => exportCancel?.Cancel()); cancelBtn.Visible = false;
+            Flat(cancelBtn, L("取消", "Cancel"), (s, e) => { exportCancel?.Cancel(); taskCancel?.Cancel(); }); cancelBtn.Visible = false;
             Flat(optBtn, "⚙ " + ExportOpt.Summary(L), (s, e) => ShowExportMenu());
             tips.SetToolTip(optBtn, L("导出设置：分辨率、帧率、画质、视频 / GIF、导出后复制到剪贴板", "Export settings: resolution, frame rate, quality, video / GIF, copy to clipboard"));
             right.Controls.AddRange(new Control[] { exportBar, exportStatus, cancelBtn, openBtn, showBtn, optBtn, exportBtn });
@@ -149,12 +160,14 @@ namespace ScreenRecorder
 
             // 左边：预览 / 播放栏 / 属性条 / 时间轴
             var left = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Window };
-            var tlArea = new Panel { Dock = DockStyle.Bottom, Height = 204, Padding = new Padding(14, 8, 14, 10), BackColor = Theme.Window };
+            var tlArea = new Panel { Dock = DockStyle.Bottom, Height = 248, Padding = new Padding(14, 8, 14, 10), BackColor = Theme.Window };
             Timeline.Dock = DockStyle.Fill;
             inspector.Dock = DockStyle.Top; inspector.Height = 34; inspector.Visible = false;
             cutInspector.Dock = DockStyle.Top; cutInspector.Height = 34; cutInspector.Visible = false;
-            BuildInspector(); BuildCutInspector();
-            tlArea.Controls.Add(Timeline); tlArea.Controls.Add(inspector); tlArea.Controls.Add(cutInspector);
+            voiceInspector.Dock = DockStyle.Top; voiceInspector.Height = 34; voiceInspector.Visible = false;
+            capInspector.Dock = DockStyle.Top; capInspector.Height = 34; capInspector.Visible = false;
+            BuildInspector(); BuildCutInspector(); BuildVoiceInspector(); BuildCaptionInspector();
+            tlArea.Controls.Add(Timeline); tlArea.Controls.Add(inspector); tlArea.Controls.Add(cutInspector); tlArea.Controls.Add(voiceInspector); tlArea.Controls.Add(capInspector);
             var barLine2 = new Panel { Dock = DockStyle.Bottom, Height = 1, BackColor = Theme.Line };
             var bar = new Panel { Dock = DockStyle.Bottom, Height = 50, Padding = new Padding(14, 7, 14, 7), BackColor = Theme.Window };
             BuildControlBar(bar);
@@ -174,14 +187,18 @@ namespace ScreenRecorder
             var leftTools = new FlowLayoutPanel { Dock = DockStyle.Left, AutoSize = true, WrapContents = false, Padding = new Padding(0), Margin = new Padding(0) };
             Flat(zoomBtn, "⊕ " + L("推近", "Zoom"), (s, e) => AddSegment(Time));
             tips.SetToolTip(zoomBtn, L("在播放头处新加一段推近（镜头放大凑近看）；也可以在时间轴空白处双击", "Add a zoom-in at the playhead; you can also double-click empty space on the timeline"));
-            Flat(autoBtn, "✦ " + L("重新自动生成", "Auto-Generate"), (s, e) => Regenerate());
+            Flat(autoBtn, "✦", (s, e) => Regenerate()); autoBtn.Width = 34;
             tips.SetToolTip(autoBtn, L("按录制时的点击和打字重新排推近段（会替换现在的段，可以撤销 Ctrl+Z）", "Rebuild zooms from your clicks and typing (replaces the current zooms; undo with Ctrl+Z)"));
             Flat(undoBtn, "↶", (s, e) => Undo()); tips.SetToolTip(undoBtn, L("撤销上一步（Ctrl+Z）", "Undo the last change (Ctrl+Z)"));
             Flat(redoBtn, "↷", (s, e) => Redo()); tips.SetToolTip(redoBtn, L("重做刚撤销的那步（Ctrl+Y）", "Redo what you just undid (Ctrl+Y)"));
             foreach (var b in new[] { undoBtn, redoBtn }) { b.Width = 34; b.Font = new Font(Font.FontFamily, Font.Size + 2); }
             Flat(cutBtn, "✂ " + L("剪掉", "Cut"), (s, e) => AddCut(Time));
             tips.SetToolTip(cutBtn, L("在播放头处放一段「剪掉」（红色斜纹）：拖两头改范围，选中后可以改成快放 2× / 4× / 8×", "Put a cut at the playhead (red stripes): drag its ends; select it to switch to speed-up 2× / 4× / 8×"));
-            leftTools.Controls.AddRange(new Control[] { zoomBtn, cutBtn, autoBtn, undoBtn, redoBtn });
+            Flat(voiceBtn, "🎙 " + L("录讲解", "Voice-over"), (s, e) => ToggleVoice());
+            tips.SetToolTip(voiceBtn, L("从播放头开始边放边录你的声音（麦克风）；再点一下、空格或 Esc 停。录好的在时间轴「讲解」轨", "Plays from the playhead while recording your microphone; click again, Space or Esc to stop. It goes on the Voice-over lane"));
+            Flat(capBtn, "字 " + L("字幕", "Captions"), (s, e) => ShowCaptionMenu());
+            tips.SetToolTip(capBtn, L("把说的话自动变成字幕（在本机识别，不上传）；也能导出 .srt", "Turn speech into captions (recognized on this PC, nothing uploaded); export .srt"));
+            leftTools.Controls.AddRange(new Control[] { zoomBtn, cutBtn, voiceBtn, capBtn });
 
             var rightTools = new FlowLayoutPanel { Dock = DockStyle.Right, AutoSize = true, WrapContents = false, Padding = new Padding(0), Margin = new Padding(0) };
             Flat(tlMinus, "−", (s, e) => SetTimelineScale(Timeline.Scale / 1.5, null)); tlMinus.Width = 30;
@@ -191,7 +208,7 @@ namespace ScreenRecorder
             var tlTip = L("时间轴缩放（只改时间轴的显示，不影响成片）：也可以在时间轴上按住 Ctrl 滚动滚轮、或触控板双指捏合；放大后滚轮或双指左右滑翻看",
                           "Timeline zoom (display only): hold Ctrl and scroll on the timeline, or pinch on a touchpad; when zoomed in, scroll or swipe sideways to move along");
             foreach (Control c in new Control[] { tlMinus, tlScale, tlPlus }) tips.SetToolTip(c, tlTip);
-            rightTools.Controls.AddRange(new Control[] { tlMinus, tlScale, tlPlus });
+            rightTools.Controls.AddRange(new Control[] { autoBtn, undoBtn, redoBtn, tlMinus, tlScale, tlPlus });
 
             // 正中：圆形播放键 + 时间（按整条居中）
             var center = new Panel { Width = 290, Height = 36, BackColor = Theme.Window };
@@ -307,6 +324,7 @@ namespace ScreenRecorder
                 double d = cut.End - cut.Start;
                 cutLen.Text = cut.Speed ? L($"{d:0.0} 秒 → {d / cut.Rate:0.0} 秒", $"{d:0.0}s → {d / cut.Rate:0.0}s") : L($"成片少 {d:0.0} 秒", $"{d:0.0}s removed");
             }
+            SyncVoiceCaption();
             optBtn.Text = "⚙ " + ExportOpt.Summary(L);
             playBtn.Invalidate();
             tlMinus.Enabled = Timeline.Scale > 1.001; tlPlus.Enabled = Timeline.Scale < 7.999;
@@ -324,7 +342,7 @@ namespace ScreenRecorder
                 insPick.Text = Picking ? L("点画面…", "Click the picture…") : L("选位置", "Set Position");
             }
             preview.Picking = Picking;
-            preview.Hint = Picking ? L("在画面上点一下，设成这段推近盯住的位置（Esc 取消）", "Click the picture to set where this zoom looks (Esc to cancel)") : null;
+            preview.Hint = Picking ? L("在画面上点一下，设成这段推近盯住的位置（Esc 取消）", "Click the picture to set where this zoom looks (Esc to cancel)") : voiceHint;
             preview.Invalidate();
             Timeline.Invalidate();
             style.Sync();
@@ -411,8 +429,7 @@ namespace ScreenRecorder
             if (m.At(t, out var mx, out var my, out _)) { fx = mx / Track.Width; fy = 1 - my / Track.Height; }
             var seg = new ZoomSegment { Start = s0, End = e0, FixedX = fx, FixedY = fy };
             Edit(p => { p.Segments.Add(seg); p.Segments = p.Segments.OrderBy(x => x.Start).ToList(); });
-            Selected = seg.Id; SelectedCut = null;
-            Changed?.Invoke();
+            Select("seg", seg.Id);
         }
 
         // ---- 剪掉 / 快放 ----
@@ -439,12 +456,13 @@ namespace ScreenRecorder
             s0 = Math.Max(lo, e0 - len);
             var c0 = new CutSegment { Start = s0, End = e0 };
             Edit(p => { p.Cuts.Add(c0); p.Cuts = p.Cuts.OrderBy(x => x.Start).ToList(); });
-            SelectedCut = c0.Id; Selected = null; Picking = false;
-            Changed?.Invoke();
+            Select("cut", c0.Id);
         }
 
         public void DeleteSelected()
         {
+            if (SelectedVoice != null) { var vid = SelectedVoice; Edit(p => p.Voiceovers.RemoveAll(v => v.Id == vid)); Select(null, null); return; }
+            if (SelectedCaption != null) { var kid = SelectedCaption; Edit(p => p.Captions.RemoveAll(c => c.Id == kid)); Select(null, null); return; }
             if (SelectedCut != null)
             {
                 var cid = SelectedCut;
@@ -524,6 +542,7 @@ namespace ScreenRecorder
             var bd = bmp.LockBits(new Rectangle(0, 0, CW, CH), ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
             for (int y = 0; y < CH; y++) Marshal.Copy(dst, y * CW * 4, bd.Scan0 + y * bd.Stride, CW * 4);
             bmp.UnlockBits(bd);
+            DrawCaption(bmp, t);
             if (InvokeRequired) { try { BeginInvoke((Action)(() => SetShown(bmp))); } catch { bmp.Dispose(); } }
             else SetShown(bmp);
         }
@@ -577,7 +596,7 @@ namespace ScreenRecorder
         readonly System.Windows.Forms.Timer audioTimer = new System.Windows.Forms.Timer { Interval = 400 };
 
         static string AudioSig(StudioProject p) =>
-            p.Audio.ToJson() + "|" + string.Join(";", p.Cuts.Select(c => $"{c.Start:R},{c.End:R},{c.Speed},{c.Rate:R}")) + "|" + p.TrimStart.ToString("R") + "," + p.TrimEnd.ToString("R") + "|" + p.Look.ClickSound + p.Look.ClickStyle;
+            p.Audio.ToJson() + "|" + string.Join(";", p.Voiceovers.Select(v => $"{v.File},{v.Start:R},{v.TrimIn:R},{v.TrimOut:R},{v.Volume:R}")) + "|" + string.Join(";", p.Cuts.Select(c => $"{c.Start:R},{c.End:R},{c.Speed},{c.Rate:R}")) + "|" + p.TrimStart.ToString("R") + "," + p.TrimEnd.ToString("R") + "|" + p.Look.ClickSound + p.Look.ClickStyle;
 
         // 预览声音过期了（改了音量、剪辑、修剪、点击声）：后台重做一份，做好换上
         void StartAudioPrep()
@@ -612,15 +631,15 @@ namespace ScreenRecorder
             StartPlayback(Time);
         }
 
-        void StartPlayback(double t0)
+        void StartPlayback(double t0, bool audio = true)
         {
-            StopPlayback();
+            StopPlayback(true);
             var map = new TimeMap(Project);
             // 播放头落在剪掉段里：从剪掉段的终点开始
             if (map.At(t0) is TimeMap.Piece pc && pc.Rate == 0) t0 = pc.End;
             Playing = true; stopPlay = false;
             Changed?.Invoke();
-            if (audioWav != null) Mci.Play(audioWav, map.Out(t0) - Project.TrimStart);
+            if (audioWav != null && audio) Mci.Play(audioWav, map.Out(t0) - Project.TrimStart);
             var spans = map.Spans(t0, Project.TrimEnd);
             double o0 = map.Out(t0);
             playThread = new Thread(() => PlayLoop(spans, map, o0)) { IsBackground = true, Name = "studio-preview" };
@@ -661,8 +680,10 @@ namespace ScreenRecorder
             try { BeginInvoke((Action)(() => { if (!stopPlay) { StopPlayback(); if (Time >= end - 0.1) Time = end; Changed?.Invoke(); } })); } catch { }
         }
 
-        void StopPlayback()
+        void StopPlayback(bool restarting = false)
         {
+            // 放完了 / 被停了：正在录讲解的话一起停（重新开始播放时不算）
+            if (!restarting && mic != null) { BeginInvoke((Action)StopVoice); }
             stopPlay = true;
             Playing = false;
             Mci.Stop();
@@ -696,7 +717,7 @@ namespace ScreenRecorder
 
         public void Export()
         {
-            if (exporting) return;
+            if (exporting || capBusy || RecordingVoice) return;
             saveTimer.Stop(); SaveNow();
             exporting = true; exported = null;
             exportBtn.Enabled = false; optBtn.Enabled = false; exportBar.Visible = true; exportBar.Value = 0; cancelBtn.Visible = true;
@@ -780,19 +801,24 @@ namespace ScreenRecorder
             if (ActiveControl is TextBox) return base.ProcessCmdKey(ref msg, keyData);
             switch (keyData)
             {
-                case Keys.Space: TogglePlay(); return true;
+                case Keys.Space: if (RecordingVoice || countdownLeft > 0) { ToggleVoice(); return true; } TogglePlay(); return true;
                 case Keys.Left: Step(-1); return true;
                 case Keys.Right: Step(1); return true;
                 case Keys.Control | Keys.Z: Undo(); return true;
                 case Keys.Control | Keys.Y: case Keys.Control | Keys.Shift | Keys.Z: Redo(); return true;
-                case Keys.Delete: case Keys.Back: if (Selected != null || SelectedCut != null) { DeleteSelected(); return true; } break;
-                case Keys.Escape: if (Picking) { Picking = false; Changed?.Invoke(); return true; } if (Selected != null || SelectedCut != null) { Selected = null; SelectedCut = null; Changed?.Invoke(); return true; } break;
+                case Keys.Delete: case Keys.Back: if (Selected != null || SelectedCut != null || SelectedVoice != null || SelectedCaption != null) { DeleteSelected(); return true; } break;
+                case Keys.Escape:
+                    if (RecordingVoice || countdownLeft > 0) { ToggleVoice(); return true; }
+                    if (Picking) { Picking = false; Changed?.Invoke(); return true; }
+                    if (Selected != null || SelectedCut != null || SelectedVoice != null || SelectedCaption != null) { Select(null, null); return true; } break;
             }
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            if (RecordingVoice) StopVoice();
+            taskCancel?.Cancel();
             if (exporting && e.CloseReason == CloseReason.UserClosing)
             {
                 exportStatus.Text = L("正在导出，等它做完再关", "Still exporting, close it when it's done");

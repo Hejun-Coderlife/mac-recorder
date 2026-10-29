@@ -28,6 +28,16 @@ jobs:
           Invoke-WebRequest $asset.browser_download_url -OutFile ff.zip
           Expand-Archive ff.zip -DestinationPath ff
           $ffdir = (Get-ChildItem ff -Directory | Select-Object -First 1).FullName
+          # 字幕的语音识别：whisper.cpp 的 Windows 64 位 CPU 版（MIT），取最近一个带 whisper-bin-x64.zip 的发布
+          $wrels = Invoke-RestMethod "https://api.github.com/repos/ggml-org/whisper.cpp/releases?per_page=20" -Headers @{ Authorization = "Bearer ${{ github.token }}" }
+          $wasset = $wrels | ForEach-Object { $_.assets } | Where-Object { $_.name -eq "whisper-bin-x64.zip" } | Select-Object -First 1
+          if (-not $wasset) { throw "no whisper-bin-x64.zip found" }
+          Write-Host "whisper: $($wasset.browser_download_url)"
+          Invoke-WebRequest $wasset.browser_download_url -OutFile whisper.zip
+          Expand-Archive whisper.zip -DestinationPath whisper
+          $wcli = Get-ChildItem whisper -Recurse -Filter whisper-cli.exe | Select-Object -First 1
+          if (-not $wcli) { throw "whisper-cli.exe not in the zip" }
+          Get-ChildItem $wcli.DirectoryName | Format-Table Name, Length
           # 录制引擎 + VC++ 运行库（ScreenRecorderLib 是 C++/CLI）+ ffmpeg 和它的许可证，各压成 .gz（7-Zip 最高压缩）嵌进 exe
           $files = @{
             "ScreenRecorderLib.dll" = "$out/ScreenRecorderLib.dll"
@@ -38,6 +48,10 @@ jobs:
             "ffmpeg.exe" = "$ffdir/bin/ffmpeg.exe"
             "ffmpeg-LICENSE.txt" = "$ffdir/LICENSE.txt"
           }
+          # whisper-cli.exe 和它旁边的 dll（whisper.dll、ggml*.dll…）+ 许可证
+          $files["whisper-cli.exe"] = $wcli.FullName
+          foreach ($d in Get-ChildItem "$($wcli.DirectoryName)/*.dll") { $files[$d.Name] = $d.FullName }
+          $files["whisper.cpp-LICENSE.txt"] = "windows/licenses/whisper.cpp-LICENSE.txt"
           # Studio 显卡合成（Vortice D3D11）和它依赖的托管 dll，也嵌进去
           foreach ($d in Get-ChildItem "$out/*.dll") { if ($d.Name -ne "ScreenRecorderLib.dll") { $files[$d.Name] = $d.FullName } }
           New-Item -ItemType Directory -Force windows/embed | Out-Null
@@ -96,7 +110,7 @@ jobs:
           Write-Host "runtime dirs: $($rt.Name -join ', ')"
           if ($rt.Count -ne 1) { throw "expected exactly one runtime dir" }
           Get-ChildItem $rt[0].FullName -Force | Format-Table Name, Length
-          foreach ($f in ".complete", "ScreenRecorderLib.dll", "vcruntime140.dll", "ffmpeg.exe", "ffmpeg-LICENSE.txt") { if (!(Test-Path (Join-Path $rt[0].FullName $f))) { throw "runtime missing $f" } }
+          foreach ($f in ".complete", "ScreenRecorderLib.dll", "vcruntime140.dll", "ffmpeg.exe", "ffmpeg-LICENSE.txt", "whisper-cli.exe", "whisper.cpp-LICENSE.txt") { if (!(Test-Path (Join-Path $rt[0].FullName $f))) { throw "runtime missing $f" } }
           $top = (Get-ChildItem $solo -Force | ForEach-Object Name) -join '|'
           if ($top -ne '录屏.exe') { throw "app folder should stay clean: $top" }
 
@@ -509,6 +523,46 @@ jobs:
           Write-Host "cancel: exit=$($p.ExitCode) $res"
           if ($p.ExitCode -ne 0 -or -not $res.StartsWith("CANCELLED") -or (Test-Path (Join-Path $root "cancel.mp4"))) { throw "cancel did not stop / clean up" }
           Get-ChildItem $root -File | Format-Table Name, Length
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/whisper-model
+          key: whisper-ggml-base-60ed5bc3
+
+      - name: W2 - voice-over rules / export timing / ducking / volume, captions rules / burn-in, noise reduction, whisper (model download + real recognition)
+        run: |
+          foreach ($k in "AUTOTEST", "AUTOSTUDIO", "AUTOINPUT", "AUTOAUDIO", "AUTOOUT", "STUDIO_COMPOSE", "STUDIO_ENCODER", "STUDIO") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $cache = Join-Path $env:RUNNER_TEMP "whisper-model"; $models = Join-Path $env:LOCALAPPDATA "录屏\models"
+          New-Item -ItemType Directory -Force $models | Out-Null
+          if (Test-Path "$cache\ggml-base.bin") { Copy-Item "$cache\ggml-base.bin" $models; Write-Host "model from cache" } else { Write-Host "no cached model: the app downloads it" }
+          $work = Join-Path $env:RUNNER_TEMP "studio/w2"; New-Item -ItemType Directory -Force $work | Out-Null
+          $env:W2TEST = $work; $env:W2SPEECH = (Resolve-Path windows/tests/zh-speech.wav).Path; $env:W2WHISPER = "1"
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          Remove-Item env:W2TEST
+          $txt = Get-Content "$env:TEMP\w2_test.txt" -Raw
+          Write-Host "exit=$($p.ExitCode) wall=$([int]$sw.Elapsed.TotalSeconds)s"
+          Write-Host $txt
+          if (Test-Path "$models\ggml-base.bin") { New-Item -ItemType Directory -Force $cache | Out-Null; Copy-Item "$models\ggml-base.bin" $cache -Force }
+          if ($p.ExitCode -ne 0 -or -not $txt.StartsWith("OK")) { throw "W2 tests failed" }
+
+      - name: W2 - editor - record a voice-over (injected microphone), second take splits the first, Esc stops, captions from the voice-over, edit, export; screenshots
+        run: |
+          $proj = Join-Path $env:RUNNER_TEMP "studio/project"; $copy = Join-Path $env:RUNNER_TEMP "studio/voiceui"
+          Remove-Item $copy -Recurse -Force -ErrorAction SilentlyContinue; Copy-Item $proj $copy -Recurse
+          $shots = Join-Path $env:RUNNER_TEMP "studio/editor"; New-Item -ItemType Directory -Force $shots | Out-Null
+          $env:VOICEUITEST = $copy; $env:VOICE_INJECT = (Resolve-Path windows/tests/zh-speech.wav).Path; $env:VOICE_NOCOUNTDOWN = "1"; $env:W2WHISPER = "1"; $env:VOICEUI_SHOTS = $shots; $env:APP_LANG = "zh"
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          foreach ($k in "VOICEUITEST", "VOICE_INJECT", "VOICE_NOCOUNTDOWN", "W2WHISPER", "VOICEUI_SHOTS", "APP_LANG") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $txt = Get-Content "$env:TEMP\voiceui_test.txt" -Raw
+          Write-Host "exit=$($p.ExitCode)`n$txt"
+          Get-ChildItem "$env:TEMP\voiceui-export*.mp4" -ErrorAction SilentlyContinue | Copy-Item -Destination (Join-Path $env:RUNNER_TEMP "studio")
+          if (Test-Path "$copy\project.json") { Copy-Item "$copy\project.json" (Join-Path $shots "project-after-voiceui.json") }
+          if ($p.ExitCode -ne 0 -or -not $txt.StartsWith("OK")) { throw "voice-over / captions editor test failed" }
+          # 英文界面也截一张（讲解轨 + 字幕轨 + 字幕样式）
+          $env:EDITOR = $copy; $env:EDITORSHOT = (Join-Path $shots "voice-captions-en.png"); $env:APP_LANG = "en"
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          foreach ($k in "EDITOR", "EDITORSHOT", "APP_LANG") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
 
       - name: Main window - recent Studio footage list
         run: |

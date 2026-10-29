@@ -172,21 +172,31 @@ namespace ScreenRecorder
         public CutSegment Clone() { var c = (CutSegment)MemberwiseClone(); c.Extra = new Dictionary<string, object>(Extra); return c; }
     }
 
-    // 声音：录到的电脑声音 / 麦克风各自的音量（0–2）、点击声音量、一键静音录到的声音；格式同 Mac 版 AudioSettings
+    // 声音：录到的电脑声音 / 麦克风各自的音量（0–2）、点击声音量、一键静音录到的声音；
+    // 讲解总音量、讲解时压低原声音、降噪（麦克风和讲解；电脑声音可选）。格式同 Mac 版 AudioSettings
     sealed class AudioSettings
     {
-        public double System = 1, Mic = 1, Clicks = 1;
+        public double System = 1, Mic = 1, Clicks = 1, Voice = 1;
         public bool Muted;
-        public Dictionary<string, object> Extra = new Dictionary<string, object>();   // Mac 的讲解音量、压低、降噪……原样留着
+        public bool Duck = true;               // 有讲解的地方把原声音压低（约 -12 dB）
+        public string Denoise = "off";         // off / light / medium / strong
+        public bool DenoiseSystem;             // 电脑声音也降噪（默认不动：音乐、视频里的声音会被当成杂音削掉）
+        public Dictionary<string, object> Extra = new Dictionary<string, object>();
+        static readonly string[] Known = { "system", "mic", "clicks", "muted", "voice", "duck", "denoise", "denoiseSystem" };
         public static AudioSettings From(Dictionary<string, object> o)
         {
             var a = new AudioSettings(); if (o == null) return a;
             var j = new JsonR(o);
             a.System = j.Num("system", 1); a.Mic = j.Num("mic", 1); a.Clicks = j.Num("clicks", 1); a.Muted = j.Bool("muted", false);
-            a.Extra = JsonR.Unknown(o, new[] { "system", "mic", "clicks", "muted" });
+            a.Voice = j.Num("voice", 1); a.Duck = j.Bool("duck", true); a.Denoise = j.Str("denoise", "off", ScreenRecorder.Denoise.Levels); a.DenoiseSystem = j.Bool("denoiseSystem", false);
+            a.Extra = JsonR.Unknown(o, Known);
             return a;
         }
-        public void Write(JsonW w) { w.Begin(); w.Num("clicks", Clicks); w.Num("mic", Mic); w.Bool("muted", Muted); w.Num("system", System); w.Extra(Extra); w.End(); }
+        public void Write(JsonW w)
+        {
+            w.Begin(); w.Num("clicks", Clicks); w.Str("denoise", Denoise); w.Bool("denoiseSystem", DenoiseSystem); w.Bool("duck", Duck);
+            w.Num("mic", Mic); w.Bool("muted", Muted); w.Num("system", System); w.Num("voice", Voice); w.Extra(Extra); w.End();
+        }
         public string ToJson() { var w = new JsonW(); Write(w); return w.ToString(); }
     }
 
@@ -199,9 +209,12 @@ namespace ScreenRecorder
         public bool SegmentsEdited;            // 推近段手动改过：以后自动规则变了也不重算；没改过的打开时按最新规则重排
         public List<CutSegment> Cuts = new List<CutSegment>();   // 中间剪掉 / 快放
         public AudioSettings Audio = new AudioSettings();
-        // Mac 版有、Windows 还没有的（讲解、字幕、摄像头、遮挡、标注、背景音乐……）：原样留着，存回去不丢
+        public List<VoiceClip> Voiceovers = new List<VoiceClip>();   // 后来录的讲解
+        public List<Caption> Captions = new List<Caption>();         // 字幕（素材时间）
+        public CaptionStyle CaptionStyle = new CaptionStyle();
+        // Mac 版有、Windows 还没有的（摄像头、遮挡、标注、背景音乐……）：原样留着，存回去不丢
         public Dictionary<string, object> Extra = new Dictionary<string, object>();
-        static readonly string[] Known = { "look", "segments", "segmentsEdited", "trimEnd", "trimStart", "cuts", "audio" };
+        static readonly string[] Known = { "look", "segments", "segmentsEdited", "trimEnd", "trimStart", "cuts", "audio", "voiceovers", "captions", "captionStyle" };
 
         public StudioProject Clone() => FromJson(ToJson());
         public bool Same(StudioProject o) => o != null && ToJson() == o.ToJson();
@@ -215,6 +228,8 @@ namespace ScreenRecorder
             var w = new JsonW(pretty: true);
             w.Begin();
             w.Key_("audio"); Audio.Write(w);
+            w.BeginArray("captions"); foreach (var c in Captions) c.Write(w); w.EndArray();
+            w.Raw("captionStyle", CaptionStyle.ToJson());
             w.BeginArray("cuts");
             foreach (var c in Cuts) { w.BeginItem(); w.Num("end", c.End); w.Str("id", c.Id); w.Str("mode", c.Speed ? "speed" : "cut"); w.Num("rate", c.Rate); w.Num("start", c.Start); w.Extra(c.Extra); w.End(); }
             w.EndArray();
@@ -222,6 +237,7 @@ namespace ScreenRecorder
             w.BeginArray("segments"); foreach (var s in Segments) WriteSeg(w, s); w.EndArray();
             w.Bool("segmentsEdited", SegmentsEdited);
             w.Num("trimEnd", TrimEnd); w.Num("trimStart", TrimStart);
+            w.BeginArray("voiceovers"); foreach (var v in Voiceovers) v.Write(w); w.EndArray();
             w.Extra(Extra);
             w.End();
             return w.ToString();
@@ -268,6 +284,9 @@ namespace ScreenRecorder
                     });
                 }
             p.Audio = AudioSettings.From(o.TryGetValue("audio", out var av) ? av as Dictionary<string, object> : null);
+            if (o.TryGetValue("voiceovers", out var vv) && vv is List<object> vs) p.Voiceovers = vs.OfType<Dictionary<string, object>>().Select(VoiceClip.From).ToList();
+            if (o.TryGetValue("captions", out var cv2) && cv2 is List<object> cs) p.Captions = cs.OfType<Dictionary<string, object>>().Select(Caption.From).OrderBy(c => c.Start).ToList();
+            p.CaptionStyle = CaptionStyle.From(o.TryGetValue("captionStyle", out var csv) ? csv as Dictionary<string, object> : null);
             p.Extra = JsonR.Unknown(o, Known);
             return p;
         }

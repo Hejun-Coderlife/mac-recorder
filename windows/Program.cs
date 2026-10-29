@@ -62,8 +62,9 @@ namespace ScreenRecorder
         static int Main()
         {
             Runtime.Prepare();
-            if (Runtime.Dir != null) Studio.Locate = Runtime.FfmpegPath;
+            if (Runtime.Dir != null) { Studio.Locate = Runtime.FfmpegPath; Whisper.Locate = () => Path.Combine(Runtime.Dir, "whisper-cli.exe"); }
             else UseLibFolder();
+            App2.Lang = L;
             return Run();   // 分开写：Main 里不能直接碰到引用 ScreenRecorderLib 的类型，否则还没装好 AssemblyResolve 就去找 dll 了
         }
 
@@ -90,6 +91,8 @@ namespace ScreenRecorder
             Studio.GpuFactory = (lay, cpu, info) => GpuComposer.TryCreate(lay, cpu, info, Environment.GetEnvironmentVariable("STUDIO_COMPOSE") == "gpu");
             if (Environment.GetEnvironmentVariable("STUDIO") != null) return SelfTest.RenderOnly();
             if (Environment.GetEnvironmentVariable("STUDIOTESTS") != null) return SelfTestEditor.Core();
+            if (Environment.GetEnvironmentVariable("W2TEST") != null) return SelfTestW2.Run();
+            if (Environment.GetEnvironmentVariable("VOICEUITEST") != null) return SelfTestW2.VoiceUi();
             if (Environment.GetEnvironmentVariable("EDITORSHOT") != null) return SelfTestEditor.Shot();
             if (Environment.GetEnvironmentVariable("EDITORTEST") != null) return SelfTestEditor.Interactive();
             if (Environment.GetEnvironmentVariable("COUNTDOWNSHOT") != null) return SelfTestEditor.Countdown();
