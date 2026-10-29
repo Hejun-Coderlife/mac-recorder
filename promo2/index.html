@@ -1,0 +1,558 @@
+<!doctype html>
+<!-- 录屏介绍视频（2026-10-29 版，横屏 1920×1080，给不懂技术的人看）。逐帧动画：PROMO.frame(t) 画任意一帧（返回 Promise，图片加载完才算画好）
+     剪辑窗口 = 真截图做底（img/*.png，录屏.app 的 EDITORSHOT 中文浅色离屏截图）+ 下半部分（选中段属性条、时间轴）按真截图 1:1 重画好让它能动，
+     预览区 = 真导出的成片逐帧（frames/<名>/<帧号>.jpg，由 record.mjs 按需从 /tmp/rd/states/<名>.mp4 抽出来），右边样式面板 = 各状态的真截图
+     主窗口、Windows 截图那段、开头结尾卡是按软件界面重画的。每段多长由旁白决定（voice/voice.js，voice.mjs 生成） -->
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>录屏介绍视频</title>
+<script src="voice/voice.js" onerror="window.VOICE = null"></script>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #f5f5f7; font-family: -apple-system, "PingFang SC", sans-serif; color: #1d1d1f; -webkit-font-smoothing: antialiased; }
+  .scene { position: absolute; inset: 0; opacity: 0; }
+  /* 开头 / 结尾 */
+  .card { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0; }
+  .card img { width: 300px; height: 300px; }
+  .card h1 { margin: 10px 0 0; font-size: 92px; font-weight: 700; letter-spacing: 4px; }
+  .card p { margin: 18px 0 0; font-size: 34px; color: #6e6e73; letter-spacing: 1px; }
+  .card .os { display: flex; gap: 18px; margin-top: 34px; }
+  .card .os span { font-size: 26px; padding: 10px 26px; border-radius: 30px; background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,.06); color: #333; }
+
+  /* ---- 主窗口（按 Recorder.swift 的 ContentView 重画，macOS 浅色）---- */
+  .mac { position: absolute; width: 640px; height: 520px; background: #fff; border-radius: 12px; overflow: hidden;
+         box-shadow: 0 0 0 .5px rgba(0,0,0,.2), 0 30px 80px rgba(0,0,0,.18); font-size: 13px; }
+  .mac .tb { height: 32px; display: flex; align-items: center; justify-content: center; font-weight: 600; color: #444; font-size: 13px; position: relative; }
+  .lights { position: absolute; left: 12px; top: 10px; display: flex; gap: 8px; }
+  .lights i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+  .mac .bd { padding: 4px 18px 18px; }
+  .row { display: flex; align-items: center; gap: 10px; }
+  .btn { padding: 3px 10px; border-radius: 6px; background: #fff; box-shadow: 0 0 0 .5px rgba(0,0,0,.18), 0 1px 1px rgba(0,0,0,.06); font-size: 13px; white-space: nowrap; }
+  .list { margin-top: 12px; border: 1px solid #e3e3e3; border-radius: 8px; height: 214px; padding: 6px; }
+  .src { display: flex; gap: 10px; align-items: center; padding: 6px 8px; border-radius: 6px; }
+  .src .ic { width: 20px; text-align: center; font-size: 15px; }
+  .src b { display: block; font-weight: 500; font-size: 13px; }
+  .src small { color: #86868b; font-size: 11px; }
+  .src.on { background: #0a64d8; color: #fff; } .src.on small { color: #dce8ff; }
+  .tg { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .ck { width: 14px; height: 14px; border-radius: 4px; border: 1px solid #c7c7cc; background: #fff; display: inline-flex; align-items: center; justify-content: center; }
+  .ck.on { background: #0a64d8; border-color: #0a64d8; }
+  .ck.on::after { content: ""; width: 7px; height: 4px; border-left: 2px solid #fff; border-bottom: 2px solid #fff; transform: translateY(-1px) rotate(-45deg); }
+  .seg { display: inline-flex; background: #e9e9eb; border-radius: 6px; padding: 2px; }
+  .seg span { padding: 2px 14px; border-radius: 5px; font-size: 12px; }
+  .seg span.on { background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.15); }
+  .rec { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 22px; border-radius: 8px; background: #0a64d8; color: #fff; font-weight: 600; font-size: 16px; min-width: 160px; justify-content: center; }
+  .rec.stop { background: #e5413a; }
+  .rec i { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #fff; display: inline-block; }
+  .rec.stop i { border-radius: 2px; background: #fff; }
+  .upd { margin-top: 10px; display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .upd .dl { width: 16px; height: 16px; border-radius: 50%; background: #0a64d8; color: #fff; font-size: 11px; display: flex; align-items: center; justify-content: center; }
+  /* 框选 / 倒计时 */
+  .dashbox { position: absolute; z-index: 5; border: 2px dashed #0a64d8; background: rgba(10,100,216,.06); border-radius: 4px; }
+  .count { position: absolute; left: 50%; top: 50%; width: 320px; height: 320px; margin: -160px 0 0 -160px; border-radius: 52px; z-index: 6; background: rgba(30,30,32,.78);
+           color: #fff; font-size: 200px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
+  .desk { position: absolute; inset: 0; background: linear-gradient(135deg, #dfe7f3, #eef1f6 60%, #e8e3ef); }
+
+  /* ---- 剪辑窗口：设计尺寸 1440×820（和截图一样），整体缩放 ---- */
+  #rig { position: absolute; left: 0; top: 0; width: 1440px; height: 820px; transform-origin: 0 0; }
+  #ed { position: absolute; inset: 0; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 0 0 .5px rgba(0,0,0,.18), 0 30px 90px rgba(0,0,0,.16); }
+  #ed > img.base { position: absolute; left: 0; top: 0; width: 1440px; height: 820px; }
+  .panel { position: absolute; left: 1140px; top: 30px; width: 300px; height: 790px; overflow: hidden; background: #fff; }
+  .panel img { position: absolute; left: -1140px; top: -30px; width: 1440px; height: 820px; }
+  #pv { position: absolute; left: 14px; top: 59px; width: 1111px; height: 507px; border-radius: 6px; overflow: hidden; background: #a1a1a1; }
+  #pv img { position: absolute; top: 0; height: 507px; }
+  .tpatch { position: absolute; left: 545px; top: 586px; width: 170px; height: 40px; background: #fff; }
+  .playbtn { position: absolute; left: 552.5px; top: 588.5px; width: 33px; height: 33px; border-radius: 50%; background: #3478f6; }
+  .playbtn::after { content: ""; position: absolute; left: 13px; top: 10px; border-left: 11px solid #fff; border-top: 6.5px solid transparent; border-bottom: 6.5px solid transparent; }
+  .playbtn.pause::after { left: 11px; top: 10.5px; width: 3.5px; height: 12px; background: #fff; border: 0; box-shadow: 7px 0 0 #fff; }
+  .ttext { position: absolute; left: 598px; top: 596px; font-size: 15.5px; color: #333; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #low { position: absolute; left: 0; top: 636px; width: 1139px; height: 184px; background: #fff; overflow: hidden; }
+  .prop { position: absolute; left: 0; top: 12px; height: 26px; width: 1139px; font-size: 14.5px; display: flex; align-items: center; }
+  .prop > * { position: absolute; white-space: nowrap; }
+  .sl { height: 4px; border-radius: 2px; background: #e3e3e3; }
+  .sl i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: #c9c9c9; }
+  .thumb { width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 .5px rgba(0,0,0,.25), 0 1px 3px rgba(0,0,0,.25); }
+  .sg { display: flex; border-radius: 6px; overflow: hidden; background: #ebebeb; font-size: 14.5px; }
+  .sg span { padding: 4px 10px; }
+  .sg span.on { background: #cdcdcd; }
+  .gbtn { padding: 4px 12px; border-radius: 6px; background: #ececec; font-size: 14.5px; }
+  .tl { position: absolute; left: 0; top: 50px; width: 1139px; height: 134px; border-top: 1px solid #e6e6e6; }
+  .tick { position: absolute; top: 0; width: 1px; height: 5px; background: #c8c8c8; }
+  .tlab { position: absolute; top: 8px; font-size: 11.5px; color: #8a8a8e; }
+  .dot { position: absolute; top: 29px; width: 3.5px; height: 3.5px; border-radius: 50%; background: #b0b0b4; }
+  .blk { position: absolute; top: 41px; height: 44px; border-radius: 6px; background: #a59df2; color: #fff; font-weight: 700; font-size: 13.5px; display: flex; align-items: center; justify-content: center; gap: 4px; }
+  .blk.sel { background: #7065eb; box-shadow: 0 0 0 1.5px #fff, 0 0 0 3px rgba(112,101,235,.25); }
+  .blk::before, .blk::after { content: ""; position: absolute; top: 15px; width: 2px; height: 14px; border-radius: 1px; background: rgba(255,255,255,.95); }
+  .blk::before { left: 5px; } .blk::after { right: 5px; }
+  .dim { position: absolute; top: 0; height: 134px; background: rgba(240,240,242,.75); }
+  .brk { position: absolute; top: 0; width: 9px; height: 120px; border: 3px solid #f7ce46; }
+  .brk.l { border-right: 0; } .brk.r { border-left: 0; }
+  .ph { position: absolute; top: 0; width: 1px; height: 120px; background: #222; }
+  .ph::before { content: ""; position: absolute; left: -5.5px; top: -1px; width: 12px; height: 14px; border-radius: 3px 3px 6px 6px; background: #2b2b2b; }
+  .menu { position: absolute; left: 1155px; top: 114px; width: 270px; background: rgba(250,250,252,.97); border-radius: 8px; padding: 5px; font-size: 14px;
+          box-shadow: 0 0 0 .5px rgba(0,0,0,.18), 0 10px 30px rgba(0,0,0,.2); }
+  .menu .h { font-size: 11.5px; color: #8a8a8e; padding: 5px 10px 3px; font-weight: 600; }
+  .menu .it { padding: 4px 10px 4px 24px; border-radius: 5px; position: relative; }
+  .menu .it.on { background: #0a64d8; color: #fff; }
+  .menu .it .ok { position: absolute; left: 8px; }
+  .menu .hint { padding: 4px 10px 6px 24px; color: #aaa; font-size: 12.5px; }
+  .menu hr { border: 0; border-top: 1px solid #e3e3e3; margin: 5px 6px; }
+  .exp { position: absolute; left: 1150px; top: 6px; width: 228px; height: 20px; display: flex; align-items: center; gap: 10px; font-size: 13px; color: #555; background: #fff; }
+  .exp .bar { flex: 1; height: 5px; border-radius: 3px; background: #e5e5e5; position: relative; overflow: hidden; }
+  .exp .bar i { position: absolute; left: 0; top: 0; bottom: 0; background: #3478f6; }
+  .hl { position: absolute; border: 3px solid #ff9f0a; border-radius: 10px; box-shadow: 0 0 0 9999px rgba(0,0,0,.22); }
+  .hlab { position: absolute; padding: 8px 18px; border-radius: 22px; background: #ff9f0a; color: #fff; font-weight: 700; font-size: 22px; white-space: nowrap; }
+  /* 鼠标 + 点击时的小圈 */
+  #cur { position: absolute; left: 0; top: 0; width: 26px; height: 36px; transform-origin: 2px 2px; z-index: 50; filter: drop-shadow(0 2px 3px rgba(0,0,0,.35)); }
+  .clk { position: absolute; width: 40px; height: 40px; margin: -20px 0 0 -20px; border-radius: 50%; border: 3px solid rgba(255,159,10,.9); z-index: 49; }
+  /* 成片展示 */
+  .show { position: absolute; border-radius: 14px; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.18); background: #ddd; }
+  .show img { width: 100%; height: 100%; display: block; }
+  .tag { position: absolute; font-size: 28px; font-weight: 700; color: #333; text-align: center; }
+  .bigtag { position: absolute; left: 0; right: 0; top: 46px; text-align: center; font-size: 40px; font-weight: 700; color: #222; }
+  /* Windows 截图 */
+  .win11 { position: absolute; inset: 0; background: linear-gradient(160deg, #cfe0f7, #e9eff8 55%, #dbe4f2); }
+  .taskbar { position: absolute; left: 0; right: 0; bottom: 0; height: 56px; background: rgba(243,246,251,.92); border-top: 1px solid #d8dde6; display: flex; align-items: center; justify-content: center; gap: 14px; }
+  .taskbar i { width: 34px; height: 34px; border-radius: 8px; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.12); display: block; }
+  .wwin { position: absolute; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 0 0 1px rgba(0,0,0,.08), 0 16px 40px rgba(0,0,0,.16); }
+  .wwin .wt { height: 34px; display: flex; align-items: center; padding: 0 14px; font-size: 14px; color: #333; border-bottom: 1px solid #eee; }
+  .wwin .wt span { margin-left: auto; letter-spacing: 18px; color: #888; }
+  .chat { background: #f2f2f2; }
+  .bub { position: absolute; padding: 10px 14px; border-radius: 8px; font-size: 16px; max-width: 300px; }
+  .bub.l { background: #fff; } .bub.r { background: #95ec69; }
+  .shade { position: absolute; inset: 0; background: rgba(0,0,0,.35); }
+  .selbox { position: absolute; border: 2px solid #fff; box-shadow: 0 0 0 9999px rgba(0,0,0,.35); }
+  .sz { position: absolute; padding: 3px 8px; border-radius: 4px; background: rgba(0,0,0,.7); color: #fff; font-size: 14px; }
+  .thumbnail { position: absolute; border-radius: 10px; overflow: hidden; box-shadow: 0 0 0 1px rgba(0,0,0,.1), 0 12px 30px rgba(0,0,0,.28); background-size: cover; }
+  .keycap { display: inline-block; padding: 6px 16px; margin: 0 6px; border-radius: 10px; background: #fff; box-shadow: 0 3px 0 #c9ced8, 0 0 0 1px #d6dbe4; font-size: 30px; font-weight: 600; }
+</style>
+</head>
+<body>
+<!-- 开头 -->
+<div class="scene card" id="sA"><img src="img/icon.png"><h1>录屏</h1><p>我自己做的录屏软件</p><div class="os"><span>Mac</span><span>Windows</span></div></div>
+
+<!-- 主窗口 -->
+<div class="scene" id="sM">
+  <div class="desk"></div>
+  <div class="dashbox" id="dash" style="display:none"></div>
+  <div class="mac" id="mac" style="left:448px;top:120px;transform:scale(1.6);transform-origin:0 0">
+    <div class="tb"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>录屏</div>
+    <div class="bd">
+      <div class="row"><b style="font-size:14px">录什么</b><span style="flex:1"></span><span class="btn" id="mArea">选区域…</span><span class="btn">刷新列表</span></div>
+      <div class="list">
+        <div class="src" id="m0"><span class="ic">🖥</span><div><b>整个屏幕</b><small>内建显示器 · 2880 × 1800</small></div></div>
+        <div class="src" id="m1"><span class="ic">▭</span><div><b>待办</b><small>待办 · 1440 × 900</small></div></div>
+        <div class="src" id="m2"><span class="ic">▭</span><div><b>备忘录</b><small>备忘录 · 1200 × 800</small></div></div>
+        <div class="src" id="m3" style="display:none"><span class="ic">⬚</span><div><b>框选的区域</b><small>1280 × 720</small></div></div>
+      </div>
+      <div class="row" style="gap:20px;margin-top:14px">
+        <span class="tg"><i class="ck on" id="ckA"></i>录电脑声音</span><span class="tg"><i class="ck" id="ckM"></i>录麦克风</span>
+        <span class="tg"><i class="ck on"></i>显示鼠标</span><span class="tg"><i class="ck" id="ckS"></i>Studio 效果</span>
+      </div>
+      <div class="row" style="gap:20px;margin-top:12px">
+        <span class="tg">倒计时 <span class="seg"><span id="cd0" class="on">关</span><span id="cd3">3 秒</span><span>5 秒</span></span></span>
+        <span class="tg"><i class="ck" id="ckI"></i>隐藏桌面图标</span>
+      </div>
+      <div class="row" style="margin-top:16px;gap:14px"><span class="rec" id="recBtn"><i></i><span id="recTxt">开始录制</span></span>
+        <span id="recTime" style="font-size:20px;font-variant-numeric:tabular-nums;display:none"><span style="color:#e5413a">●</span> 00:03</span>
+        <span style="flex:1"></span><span style="color:#86868b">⌥⌘R 开始 / 停止</span></div>
+      <div class="row" style="margin-top:14px;color:#86868b"><span>保存到：影片 / 录屏</span><span style="flex:1"></span><span class="btn" style="color:#1d1d1f">打开 Studio 素材…</span><span class="btn" style="color:#1d1d1f">打开文件夹</span></div>
+      <div class="upd" id="upd" style="opacity:0"><span class="dl">↓</span><span>新版本 v1.5 已下载，退出后自动换上</span><span style="flex:1"></span><span class="btn">更新说明</span><span class="btn">现在重启</span></div>
+    </div>
+  </div>
+  <div class="count" id="count" style="display:none">3</div>
+  <div class="bigtag" id="mTag"></div>
+</div>
+
+<!-- Studio：原样 vs 成片 -->
+<div class="scene" id="sS">
+  <div class="show" id="sRaw" style="left:60px;top:250px;width:880px;height:550px"><img src="img/raw7.jpg"></div>
+  <div class="tag" style="left:60px;width:880px;top:825px">录下来的样子</div>
+  <div class="show" id="sOut" style="left:980px;top:278px;width:880px;height:495px"><img id="sOutImg"></div>
+  <div class="tag" style="left:980px;width:880px;top:825px" id="sOutTag">打开 Studio 效果以后</div>
+</div>
+
+<!-- 剪辑窗口 -->
+<div class="scene" id="sE">
+  <div id="rig"><div id="ed">
+    <img class="base" src="img/tut.png">
+    <div class="panel"><img id="pnA" src="img/tut.png"></div>
+    <div class="panel" id="pnBw" style="opacity:0"><img id="pnB" src="img/tut.png"></div>
+    <div id="pv"><img id="pvA"><img id="pvB"></div>
+    <div class="tpatch"></div><div class="playbtn" id="pb"></div><div class="ttext" id="tt">0:11.4 / 0:33.0</div>
+    <div id="low"><div class="prop" id="prop"></div><div class="tl" id="tl"></div></div>
+    <div class="exp" id="exp" style="display:none"><span id="expT">正在导出 0%</span><div class="bar"><i id="expB"></i></div></div>
+    <div class="menu" id="menu" style="display:none">
+      <div class="h">内置</div>
+      <div class="it" id="mi0">透明背景（新录制默认）</div><div class="it" id="mi1">抖音竖屏</div><div class="it" id="mi2"><span class="ok">✓</span>教程横屏</div><div class="it" id="mi3">方形</div>
+      <hr><div class="h">我的预设</div><div class="hint">调好样式后点「存成预设…」就能存下来</div>
+    </div>
+    <div id="hls"></div>
+    <div class="clk" id="eclk" style="opacity:0"></div>
+    <svg id="ecur" viewBox="0 0 26 36" width="26" height="36" style="position:absolute;left:0;top:0;z-index:50;filter:drop-shadow(0 2px 3px rgba(0,0,0,.35));transform-origin:2px 2px">
+      <path d="M2 2 L2 27 L8 21.5 L12.5 32 L17 30 L12.6 19.8 L20.5 19.8 Z" fill="#000" stroke="#fff" stroke-width="2.2" stroke-linejoin="round"/></svg>
+  </div></div>
+</div>
+
+<!-- 成片对比：横屏 + 竖屏 -->
+<div class="scene" id="sX">
+  <div class="show" style="left:120px;top:190px;width:1120px;height:630px"><img id="xA"></div>
+  <div class="tag" style="left:120px;width:1120px;top:850px">横屏教程</div>
+  <div class="show" style="left:1340px;top:120px;width:410px;height:729px"><img id="xB"></div>
+  <div class="tag" style="left:1340px;width:410px;top:870px">抖音竖屏</div>
+</div>
+
+<!-- Windows 截图 -->
+<div class="scene" id="sW">
+  <div class="win11"></div>
+  <div class="wwin" style="left:1010px;top:110px;width:820px;height:560px"><div class="wt">待办<span>—▢✕</span></div>
+    <div style="height:526px;background:url(img/todo.jpg) 0 -32px/820px auto no-repeat"></div></div>
+  <div class="wwin chat" style="left:90px;top:150px;width:760px;height:700px"><div class="wt" style="background:#f7f7f7">文件传输助手<span>—▢✕</span></div>
+    <div class="bub l" style="left:24px;top:70px">本周的待办清单发我一下</div>
+    <div class="bub r" id="wImg" style="right:24px;top:150px;padding:6px;opacity:0"><div id="wImgIn" style="width:300px;height:190px;border-radius:4px;background:url(img/todo.jpg) 0 0/820px auto"></div></div>
+    <div style="position:absolute;left:0;right:0;bottom:0;height:170px;background:#fff;border-top:1px solid #e5e5e5" id="wInput"></div>
+  </div>
+  <div class="taskbar"><i></i><i></i><i></i><i style="background:#2ab55a"></i><i style="background:#e5413a"></i><i></i></div>
+  <div class="selbox" id="wSel" style="display:none"></div><div class="sz" id="wSz" style="display:none"></div>
+  <div class="thumbnail" id="wTh" style="display:none"></div>
+  <div class="bigtag" id="wTag" style="top:30px"><span class="keycap">Ctrl</span>+<span class="keycap">Alt</span>+<span class="keycap">X</span> 截图</div>
+</div>
+
+<!-- 结尾 -->
+<div class="scene card" id="sZ"><img src="img/icon.png"><h1>录屏</h1><p>录完，就是成片。</p><div class="os"><span>Mac</span><span>Windows</span></div></div>
+
+<svg id="cur" viewBox="0 0 26 36" width="39" height="54" style="position:absolute;z-index:60;filter:drop-shadow(0 2px 3px rgba(0,0,0,.35));display:none">
+  <path d="M2 2 L2 27 L8 21.5 L12.5 32 L17 30 L12.6 19.8 L20.5 19.8 Z" fill="#000" stroke="#fff" stroke-width="2.2" stroke-linejoin="round"/></svg>
+<div class="clk" id="clk" style="opacity:0;width:60px;height:60px;margin:-30px 0 0 -30px"></div>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const ease = x => { x = clamp(x); return x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; };
+const lerp = (a, b, u) => a + (b - a) * u;
+const fmt = s => { s = Math.max(0, s); const m = Math.floor(s / 60), r = s - m * 60; return `${m}:${r < 10 ? '0' : ''}${r.toFixed(1)}`; };
+
+// ---- 每段多长：旁白开始时刻 at + 时长 + 留白；有些段动作多，给最短时长 ----
+const ORDER = ['A','R1','R2','S','E1','E2','E3','E4','E5','E6','E7','E8','E9','E10','P1','P2','P3','P4','P5','X1','X2','W','U','Z'];
+const MIN = { A: 4, R1: 7, R2: 6.6, S: 8, E1: 5.4, E2: 6.8, E3: 4.6, E4: 5.2, E5: 3.4, E6: 4.6, E7: 6.2, E8: 7, E9: 5, E10: 6.4, P1: 8.6, P2: 6.2, P3: 4, P4: 7.6, P5: 8.2, X1: 4.2, X2: 5.4, W: 9, U: 5.2, Z: 4 };
+const V = window.VOICE || [];
+const scenes = {}; let T = 0;
+for (const k of ORDER) {
+  const v = V.find(x => x.scene === k);
+  const need = v ? v.at + v.dur + 0.55 : 3;
+  scenes[k] = { start: T, dur: Math.max(MIN[k], need) }; T += scenes[k].dur;
+}
+const END = T;
+
+// ---- 剪辑窗口的数据（随时间变）----
+const X = t => 14.1 + 33.7 * t;                 // 时间轴：秒 → 设计坐标
+const SEG1 = { s: 6.0, e: 16.9, z: 2.0, mode: 'follow' }, SEG2 = { s: 20.9, e: 29.9 };
+
+// 镜头（剪辑窗口在画面里的位置和大小）：看哪块就把哪块放大到屏幕上
+const CAMS = { full: [0, 0, 1440, 820], low: [0, 360, 1139, 460], prop: [0, 280, 1139, 540], fixed: [0, 50, 1139, 620], play: [0, 40, 1139, 780], panel: [0, 0, 1440, 820] };
+function camXform(r) {
+  const s = Math.min(1790 / r[2], 960 / r[3]), w = r[2] * s, h = r[3] * s;
+  return { s, x: (1920 - w) / 2 - r[0] * s, y: 12 + (960 - h) / 2 - r[1] * s };
+}
+
+// 每段：镜头、鼠标关键帧 [秒, x, y, 按下?]、要做什么
+const EDCAM = { E1: 'full', E2: 'full', E3: 'low', E4: 'low', E5: 'low', E6: 'low', E7: 'prop', E8: 'fixed', E9: 'low', E10: 'play', P1: 'panel', P2: 'panel', P3: 'panel', P4: 'panel', P5: 'panel', X1: 'panel' };
+const DOWN = 1;
+const CURSOR = {
+  E1: [[0, 700, 450]], E2: [[0, 700, 450]],
+  E3: [[0, 640, 520], [1.5, 520, 760]],
+  E4: [[0, 520, 760], [1.1, X(16.9) - 6, 749], [1.4, X(16.9) - 6, 749, DOWN], [2.9, X(13.6) - 6, 749, DOWN], [3.2, X(13.6) - 6, 749], [4, X(13.6) + 30, 790]],
+  E5: [[0, X(13.6) + 30, 790], [0.8, X(25.4), 749], [1.0, X(25.4), 749, DOWN], [2.2, X(24.0), 749, DOWN], [2.4, X(24.0), 749], [3.2, X(22), 790]],
+  E6: [[0, X(22), 790], [0.8, X(2), 749], [0.95, X(2), 749, DOWN], [1.05, X(2), 749], [1.15, X(2), 749, DOWN], [1.25, X(2), 749], [2.3, 1089, 661], [2.55, 1089, 661, DOWN], [2.7, 1089, 661], [3.6, 900, 770]],
+  E7: [[0, 900, 770], [0.6, X(9), 749], [0.75, X(9), 749, DOWN], [0.9, X(9), 749], [1.6, 253, 661], [1.8, 253, 661, DOWN], [3.4, 310, 661, DOWN], [3.6, 310, 661], [4.4, 330, 700]],
+  E8: [[0, 330, 700], [0.7, 572, 661], [0.85, 572, 661, DOWN], [1.0, 572, 661], [2.0, 652, 661], [2.15, 652, 661, DOWN], [2.3, 652, 661], [3.3, 420, 300], [3.5, 420, 300, DOWN], [3.65, 420, 300], [4.6, 520, 420]],
+  E9: [[0, 520, 700], [0.7, X(0) + 3, 760], [0.9, X(0) + 3, 760, DOWN], [2.2, X(2.5) + 3, 760, DOWN], [2.4, X(2.5) + 3, 760], [3.0, X(33) - 3, 760], [3.15, X(33) - 3, 760, DOWN], [4.0, X(31) - 3, 760, DOWN], [4.2, X(31) - 3, 760], [4.8, X(28), 800]],
+  E10: [[0, X(28), 800], [0.7, 569, 605], [0.85, 569, 605, DOWN], [1.0, 569, 605], [1.6, 640, 640], [3.8, 252, 606], [4.0, 252, 606, DOWN], [4.15, 252, 606], [5, 330, 650]],
+  P1: [[0, 330, 650], [0.8, 1289, 99], [0.95, 1289, 99, DOWN], [1.1, 1289, 99], [1.9, 1250, 158], [2.6, 1250, 158], [2.75, 1250, 158, DOWN], [2.9, 1250, 158], [4, 1180, 400]],
+  P2: [[0, 1180, 400], [0.6, 1289, 291], [0.75, 1289, 291, DOWN], [0.9, 1289, 291], [2.4, 1198, 312], [2.55, 1198, 312, DOWN], [2.7, 1198, 312], [3.8, 1288, 312], [5, 1300, 330]],
+  P3: [[0, 1300, 330], [0.6, 1274, 478], [0.8, 1274, 478, DOWN], [2.0, 1310, 478, DOWN], [2.2, 1310, 478], [3, 1330, 520]],
+  P4: [[0, 1330, 520], [0.6, 1287, 606], [0.75, 1287, 606, DOWN], [1.5, 1346, 606, DOWN], [1.65, 1346, 606], [2.2, 1160, 646], [2.35, 1160, 646, DOWN], [2.5, 1160, 646], [3.0, 1160, 717], [3.15, 1160, 717, DOWN], [3.3, 1160, 717], [4.2, 1060, 760]],
+  P5: [[0, 1060, 760], [0.7, 1391, 759], [0.85, 1391, 759, DOWN], [1.0, 1391, 759], [2, 1300, 700]],
+  X1: [[0, 1300, 700], [0.6, 1400, 16], [0.75, 1400, 16, DOWN], [0.9, 1400, 16], [2.4, 1360, 70]],
+};
+function curAt(keys, u) {
+  let i = 0; while (i < keys.length - 1 && keys[i + 1][0] <= u) i++;
+  const a = keys[i], b = keys[Math.min(i + 1, keys.length - 1)];
+  const f = b[0] > a[0] ? ease((u - a[0]) / (b[0] - a[0])) : 0;
+  return { x: lerp(a[1], b[1], f), y: lerp(a[2], b[2], f), down: !!a[3] && !!(b[3] ?? a[3]) && u >= a[0], key: a };
+}
+// 按下的瞬间（给点击小圈和音效用）
+function presses(keys) { const out = []; for (let i = 0; i < keys.length; i++) if (keys[i][3] && !(keys[i - 1] || [])[3]) out.push(keys[i][0]); return out; }
+
+// ---- 预览区：要显示哪段成片的哪一帧（纯函数，record.mjs 拿它算要抽哪些帧）----
+const ASPECT = { tut: 16 / 9, short: 16 / 9, z3: 16 / 9, fixed: 16 / 9, color: 16 / 9, wall: 16 / 9, frame: 16 / 9, cursor: 16 / 9, blur: 16 / 9, blur0: 16 / 9, dy: 9 / 16 };
+function preview(k, u) {
+  // 返回 [clip, 秒]，或 {a:[clip,秒], b:[clip,秒], m: b 的比例}
+  switch (k) {
+    case 'E1': case 'E2': return ['tut', 9.0];
+    case 'E3': return ['tut', 6.2 + u * 0.9];
+    case 'E4': return ['tut', 10.5];
+    case 'E5': case 'E6': return ['tut', 10.5];
+    case 'E7': return { a: ['tut', 9.0], b: ['z3', 9.0], m: ease((u - 1.8) / 1.6) };
+    case 'E8': return { a: ['z3', 9.0], b: ['fixed', 9.0], m: ease((u - 3.6) / 0.6) };
+    case 'E9': return ['fixed', u < 2.4 ? lerp(0, 2.5, ease((u - 0.9) / 1.3)) : 2.5];
+    case 'E10': return ['fixed', u < 0.9 ? 2.5 : Math.min(2.5 + (u - 0.9), 30)];
+    case 'P1': return u < 2.8 ? ['tut', 9.0] : { a: ['tut', 9.0], b: ['dy', 9.0 + (u - 2.8)], m: ease((u - 2.8) / 0.4) };
+    case 'P2': return u < 0.8 ? ['dy', 9.0] : u < 2.6 ? { a: ['dy', 9], b: ['color', 3.0], m: ease((u - 0.8) / 0.35) } : { a: ['color', 3.0], b: ['wall', 3.0], m: ease((u - 2.6) / 0.35) };
+    case 'P3': return { a: ['wall', 3.0], b: ['frame', 3.0], m: ease((u - 0.8) / 1.2) };
+    case 'P4': return u < 2.4 ? ['cursor', 3.0] : ['cursor', 9.0 + (u - 2.4) * 0.9];
+    case 'P5': return u < 1.0 ? ['blur', 4.9] : u < 5.6 ? ['blur', 4.9 + (u - 1.0) * 0.42] : ['blur', 9.0];
+    case 'X1': return ['blur', 9.0];
+  }
+  return ['tut', 9];
+}
+const FPS = 30;
+const fidx = s => Math.round(s * FPS);
+const src = ([c, s]) => `frames/${c}/${String(fidx(s)).padStart(5, '0')}.jpg`;
+function needs(t) {
+  const k = sceneAt(t), u = t - scenes[k].start, out = [];
+  if (EDCAM[k]) { const p = preview(k, u); if (Array.isArray(p)) out.push(p); else { out.push(p.a); if (p.m > 0) out.push(p.b); } }
+  if (k === 'S') out.push(['tut', 6.0 + u * 0.9]);
+  if (k === 'X2') { out.push(['tut', 9.0 + u * 0.9]); out.push(['dy', 9.0 + u * 0.9]); }
+  return out.map(([c, s]) => [c, fidx(s)]);
+}
+function sceneAt(t) { let k = ORDER[0]; for (const n of ORDER) if (t >= scenes[n].start) k = n; return k; }
+
+// ---- 画一帧 ----
+const loads = [];
+function setImg(el, url) { if (el.getAttribute('src') !== url) { el.src = url; loads.push(el.decode().catch(() => 0)); } }
+function fitPreview(el, clip) {
+  const a = ASPECT[clip] || 16 / 9, h = 507, w = h * a;
+  el.style.width = w + 'px'; el.style.left = (1111 - w) / 2 + 'px';
+}
+let hlEls = [];
+function highlight(list) {
+  const box = $('hls'); box.innerHTML = '';
+  for (const [x, y, w, h, label, o, lx, ly] of list) {
+    if (o <= 0) continue;
+    const d = document.createElement('div'); d.className = 'hl'; Object.assign(d.style, { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px', opacity: o }); box.appendChild(d);
+    const l = document.createElement('div'); l.className = 'hlab'; l.textContent = label; Object.assign(l.style, { left: (lx ?? x + 14) + 'px', top: (ly ?? y + 14) + 'px', opacity: o }); box.appendChild(l);
+  }
+}
+function drawLow(st) {
+  // 选中段属性条
+  const p = $('prop'); p.innerHTML = '';
+  const sel = st.segs.find(s => s.sel);
+  if (sel) {
+    const zx = 207 + ((sel.z - 1.2) / 2.8) * 160;
+    p.innerHTML = `<b style="left:14px">推近</b><span style="left:52px;color:#86868b">${fmt(sel.s)} – ${fmt(sel.e)}</span>
+      <span style="left:156px;top:4px;width:1px;height:18px;background:#e0e0e0"></span><span style="left:169px">放大</span>
+      <div class="sl" style="left:207px;top:11px;width:160px"><i style="width:${zx - 207}px"></i></div><div class="thumb" style="left:${zx - 10}px;top:3px"></div>
+      <span style="left:382px">${sel.z.toFixed(1)}×</span>
+      <div class="sg" style="left:462px;top:0"><span class="${sel.mode === 'follow' ? 'on' : ''}">跟着鼠标</span><span class="${sel.mode === 'fixed' ? 'on' : ''}">固定位置</span></div>
+      ${sel.mode === 'fixed' ? `<span class="gbtn" style="left:624px;top:-1px;${st.picking ? 'background:#3478f6;color:#fff' : ''}">⌖ 选位置</span>` : ''}
+      <span class="gbtn" style="left:1043px;top:-1px">🗑 删除</span>`;
+  }
+  // 时间轴
+  let h = '';
+  for (let s = 0; s <= 32; s += 2) h += `<div class="tick" style="left:${X(s)}px"></div><div class="tlab" style="left:${X(s) + 3}px">0:${String(s).padStart(2, '0')}</div>`;
+  for (const d of [6.6, 7.0, 7.3, 7.6, 7.9, 8.2, 8.5, 8.8, 9.8, 11.8, 13.4, 21.5, 23, 25, 26.4]) h += `<div class="dot" style="left:${X(d) - 1.7}px"></div>`;
+  for (const s of st.segs) {
+    const w = X(s.e) - X(s.s);
+    h += `<div class="blk${s.sel ? ' sel' : ''}" style="left:${X(s.s)}px;width:${w}px;opacity:${s.o ?? 1}">${s.mode === 'fixed' ? '⌖' : '↖'} ${s.z.toFixed(1)}×</div>`;
+  }
+  h += `<div class="dim" style="left:0;width:${X(st.ts) - 0}px"></div><div class="dim" style="left:${X(st.te)}px;width:${1139 - X(st.te)}px"></div>`;
+  h += `<div class="brk l" style="left:${X(st.ts) - 2}px"></div><div class="brk r" style="left:${X(st.te) - 7}px"></div>`;
+  h += `<div class="ph" style="left:${X(st.ph)}px"></div>`;
+  $('tl').innerHTML = h;
+}
+
+function editorState(k, u) {
+  // 推近段、修剪、播放头随剧情变
+  const s1 = { ...SEG1, sel: true }, s2 = { s: SEG2.s, e: SEG2.e, z: 2.0, mode: 'follow' };
+  const st = { segs: [s1, s2], ts: 0, te: 33, ph: 11.4, playing: false, picking: false };
+  const after = n => ORDER.indexOf(k) > ORDER.indexOf(n);
+  const at = (n, a, b) => (k === n ? ease((u - a) / (b - a)) : after(n) ? 1 : 0);
+  s1.e = lerp(16.9, 13.6, at('E4', 1.4, 2.9));
+  const mv = at('E5', 1.0, 2.2); s2.s = lerp(20.9, 19.5, mv); s2.e = lerp(29.9, 28.5, mv);
+  if (k === 'E5' && u > 1.0) { s1.sel = false; s2.sel = true; }
+  if (k === 'E6') {
+    s1.sel = false; s2.sel = false;
+    if (u > 1.15 && u < 2.6) st.segs.push({ s: 1.0, e: 3.0, z: 2.0, mode: 'follow', sel: true });
+    if (u >= 2.6 && u < 2.9) st.segs.push({ s: 1.0, e: 3.0, z: 2.0, mode: 'follow', sel: true, o: 1 - (u - 2.6) / 0.3 });
+  }
+  if (k === 'E7' && u < 0.75) s1.sel = false;
+  s1.z = lerp(2.0, 3.0, at('E7', 1.8, 3.4));
+  if (after('E8') || (k === 'E8' && u > 0.85)) s1.mode = 'fixed';
+  st.picking = k === 'E8' && u > 2.15 && u < 3.5;
+  st.ts = lerp(0, 2.5, at('E9', 0.9, 2.2));
+  const te = at('E9', 3.15, 4.0) * (k === 'E10' && u > 4.0 ? 0 : 1);
+  st.te = lerp(33, 31, (after('E10') ? 0 : te));
+  if (k === 'E3') st.ph = 6.2 + u * 0.9;
+  if (k === 'E4' || k === 'E5' || k === 'E6') st.ph = 10.5;
+  if (k === 'E7' || k === 'E8') st.ph = 9.0;
+  if (k === 'E9') st.ph = u < 2.4 ? lerp(11.4, 2.5, ease((u - 0.9) / 1.3)) : 2.5;
+  if (k === 'E10') { st.playing = u > 0.85 && u < 3.95; st.ph = u < 0.9 ? 2.5 : Math.min(2.5 + (Math.min(u, 3.95) - 0.9), 30); }
+  if (ORDER.indexOf(k) >= ORDER.indexOf('P1')) { st.ph = 9.0; st.te = 33; }
+  return st;
+}
+
+const PANEL = { P1: u => u < 2.8 ? ['tut', 'tut', 0] : ['tut', 'dy', ease((u - 2.8) / 0.3)],
+  P2: u => u < 0.8 ? ['dy', 'dy', 0] : u < 2.6 ? ['dy', 'color', ease((u - 0.8) / 0.25)] : ['color', 'wall', ease((u - 2.6) / 0.25)],
+  P3: u => ['tut', 'frame', ease((u - 1.0) / 0.6)], P4: u => ['frame', 'cursor', ease((u - 1.5) / 0.4)], P5: u => ['cursor', 'blur', ease((u - 0.85) / 0.25)], X1: () => ['blur', 'blur', 0] };
+
+let lastScene = '';
+async function frame(t) {
+  loads.length = 0;
+  const k = sceneAt(t), sc = scenes[k], u = t - sc.start;
+  const fadeIn = clamp(u / 0.35), fadeOut = clamp((sc.dur - u) / 0.35);
+  for (const el of document.querySelectorAll('.scene')) el.style.opacity = 0;
+  const isEd = !!EDCAM[k];
+  const id = isEd ? 'sE' : k === 'A' ? 'sA' : ['R1', 'R2', 'U'].includes(k) ? 'sM' : k === 'S' ? 'sS' : k === 'X2' ? 'sX' : k === 'W' ? 'sW' : 'sZ';
+  // 同一个画面（主窗口 / 剪辑窗口）连着几段时不闪
+  const prev = ORDER[ORDER.indexOf(k) - 1], next = ORDER[ORDER.indexOf(k) + 1];
+  const same = n => n && (EDCAM[n] ? 'sE' : ['R1', 'R2', 'U'].includes(n) ? 'sM' : n) === id;
+  $(id).style.opacity = Math.min(same(prev) ? 1 : fadeIn, same(next) ? 1 : fadeOut);
+  $('cur').style.display = 'none'; $('clk').style.opacity = 0;
+
+  if (k === 'A' || k === 'Z') {
+    const e = ease(u / 0.8), img = $(id).querySelector('img');
+    img.style.transform = `scale(${0.85 + 0.15 * e})`; img.style.opacity = e;
+  }
+  if (['R1', 'R2', 'U'].includes(k)) drawMain(k, u);
+  if (k === 'S') {
+    const on = ease((u - 0.3) / 0.6);
+    $('sRaw').style.opacity = 1; setImg($('sOutImg'), src(['tut', 6.0 + u * 0.9]));
+    $('sOut').style.opacity = clamp((u - 0.8) / 0.4);
+  }
+  if (k === 'X2') { setImg($('xA'), src(['tut', 9.0 + u * 0.9])); setImg($('xB'), src(['dy', 9.0 + u * 0.9])); }
+  if (k === 'W') drawWin(u);
+  if (isEd) drawEditor(k, u);
+  await Promise.all(loads);
+}
+
+function drawEditor(k, u) {
+  // 镜头：从上一段的位置平滑过渡到这一段
+  const prev = ORDER[ORDER.indexOf(k) - 1];
+  const A = camXform(CAMS[EDCAM[prev] || 'full']), B = camXform(CAMS[EDCAM[k]]), f = ease(u / 0.8);
+  let s = lerp(A.s, B.s, f), x = lerp(A.x, B.x, f), y = lerp(A.y, B.y, f);
+  if (k === 'E1') { const e = ease(u / 0.7); s *= 0.94 + 0.06 * e; x += (1 - e) * 50; y += (1 - e) * 30; }
+  $('rig').style.transform = `translate(${x}px,${y}px) scale(${s})`;
+  // 预览
+  const p = preview(k, u), A2 = Array.isArray(p) ? p : p.a, B2 = Array.isArray(p) ? null : p.b, m = Array.isArray(p) ? 0 : clamp(p.m);
+  setImg($('pvA'), src(A2)); fitPreview($('pvA'), A2[0]);
+  if (B2 && m > 0) { setImg($('pvB'), src(B2)); fitPreview($('pvB'), B2[0]); $('pvB').style.opacity = m; } else $('pvB').style.opacity = 0;
+  // 面板
+  const pn = PANEL[k] ? PANEL[k](u) : ['tut', 'tut', 0];
+  setImg($('pnA'), `img/${pn[0]}.png`); setImg($('pnB'), `img/${pn[1]}.png`); $('pnBw').style.opacity = pn[2];
+  // 下拉菜单（P1）
+  $('menu').style.display = k === 'P1' && u > 0.95 && u < 2.8 ? 'block' : 'none';
+  for (let i = 0; i < 4; i++) $('mi' + i).classList.toggle('on', k === 'P1' && ((i === 1 && u > 1.75) || (i === 2 && u <= 1.75)));
+  // 导出
+  if (k === 'X1' && u > 0.8) {
+    $('exp').style.display = 'flex'; const pr = clamp((u - 0.9) / 1.6);
+    $('expT').textContent = pr < 1 ? `正在导出 ${Math.round(pr * 100)}%` : '✓ 已导出 · 打开'; $('expT').style.color = pr < 1 ? '#555' : '#1f8f3a';
+    $('expB').style.width = pr * 100 + '%'; $('exp').querySelector('.bar').style.display = pr < 1 ? 'block' : 'none';
+  } else $('exp').style.display = 'none';
+  // 下半部分
+  const st = editorState(k, u);
+  drawLow(st);
+  $('pb').classList.toggle('pause', st.playing);
+  $('tt').textContent = `${fmt(st.ph)} / 0:33.0`;
+  // 高亮讲解区域
+  const o = (a, b) => clamp((u - a) / 0.3) * clamp((b - u) / 0.3);
+  const hl = [];
+  if (k === 'E1') hl.push([14, 59, 1111, 507, '预览：最后视频的样子', o(1.2, 99)]);
+  if (k === 'E2') { hl.push([4, 676, 1131, 140, '时间轴：从头到尾', o(0.2, 3.3), 20, 600]); hl.push([1141, 32, 297, 786, '样式', o(3.5, 99), 1160, 50]); }
+  if (k === 'E3') hl.push([X(6) - 4, 723, X(16.9) - X(6) + 8, 52, '镜头凑近看的时间', o(0.9, 99), X(6), 690]);
+  highlight(hl);
+  // 鼠标
+  const keys = CURSOR[k], c = curAt(keys, u);
+  const ec = $('ecur'); ec.style.display = k === 'E1' || k === 'E2' ? 'none' : 'block';
+  ec.style.transform = `translate(${c.x - 2}px,${c.y - 2}px) scale(${(1 / s) * 1.5 * (c.down ? 0.88 : 1)})`;
+  const pr = presses(keys).filter(p => u >= p && u < p + 0.45).pop();
+  const ck = $('eclk');
+  if (pr !== undefined) { const q = (u - pr) / 0.45; ck.style.opacity = 1 - q; ck.style.left = c.x + 'px'; ck.style.top = c.y + 'px'; ck.style.transform = `scale(${(0.5 + q) / s * 1.4})`; } else ck.style.opacity = 0;
+}
+
+function screenCursor(keys, u, scale = 1) {
+  const c = curAt(keys, u), el = $('cur'); el.style.display = 'block';
+  el.style.left = (c.x - 3) + 'px'; el.style.top = (c.y - 3) + 'px'; el.style.transform = `scale(${c.down ? 0.88 : 1})`; el.style.transformOrigin = '3px 3px';
+  const pr = presses(keys).filter(p => u >= p && u < p + 0.45).pop(), ck = $('clk');
+  if (pr !== undefined) { const q = (u - pr) / 0.45; ck.style.opacity = 1 - q; ck.style.left = c.x + 'px'; ck.style.top = c.y + 'px'; ck.style.transform = `scale(${0.5 + q})`; } else ck.style.opacity = 0;
+  return c;
+}
+// 主窗口坐标：窗口左上 (448,120) 屏幕像素，放大 1.6 倍
+const MW = (x, y) => [448 + x * 1.6, 120 + y * 1.6];
+// 鼠标目标用元素本身的位置（getBoundingClientRect，屏幕像素），改布局不用重算坐标
+const at = id => { const r = $(id).getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; };
+let MAINCUR = null;
+function mainCur() {
+  if (MAINCUR) return MAINCUR;
+  const M0 = at('m0'), M1 = at('m1'), AR = at('mArea'), RB = at('recBtn'), CM = at('ckM'), CS = at('ckS'), C3 = at('cd3');
+  MAINCUR = {
+    R1: [[0, 1500, 900], [0.8, ...M0], [0.95, ...M0, DOWN], [1.1, ...M0], [1.8, ...M1], [1.95, ...M1, DOWN], [2.1, ...M1],
+         [2.8, ...AR], [2.95, ...AR, DOWN], [3.1, ...AR], [4.6, ...RB], [4.75, ...RB, DOWN], [4.9, ...RB], [6, RB[0] + 300, RB[1] + 80]],
+    R2: [[0, RB[0] + 300, RB[1] + 80], [0.6, ...CM], [0.75, ...CM, DOWN], [0.9, ...CM], [1.5, ...CS], [1.65, ...CS, DOWN], [1.8, ...CS],
+         [2.6, ...C3], [2.75, ...C3, DOWN], [2.9, ...C3], [3.4, ...RB], [3.55, ...RB, DOWN], [3.7, ...RB], [4.4, 1500, 950]],
+    U: [[0, 1500, 950]],
+  };
+  return MAINCUR;
+}
+function drawMain(k, u) {
+  const sel = k === 'R1' ? (u < 0.95 ? -1 : u < 1.95 ? 0 : u < 4.75 ? 1 : 3) : 3;
+  ['m0', 'm1', 'm2', 'm3'].forEach((id, i) => $(id).classList.toggle('on', i === sel));
+  $('m3').style.display = (k === 'R1' && u > 4.2) || k !== 'R1' ? 'flex' : 'none';
+  // 框选：点「选区域…」后屏幕上出现虚线框，拖出来
+  const dash = $('dash');
+  if (k === 'R1' && u > 3.0 && u < 4.4) { const e = ease((u - 3.1) / 0.8); dash.style.display = 'block'; Object.assign(dash.style, { left: '300px', top: '150px', width: 160 + 900 * e + 'px', height: 100 + 560 * e + 'px', opacity: clamp((4.4 - u) / 0.3) }); }
+  else dash.style.display = 'none';
+  $('ckM').classList.toggle('on', k !== 'R1' && !(k === 'R2' && u < 0.75));
+  $('ckS').classList.toggle('on', k === 'U' || (k === 'R2' && u > 1.65));
+  $('cd0').classList.toggle('on', !(k === 'R2' && u > 2.75) && k !== 'U');
+  $('cd3').classList.toggle('on', (k === 'R2' && u > 2.75) || k === 'U');
+  // 录制：R1 点开始 → 变「停止」；R2 点开始先倒数
+  const recOn = (k === 'R1' && u > 4.75) || (k === 'R2' && u > 3.55 + 3);
+  $('recBtn').classList.toggle('stop', recOn); $('recTxt').textContent = recOn ? '停止' : '开始录制';
+  $('recTime').style.display = recOn ? 'inline' : 'none';
+  if (recOn) $('recTime').innerHTML = `<span style="color:#e5413a">●</span> 00:0${Math.min(9, Math.floor(k === 'R1' ? u - 4.75 : u - 6.55))}`;
+  const cd = $('count');
+  if (k === 'R2' && u > 3.6 && u < 6.55) { const n = 3 - Math.floor((u - 3.6) / 0.98); cd.style.display = 'flex'; cd.textContent = Math.max(1, n); const q = ((u - 3.6) % 0.98) / 0.98; cd.style.transform = `scale(${1.15 - 0.15 * ease(q * 3)})`; cd.style.opacity = 1 - clamp((q - 0.8) / 0.2) * 0.6; }
+  else cd.style.display = 'none';
+  $('upd').style.opacity = k === 'U' ? ease((u - 0.8) / 0.5) : 0;
+  $('mTag').textContent = k === 'U' ? '在后台悄悄更新' : '';
+  screenCursor(mainCur()[k], u);
+}
+
+function drawWin(u) {
+  // 0.6 按快捷键 → 屏幕变暗；1.0–2.2 拖出框；2.4 截好 → 右下角缩略图；3.6–5.2 拖进聊天框；5.3 发出去
+  const sel = $('wSel'), sz = $('wSz'), th = $('wTh');
+  const x0 = 1060, y0 = 200, x1 = lerp(x0 + 20, 1700, ease((u - 1.0) / 1.2)), y1 = lerp(y0 + 20, 560, ease((u - 1.0) / 1.2));
+  if (u > 0.6 && u < 2.4) { sel.style.display = 'block'; Object.assign(sel.style, { left: x0 + 'px', top: y0 + 'px', width: x1 - x0 + 'px', height: y1 - y0 + 'px' }); sz.style.display = 'block'; sz.textContent = `${Math.round((x1 - x0) * 1.5)} × ${Math.round((y1 - y0) * 1.5)}`; Object.assign(sz.style, { left: x1 - 120 + 'px', top: y1 + 8 + 'px' }); }
+  else { sel.style.display = 'none'; sz.style.display = 'none'; }
+  // 缩略图：截好后从右下角滑入；被拖着走；松手后进聊天框
+  const crop = `url(img/todo.jpg) ${-(x0 - 1010) * 1.0}px ${-(y0 - 144)}px/820px auto`;
+  let cur = [[0, 1500, 700], [1.0, x0, y0], [1.05, x0, y0, DOWN], [2.2, 1700, 560, DOWN], [2.35, 1700, 560], [3.4, 1735, 905], [3.6, 1735, 905, DOWN], [5.0, 470, 780, DOWN], [5.15, 470, 780], [6.5, 560, 700]];
+  const c = screenCursor(cur, u);
+  if (u > 2.4 && u < 5.15) {
+    th.style.display = 'block'; th.style.background = crop;
+    const inn = ease((u - 2.4) / 0.4), w = 230, h = 150;
+    let x = 1920 - w - 30 + (1 - inn) * 60, y = 1080 - 56 - h - 24;
+    if (u > 3.6) { x = c.x - 110; y = c.y - 70; th.style.transform = 'scale(.75)'; } else th.style.transform = 'none';
+    Object.assign(th.style, { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px', opacity: inn });
+  } else th.style.display = 'none';
+  $('wImg').style.opacity = ease((u - 5.25) / 0.3);
+  $('wImgIn').style.background = `url(img/todo.jpg) ${-(x0 - 1010) * 300 / 640}px ${-(y0 - 144) * 300 / 640}px/${820 * 300 / 640}px auto`;
+  $('wTag').style.opacity = clamp(u / 0.4);
+}
+
+window.PROMO = { frame, END, scenes, needs, FPS, ORDER, clicks: () => {
+  // 所有鼠标按下的时刻（给 record.mjs 配轻的点击音效）；P4 里成片自带点击声的时刻单独给
+  const out = [];
+  for (const k of ORDER) { const keys = EDCAM[k] ? CURSOR[k] : mainCur()[k]; if (keys) for (const p of presses(keys)) out.push(scenes[k].start + p); }
+  const w = scenes.W.start; out.push(w + 1.05, w + 3.6);
+  return out;
+}, demoClicks: () => [9.8, 11.8].map(c => scenes.P4.start + 2.4 + (c - 9.0) / 0.9).filter(t => t < scenes.P4.start + scenes.P4.dur) };
+if (!location.search.includes('rec=1')) {
+  const t0 = performance.now(); const loop = () => { frame(((performance.now() - t0) / 1000) % END); requestAnimationFrame(loop); }; loop();
+}
+</script>
+</body>
+</html>

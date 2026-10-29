@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8">
+<!-- 宣传片样片（第二版）：120 拍/分，每半拍到一拍就有一个动作；剪辑窗口始终铺满画面，没有叠加文字。
+     底图 base.png = 录屏.app 中文浅色离屏真截图；右侧样式面板按状态换成 panel_A…F.png（同宽真截图，像素对齐，states4.py 生成）。
+     预览区自己按软件的规则重画：渐变背景 + 圆角卡片（卡片里是录屏.app 真导出的不推近成片 frames/，只取卡片那一块）+ 镜头推近。
+     坐标都用截图像素（2940×1652）。PROMO.frame(t) 画第 t 秒。 -->
+<style>
+  :root { --bg: #EEEFF2; }
+  html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: var(--bg); }
+  #win { position: absolute; left: 0; top: 0; width: 2940px; height: 1652px; transform-origin: 0 0;
+         background: url(base.png) 0 0 / 2940px 1652px; overflow: hidden; }
+  .panel { position: absolute; left: 2322px; top: 92px; width: 618px; height: 1556px; display: none; }
+  #stage { position: absolute; left: 28px; top: 118px; width: 2282px; height: 1026px; background: rgb(161,161,161); overflow: hidden; border-radius: 14px; }
+  #canvas { position: absolute; top: 0; height: 1026px; overflow: hidden; }
+  #scene { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+  .bg { position: absolute; inset: 0; }
+  #card { position: absolute; overflow: hidden; background: #fff; }
+  #vid { position: absolute; left: 0; top: 0; }
+  .t { position: absolute; font-family: -apple-system, "SF Pro Text", "PingFang SC", system-ui; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #track { position: absolute; left: 415px; top: 1329px; width: 319px; height: 10px; border-radius: 5px; background: rgb(230,230,230); overflow: hidden; }
+  #fill { position: absolute; left: 0; top: 0; height: 10px; background: rgb(196,196,196); }
+  #knob { position: absolute; top: 1319px; width: 38px; height: 31px; border-radius: 15.5px; background: #fff;
+          box-shadow: 0 1px 2.5px rgba(0,0,0,.28), 0 0 0 0.6px rgba(0,0,0,.07); }
+  #val { left: 764px; top: 1314px; font-size: 26px; line-height: 40px; color: #272727; }
+  #blab { left: 807px; top: 1491px; font-size: 27px; line-height: 38px; color: #fff; font-weight: 600; }
+  #time { left: 1228px; top: 1206px; font-size: 25px; line-height: 40px; color: #808080; }
+  #play { position: absolute; left: 1135px; top: 1190px; width: 68px; height: 68px; border-radius: 34px; background: rgb(52,120,246); display: none; }
+  #play i { position: absolute; top: 22px; width: 7px; height: 24px; border-radius: 2px; background: #fff; }
+  #ph { position: absolute; top: 1384px; width: 22px; }
+  #ph .k { position: absolute; left: 0; top: 0; width: 22px; height: 22px; border-radius: 5px 5px 8px 8px; background: #333; }
+  #ph .l { position: absolute; left: 9.5px; top: 10px; width: 3px; height: 229px; background: #333; }
+  #cur { position: absolute; left: 0; top: 0; width: 58px; height: 58px; transform-origin: 4px 4px; filter: drop-shadow(0 2px 3px rgba(0,0,0,.3)); }
+  #ring { position: absolute; left: 0; top: 0; width: 90px; height: 90px; margin: -45px 0 0 -45px; border-radius: 50%;
+          border: 4px solid rgba(52,120,246,.55); opacity: 0; }
+  #icon { position: absolute; left: 50%; top: 50%; width: 300px; height: 300px; margin: -150px 0 0 -150px; opacity: 0;
+          filter: drop-shadow(0 24px 50px rgba(20,24,40,.18)); }
+</style></head>
+<body>
+<div id="win">
+  <img class="panel" id="pA" src="panel_A.png"><img class="panel" id="pB" src="panel_B.png"><img class="panel" id="pC" src="panel_C.png">
+  <img class="panel" id="pD" src="panel_D.png"><img class="panel" id="pE" src="panel_E.png"><img class="panel" id="pF" src="panel_F.png">
+  <div id="stage"><div id="canvas"><div id="scene">
+    <div class="bg" id="gBlue" style="background: linear-gradient(135deg, rgb(92,122,240), rgb(143,209,250))"></div>
+    <div class="bg" id="gPink" style="background: linear-gradient(135deg, rgb(247,117,158), rgb(255,194,158))"></div>
+    <div class="bg" id="gMint" style="background: linear-gradient(135deg, rgb(61,153,219), rgb(148,232,199))"></div>
+    <div id="card"><img id="vid"></div>
+  </div></div></div>
+  <div id="track"><div id="fill"></div></div><div id="knob"></div>
+  <div class="t" id="val">2.0×</div>
+  <div class="t" id="blab">2.0×</div>
+  <div class="t" id="time">0:12.6 / 0:33.0</div>
+  <div id="play"><i style="left:22px"></i><i style="left:39px"></i></div>
+  <div id="ph"><div class="l"></div><div class="k"></div></div>
+  <div id="ring"></div>
+  <svg id="cur" viewBox="0 0 20 27"><path d="M4 4 L4 16.8 L7 14 L9.2 19.2 L11.6 18.2 L9.5 13.3 L13.3 13.3 Z" fill="#000" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/></svg>
+</div>
+<img id="icon" src="icon.png">
+<script>
+const W = 2940, H = 1652, K = 1080 / H;            // 截图像素 → 画面像素
+const B = 0.5;                                      // 120 拍/分：一拍 0.5 秒
+const END = 10;
+const PPS = 69.1, X0 = 29.4;                        // 时间轴：每秒 69.1 像素，0 秒在 x=29.4
+const T0 = 12.6, NF = 540;                          // 预览从素材第 12.6 秒起；frames/f001..f540（60 帧/秒）
+const FW = 3636, FH = 2044, CX0 = 380, CY0 = 123, CW = 2876, CH = 1798;   // 导出帧里卡片的位置（像素）
+const STAGE_W = 2282, STAGE_H = 1026;
+const $ = id => document.getElementById(id);
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, u) => a + (b - a) * u;
+const seg = (t, a, b) => clamp((t - a) / (b - a), 0, 1);
+const out4 = u => 1 - Math.pow(1 - clamp(u, 0, 1), 4);                      // 快进慢出
+const inout = u => { u = clamp(u, 0, 1); return u < .5 ? 16 * u ** 5 : 1 - Math.pow(-2 * u + 2, 5) / 2; };   // 鼠标飞行：猛起猛停
+const spring = u => { u = clamp(u, 0, 1); return 1 - Math.exp(-7 * u) * Math.cos(9 * u); };
+
+// —— 动作表（秒）——
+const KNOB_Y = 1334.5, PLAY = [1169, 1224];
+const knobX = z => 434 + (z - 1.2) / 2.8 * 281;
+const PT = { r916: [2640, 435], r11: [2749, 435], r169: [2530, 435], pink: [2595, 694], mint: [2683, 694] };
+const DRAG = [1.0, 1.85], PLAY_AT = 2.5;
+const CLICKS = [[3.0, 'r916'], [4.0, 'pink'], [5.0, 'mint'], [6.0, 'r11'], [7.0, 'r169']];
+// 鼠标路径的关键点：[到达时刻, x, y]；两点之间猛起猛停地飞过去
+const PATH = [[0, 2560, 1560], [0.85, knobX(2.0), KNOB_Y + 4], [1.0, knobX(2.0), KNOB_Y + 4], [DRAG[1], knobX(3.0), KNOB_Y + 4], [2.05, knobX(3.0), KNOB_Y + 4],
+  [2.45, ...PLAY], [2.6, ...PLAY], [2.95, ...PT.r916], [3.15, ...PT.r916], [3.95, ...PT.pink], [4.15, ...PT.pink], [4.95, ...PT.mint], [5.15, ...PT.mint],
+  [5.95, ...PT.r11], [6.15, ...PT.r11], [6.95, ...PT.r169], [7.15, ...PT.r169], [7.8, 2760, 1500]];
+function cursorAt(t) {
+  if (t >= DRAG[0] && t <= DRAG[1]) return [knobX(zoomSlider(t)), KNOB_Y + 4];
+  for (let i = 1; i < PATH.length; i++) {
+    const a = PATH[i - 1], b = PATH[i];
+    if (t <= b[0]) { const u = inout(seg(t, a[0], b[0])), d = Math.hypot(b[1] - a[1], b[2] - a[2]);
+      return [lerp(a[1], b[1], u), lerp(a[2], b[2], u) - 0.12 * d * Math.sin(Math.PI * u)]; }   // 微微的弧线
+  }
+  return PATH[PATH.length - 1].slice(1);
+}
+const zoomSlider = t => lerp(2.0, 3.0, inout(seg(t, DRAG[0], DRAG[1])));
+const pressAt = t => (t >= DRAG[0] - 0.05 && t <= DRAG[1] + 0.05) || [PLAY_AT, ...CLICKS.map(c => c[0])].some(c => Math.abs(t - c) < 0.09);
+
+// —— 预览的状态 ——
+const ASPECT = [[0, 16 / 9], [3.0, 9 / 16], [6.0, 1], [7.0, 16 / 9]];
+function aspectAt(t) {   // 换比例：0.5 秒内快进慢出地变过去
+  let a = ASPECT[0][1];
+  for (let i = 1; i < ASPECT.length; i++) a = lerp(a, ASPECT[i][1], out4(seg(t, ASPECT[i][0], ASPECT[i][0] + 0.55)));
+  return a;
+}
+// 预览的推近倍数：拖滑块时跟着滑块；一换比例就拉回全景，看清整张卡片；最后 7.6 秒起自动推近（像录完的成片）
+function zoomAt(t) {
+  let z = zoomSlider(t);
+  z = lerp(z, 1, out4(seg(t, 3.0, 3.55)));
+  z = lerp(z, 2.3, inout(seg(t, 7.55, 8.4)));
+  return z;
+}
+let mouse = [];
+function mouseAt(st) {
+  if (!mouse.length) return [0.287, 0.471];
+  let i = mouse.findIndex(m => m[0] > st); if (i < 1) i = i < 0 ? mouse.length - 1 : 1;
+  const a = mouse[i - 1], b = mouse[i], u = b[0] > a[0] ? clamp((st - a[0]) / (b[0] - a[0]), 0, 1) : 0;
+  return [lerp(a[1], b[1], u), lerp(a[2], b[2], u)];
+}
+function focusAt(st) { let x = 0, y = 0; for (let k = 0; k < 12; k++) { const m = mouseAt(st - k * 0.05); x += m[0]; y += m[1]; } return [x / 12, y / 12]; }
+
+// 镜头：整窗铺满画面的基础上，一直有轻微的推拉和平移（几段快进慢出的组合，接力不停）
+const CAM = [ // [时刻, 放大, 中心 x, 中心 y]
+  [0, 1.0, 1470, 826], [0.9, 1.10, 1050, 900], [2.3, 1.10, 1150, 860], [2.9, 1.12, 1720, 700],
+  [3.6, 1.08, 1560, 760], [5.0, 1.12, 1700, 720], [6.6, 1.09, 1580, 760], [7.5, 1.06, 1470, 800], [8.5, 1.62, 1169, 631]];
+function camAt(t) {
+  let [ , s, cx, cy] = CAM[0];
+  for (let i = 1; i < CAM.length; i++) {
+    const u = (i === CAM.length - 1 ? inout : out4)(seg(t, CAM[i - 1][0], CAM[i][0]));
+    s = lerp(s, CAM[i][1], u); cx = lerp(cx, CAM[i][2], u); cy = lerp(cy, CAM[i][3], u);
+  }
+  return [s, cx, cy];
+}
+function setCam(s, cx, cy) {
+  const sc = K * s, vw = 1920 / sc, vh = 1080 / sc;
+  cx = clamp(cx, vw / 2, W - vw / 2); cy = clamp(cy, vh / 2, H - vh / 2);
+  $('win').style.transform = `translate(${960 - cx * sc}px, ${540 - cy * sc}px) scale(${sc})`;
+}
+
+const img = new Image();
+let curSrc = '';
+async function frame(t) {
+  // —— 镜头 & 结尾 ——
+  const [s, cx, cy] = camAt(t);
+  const outro = seg(t, 8.95, 9.4);
+  setCam(s * lerp(1, 0.9, out4(outro)), cx, cy);
+  $('win').style.opacity = String(1 - out4(outro));
+  const ic = seg(t, 9.0, 9.75);
+  $('icon').style.opacity = String(out4(seg(t, 9.0, 9.3)));
+  $('icon').style.transform = `scale(${lerp(0.72, 1, spring(ic))})`;
+
+  // —— 样式面板：点了就换（真软件就是立刻变的）——
+  const st8 = ['A', 'B', 'C', 'D', 'E', 'F'][CLICKS.filter(c => t >= c[0]).length];
+  for (const k of 'ABCDEF') $('p' + k).style.display = k === st8 ? 'block' : 'none';
+
+  // —— 预览 ——
+  const playing = t >= PLAY_AT;
+  const st = playing ? Math.min(T0 + (t - PLAY_AT), T0 + (NF - 1) / 60) : T0;
+  const fi = playing ? 1 + Math.round((t - PLAY_AT) * 60) : 1;
+  const src = `frames/f${String(clamp(fi, 1, NF)).padStart(3, '0')}.jpg`;
+  if (src !== curSrc) { curSrc = src; img.src = src; await img.decode().catch(() => {}); $('vid').src = src; }
+  const a = aspectAt(t), ch = STAGE_H, cw = Math.min(STAGE_W, ch * a);
+  const cv = $('canvas'); cv.style.width = cw + 'px'; cv.style.left = ((STAGE_W - cw) / 2) + 'px';
+  $('scene').style.width = cw + 'px'; $('scene').style.height = ch + 'px';
+  const pad = 0.06 * Math.min(cw, ch), kw = Math.min(cw - 2 * pad, (ch - 2 * pad) * (CW / CH)), kh = kw * CH / CW;
+  const kx = (cw - kw) / 2, ky = (ch - kh) / 2, card = $('card');
+  Object.assign(card.style, { left: kx + 'px', top: ky + 'px', width: kw + 'px', height: kh + 'px',
+    borderRadius: (0.011 * kw) + 'px', boxShadow: `0 ${0.012 * kh}px ${0.04 * kw}px rgba(10,20,50,.32)` });
+  const k = kw / CW, v = $('vid');
+  Object.assign(v.style, { width: (FW * k) + 'px', height: (FH * k) + 'px', left: (-CX0 * k) + 'px', top: (-CY0 * k) + 'px' });
+  // 背景：蓝 → 粉（4.0 秒）→ 薄荷（5.0 秒），0.35 秒换过去
+  $('gPink').style.opacity = String(out4(seg(t, 4.0, 4.35)));
+  $('gMint').style.opacity = String(out4(seg(t, 5.0, 5.35)));
+  $('gPink').style.display = t >= 5.35 ? 'none' : 'block';
+  // 镜头推近：对准素材里的鼠标（卡片坐标），不出画布
+  const z = zoomAt(t), f = focusAt(st);
+  let fx = kx + ((f[0] * FW - CX0) / CW) * kw, fy = ky + ((f[1] * FH - CY0) / CH) * kh;
+  fx = clamp(fx, cw / (2 * z), cw - cw / (2 * z)); fy = clamp(fy, ch / (2 * z), ch - ch / (2 * z));
+  $('scene').style.transform = `translate(${cw / 2 - fx * z}px, ${ch / 2 - fy * z}px) scale(${z})`;
+
+  // —— 滑块、数值、段上的倍数 ——
+  const zs = zoomSlider(t), kxp = knobX(zs);
+  $('knob').style.left = (kxp - 19) + 'px'; $('fill').style.width = (kxp - 415) + 'px';
+  $('val').textContent = zs.toFixed(1) + '×'; $('blab').textContent = zs.toFixed(1) + '×';
+  // —— 播放 ——
+  $('play').style.display = playing ? 'block' : 'none';
+  const mm = Math.floor(st / 60), ss = st - mm * 60;
+  $('time').textContent = `${mm}:${ss.toFixed(1).padStart(4, '0')} / 0:33.0`;
+  $('ph').style.left = (X0 + st * PPS - 11) + 'px';
+  // —— 鼠标、点击圈 ——
+  const c = cursorAt(t), cur = $('cur');
+  cur.style.transform = `translate(${c[0] - 11}px, ${c[1] - 9}px) scale(${pressAt(t) ? 0.86 : 1})`;
+  cur.style.opacity = String(1 - seg(t, 7.6, 7.9));
+  const last = [PLAY_AT, ...CLICKS.map(x => x[0])].filter(x => t >= x).pop();
+  const r = $('ring');
+  if (last !== undefined && t - last < 0.4) {
+    const u = (t - last) / 0.4, p = last === PLAY_AT ? PLAY : PT[CLICKS.find(x => x[0] === last)[1]];
+    r.style.opacity = String(0.9 * (1 - u)); r.style.transform = `translate(${p[0]}px, ${p[1]}px) scale(${0.4 + 0.9 * out4(u)})`;
+  } else r.style.opacity = '0';
+}
+
+window.PROMO = { END, frame, clicks: () => [DRAG[0], PLAY_AT, ...CLICKS.map(c => c[0])], BPM: 120 };
+(async () => {
+  mouse = await (await fetch('mouse2.json')).json().catch(() => []);
+  await Promise.all([...document.images].map(i => i.decode().catch(() => {})));
+  await frame(0);
+  window.READY = true;
+})();
+</script>
+</body></html>
