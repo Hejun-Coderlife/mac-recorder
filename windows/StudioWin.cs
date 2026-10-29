@@ -80,8 +80,9 @@ namespace ScreenRecorder
             var ci = new CURSORINFO { cbSize = Marshal.SizeOf<CURSORINFO>() };
             if (!GetCursorInfo(ref ci)) return;
             double now = Clock.Now;
-            // 有指针图案就画（同 Mac 版）；没接鼠标的电脑（虚拟机等）系统会报「没显示」，但图案还在
-            int shape = ci.hCursor != IntPtr.Zero ? ShapeIndex(ci.hCursor) : (ci.flags & 1) != 0 ? ShapeIndex(arrowHandle) : -1;
+            // 有指针图案就画（同 Mac 版）；系统因为没接鼠标 / 在用触摸而不画指针（CURSOR_SUPPRESSED）时画标准箭头，
+            // 点到哪看得清；程序自己把指针藏起来（没有图案）才不画
+            int shape = ci.hCursor != IntPtr.Zero ? ShapeIndex(ci.hCursor) : (ci.flags & 3) != 0 ? ShapeIndex(arrowHandle) : -1;
             if (Seen.Count < 8) { var key = $"flags={ci.flags} cursor={(ci.hCursor == IntPtr.Zero ? "none" : ci.hCursor == arrowHandle ? "arrow" : "other")}"; if (!Seen.Contains(key)) Seen.Add(key); }
             bool left = (GetAsyncKeyState(0x01) & 0x8000) != 0;
             lock (gate)
