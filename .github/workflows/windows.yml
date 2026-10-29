@@ -486,7 +486,7 @@ jobs:
             $lin = PeakLin (Join-Path $root "vol-$v.mp4")
             Write-Host "volume $v -> peak $([Math]::Round($lin, 3)) (source $([Math]::Round($src, 3)))"
             if ($v -ne "2" -and [Math]::Abs($lin - $src * [double]$v) -gt 0.05) { throw "volume $v wrong: $lin" }
-            if ($v -eq "2" -and ($lin -gt 0.97 -or $lin -lt 0.8)) { throw "200% should be soft-limited below 0.95: $lin" }
+            if ($v -eq "2" -and ($lin -gt 0.95 -or $lin -lt 0.8)) { throw "200% should be limited to about 0.9: $lin" }
           }
           # 4) 导出设置：720p / 30 帧；GIF；取消；剪贴板
           $o = Variant "res720" ('{' + $base + '}') @{ STUDIO_RES = "720"; STUDIO_FPS = "30"; STUDIO_QUALITY = "small"; STUDIO_CLIP = "1" }

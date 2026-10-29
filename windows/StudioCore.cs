@@ -1201,7 +1201,7 @@ namespace ScreenRecorder
         }
 
         // ---- 声音（导出和剪辑窗口的预览共用，所以预览听到的就是成片的声音）----
-        // 原声每条音轨：按修剪 / 剪掉 / 快放切块（快放用 atempo，音调不变）→ 接起来 → 乘音量；再混上点击音效 → 软限幅（0.8 以上柔和压到 0.95 以内，同 Mac 版）
+        // 原声每条音轨：按修剪 / 剪掉 / 快放切块（快放用 atempo，音调不变）→ 接起来 → 乘音量；再混上点击音效 → 限幅（不破音）
         public sealed class AudioPlan
         {
             public string Inputs, Graph; readonly List<string> temp = new List<string>();   // Graph：直接放命令行（新版 ffmpeg 去掉了 -filter_complex_script）
@@ -1253,9 +1253,8 @@ namespace ScreenRecorder
                 g.Append($"[{ci}:a:0]{fmt},volume={F(proj.Audio.Clicks)}[clk];\n");
                 mix.Add("[clk]");
             }
-            // 软限幅：|x| ≤ 0.8 原样；以上 0.8 + 0.15·tanh((|x|−0.8)/0.15)
-            string lim(int ch) => $"if(gt(abs(val({ch}))\\,0.8)\\,(0.8+0.15*tanh((abs(val({ch}))-0.8)/0.15))*if(gte(val({ch})\\,0)\\,1\\,-1)\\,val({ch}))";
-            string soft = $"aeval=exprs={lim(0)}|{lim(1)}:channel_layout=stereo,{fmt}";
+            // 限幅（防破音）：超过 100% 时用 ffmpeg 的前瞻限幅器压在 0.9 以内，不自动抬音量；正常音量不受影响
+            string soft = $"alimiter=limit=0.9:attack=2:release=60:level=0:latency=1,{fmt}";
             if (mix.Count == 1) g.Append(mix[0]).Append(soft).Append("[aout]");
             else g.Append(string.Concat(mix)).Append($"amix=inputs={mix.Count}:duration=longest:normalize=0,{soft}[aout]");
             plan.Inputs = inputs; plan.Graph = g.ToString().Replace("\n", "");
