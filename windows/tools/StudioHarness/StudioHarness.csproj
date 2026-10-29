@@ -16,5 +16,9 @@
     <Compile Include="../../Whisper.cs" />
     <Compile Include="../../StudioCanvas.cs" />
     <Compile Include="../../StudioTestsW3.cs" />
+    <Compile Include="../../StudioOverlay.cs" />
+    <Compile Include="../../StudioMusic.cs" />
+    <Compile Include="../../StudioSuggest.cs" />
+    <Compile Include="../../StudioTestsW4.cs" />
   </ItemGroup>
 </Project>

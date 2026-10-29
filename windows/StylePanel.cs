@@ -36,6 +36,9 @@ namespace ScreenRecorder
                 Slider(L("圆角", "Corners"), 0, 40, l => l.CornerRadius, (l, v) => l.CornerRadius = v, v => $"{Math.Round(v)}"),
                 Slider(L("阴影", "Shadow"), 0, 1, l => l.Shadow, (l, v) => l.Shadow = v, v => $"{Math.Round(v * 100)}%"),
                 Slider(L("阴影虚化", "Softness"), 0, 1, l => l.ShadowBlur, (l, v) => l.ShadowBlur = v, v => $"{Math.Round(v * 100)}%")));
+            Section(L("推近", "Zoom"), Box(
+                Chips(new[] { ("0.6", L("慢", "Slow")), ("1", L("标准", "Normal")), ("1.7", L("快", "Fast")) }, 3, l => l.ZoomSpeed < 0.8 ? "0.6" : l.ZoomSpeed > 1.35 ? "1.7" : "1", (l, v) => l.ZoomSpeed = double.Parse(v, System.Globalization.CultureInfo.InvariantCulture)),
+                Caption(L("镜头推近、拉远、跟随鼠标的快慢；每段推近也能在下面单独设", "How fast the camera zooms and follows; each zoom can override it below the timeline"))));
             Section(L("鼠标", "Cursor"), CursorBox());
             Section(L("快捷键", "Shortcuts"), KeysBox());
             if (ed.HasCamera) Section(L("摄像头", "Camera"), CameraBox());
@@ -346,8 +349,14 @@ namespace ScreenRecorder
             tips.SetToolTip(play, L("试听", "Preview sound"));
             var soundRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
             soundRow.Controls.Add(box); soundRow.Controls.Add(play);
+            // 结尾鼠标回到起点（循环播放时首尾接得上），镜头也可以一起拉回全景
+            var loop = Check(L("结尾鼠标回到起点", "Return cursor to start at the end"), l => l.CursorLoop, (l, v) => l.CursorLoop = v);
+            tips.SetToolTip(loop, L("最后一小段里鼠标慢慢回到开头的位置，做成循环播放的动图、视频时首尾接得上", "In the last moment the cursor glides back to where it started, so looping videos join seamlessly"));
+            var loopSec = Slider(L("用时", "Duration"), 0.5, 2, l => l.CursorLoopSec, (l, v) => l.CursorLoopSec = v, v => L($"{v:0.0} 秒", $"{v:0.0}s"));
+            var loopZoom = Check(L("镜头也拉回全景", "Also zoom back out"), l => l.LoopZoomOut, (l, v) => l.LoopZoomOut = v);
             syncs.Add(() =>
             {
+                loopSec.Visible = loopZoom.Visible = Look.CursorLoop;
                 after.Visible = Look.HideIdleCursor;
                 soundRow.Visible = Look.ClickSound;
                 int i = Array.FindIndex(names, n => n.Item1 == Look.ClickStyle);
@@ -356,7 +365,7 @@ namespace ScreenRecorder
             return Box(
                 Slider(L("大小", "Size"), 0.5, 3, l => l.CursorScale, (l, v) => l.CursorScale = v, v => $"{v:0.0}×"),
                 Slider(L("顺滑", "Smoothing"), 0, 1, l => l.Smoothing, (l, v) => l.Smoothing = v, v => v < 0.01 ? L("不平滑", "Off") : $"{Math.Round(v * 100)}%"),
-                hide, after, ripple, sound, soundRow);
+                hide, after, ripple, sound, soundRow, loop, loopSec, loopZoom);
         }
 
         // ---- 声音：一键静音录到的声音、电脑声音 / 麦克风各自的音量（0–200%）、点击声音量；改了预览声音会在后台重做（约一两秒） ----
@@ -392,6 +401,27 @@ namespace ScreenRecorder
             if (a.Count > 1 && a.Any(c => c != 1)) items.Add(CheckP(L("电脑声音也降噪", "Also clean the computer audio"), p => p.Audio.DenoiseSystem, (p, v) => p.Audio.DenoiseSystem = v));
             items.Add(Caption(a.Count > 1 ? L("去掉键盘、风扇、空调这类持续的杂音；作用在麦克风和讲解上", "Removes steady background noise (fans, hum); applies to the microphone and voice-overs")
                                           : L("去掉键盘、风扇、空调这类持续的杂音；作用在录到的声音（含麦克风）和讲解上", "Removes steady background noise (fans, hum); applies to the recorded sound and voice-overs")));
+            // 背景音乐：选文件、音量、淡入淡出、循环、说话时压低（音乐段在时间轴音乐轨上拖）
+            items.Add(new Label { Text = L("背景音乐", "Background music"), AutoSize = true, Margin = new Padding(0, 6, 0, 2) });
+            var choose = new Button(); Small(choose, "♪ " + L("选择音乐…", "Choose Music…"), (s, e) => ed.ChooseMusic()); choose.Width = W;
+            items.Add(choose);
+            var mus = new List<Control>
+            {
+                SliderP(L("音乐音量", "Volume"), 0, 1.5, p => p.Music.Volume, (p, v) => p.Music.Volume = v, pct),
+                SliderP(L("淡入", "Fade in"), 0, 5, p => p.Music.FadeIn, (p, v) => p.Music.FadeIn = v, v => L($"{v:0.0} 秒", $"{v:0.0}s")),
+                SliderP(L("淡出", "Fade out"), 0, 5, p => p.Music.FadeOut, (p, v) => p.Music.FadeOut = v, v => L($"{v:0.0} 秒", $"{v:0.0}s")),
+                CheckP(L("循环到片尾", "Loop to the end"), p => p.Music.Loop, (p, v) => p.Music.Loop = v),
+                CheckP(L("说话时自动压低音乐", "Lower the music while someone talks"), p => p.Music.Duck, (p, v) => p.Music.Duck = v),
+                SliderP(L("压低", "Duck by"), -30, -6, p => p.Music.DuckDB, (p, v) => p.Music.DuckDB = v, v => $"{Math.Round(v)} dB"),
+            };
+            tips.SetToolTip(mus[4], L("有讲解、或者录到的声音里有人说话时，音乐自动压低，说完慢慢回来", "Lowers the music under voice-overs and speech in the recording, then brings it back"));
+            items.AddRange(mus);
+            syncs.Add(() =>
+            {
+                bool any = ed.Project.Music.Clips.Count > 0;
+                foreach (var c in mus) c.Visible = any;
+                mus[5].Visible = any && ed.Project.Music.Duck;
+            });
             items.Add(Caption(L("预览里听到的就是成片的声音；改了音量、剪辑后稍等一两秒生效", "The preview plays the final mix; after changing volume or cuts it updates in a second or two")));
             syncs.Add(() =>
             {
@@ -552,7 +582,7 @@ namespace ScreenRecorder
         public void Sync()
         {
             var cw = new JsonW(); if (ed.Project.Camera != null) ed.Project.Camera.Write(cw);
-            var sig = Look.ToJson() + "|" + cw + "|" + ed.Project.Audio.ToJson() + "|" + ed.Project.CaptionStyle.ToJson() + "|" + ed.Presets.DefaultKey + "|" + string.Join(",", ed.Presets.Presets.Select(p => p.Name));
+            var sig = Look.ToJson() + "|" + cw + "|" + ed.Project.Audio.ToJson() + "|" + ed.Project.Music.ToJson() + "|" + ed.Project.CaptionStyle.ToJson() + "|" + ed.Presets.DefaultKey + "|" + string.Join(",", ed.Presets.Presets.Select(p => p.Name));
             if (sig == lastSig) return;
             lastSig = sig;
             syncing = true;

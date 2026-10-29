@@ -36,6 +36,7 @@ namespace ScreenRecorder
         {
             Selected = kind == "seg" ? id : null; SelectedCut = kind == "cut" ? id : null;
             SelectedVoice = kind == "voice" ? id : null; SelectedCaption = kind == "cap" ? id : null; SelectedLayout = kind == "layout" ? id : null;
+            SelectedRed = kind == "red" ? id : null; SelectedAnn = kind == "ann" ? id : null; SelectedMusic = kind == "music" ? id : null;
             Picking = false;
             Changed?.Invoke();
         }
@@ -168,7 +169,9 @@ namespace ScreenRecorder
             capInspector.Dock = DockStyle.Top; capInspector.Height = 34; capInspector.Visible = false;
             BuildInspector(); BuildCutInspector(); BuildVoiceInspector(); BuildCaptionInspector(); BuildLayoutInspector();
             tlArea.Controls.Add(Timeline); tlArea.Controls.Add(inspector); tlArea.Controls.Add(cutInspector); tlArea.Controls.Add(voiceInspector); tlArea.Controls.Add(capInspector); tlArea.Controls.Add(layInspector);
+            BuildW4Inspectors(tlArea);
             if (HasCamera) tlArea.Height += 26;   // 多一条「布局」轨
+            tlArea.Height += TimelineView.W4Lanes;   // 遮挡、标注、音乐三条轨
             var barLine2 = new Panel { Dock = DockStyle.Bottom, Height = 1, BackColor = Theme.Line };
             var bar = new Panel { Dock = DockStyle.Bottom, Height = 50, Padding = new Padding(14, 7, 14, 7), BackColor = Theme.Window };
             BuildControlBar(bar);
@@ -177,7 +180,7 @@ namespace ScreenRecorder
             var pv = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14), BackColor = Theme.Window };
             pv.Controls.Add(preview);
             preview.Pick = (x, y) => PickAt(x, y);
-            InitW3();
+            InitW3(); InitW4();
             left.Controls.Add(pv); left.Controls.Add(barLine); left.Controls.Add(bar); left.Controls.Add(barLine2); left.Controls.Add(tlArea);
 
             Controls.Add(left); Controls.Add(sep); Controls.Add(style); Controls.Add(topLine); Controls.Add(top);
@@ -200,7 +203,8 @@ namespace ScreenRecorder
             tips.SetToolTip(voiceBtn, L("从播放头开始边放边录你的声音（麦克风）；再点一下、空格或 Esc 停。录好的在时间轴「讲解」轨", "Plays from the playhead while recording your microphone; click again, Space or Esc to stop. It goes on the Voice-over lane"));
             Flat(capBtn, "字 " + L("字幕", "Captions"), (s, e) => ShowCaptionMenu());
             tips.SetToolTip(capBtn, L("把说的话自动变成字幕（在本机识别，不上传）；也能导出 .srt", "Turn speech into captions (recognized on this PC, nothing uploaded); export .srt"));
-            leftTools.Controls.AddRange(new Control[] { zoomBtn, cutBtn, voiceBtn, capBtn });
+            leftTools.Controls.AddRange(new Control[] { zoomBtn, cutBtn, voiceBtn, capBtn, annotateBtn });
+            BuildW4Bar();
 
             var rightTools = new FlowLayoutPanel { Dock = DockStyle.Right, AutoSize = true, WrapContents = false, Padding = new Padding(0), Margin = new Padding(0) };
             Flat(tlMinus, "−", (s, e) => SetTimelineScale(Timeline.Scale / 1.5, null)); tlMinus.Width = 30;
@@ -210,7 +214,7 @@ namespace ScreenRecorder
             var tlTip = L("时间轴缩放（只改时间轴的显示，不影响成片）：也可以在时间轴上按住 Ctrl 滚动滚轮、或触控板双指捏合；放大后滚轮或双指左右滑翻看",
                           "Timeline zoom (display only): hold Ctrl and scroll on the timeline, or pinch on a touchpad; when zoomed in, scroll or swipe sideways to move along");
             foreach (Control c in new Control[] { tlMinus, tlScale, tlPlus }) tips.SetToolTip(c, tlTip);
-            rightTools.Controls.AddRange(new Control[] { autoBtn, undoBtn, redoBtn, tlMinus, tlScale, tlPlus });
+            rightTools.Controls.AddRange(new Control[] { suggestBtn, autoBtn, undoBtn, redoBtn, tlMinus, tlScale, tlPlus });
 
             // 正中：圆形播放键 + 时间（按整条居中）
             var center = new Panel { Width = 290, Height = 36, BackColor = Theme.Window };
@@ -259,6 +263,7 @@ namespace ScreenRecorder
             tips.SetToolTip(insPick, L("点了以后在预览画面上点一下，设成这段推近盯住的位置（Esc 取消）", "Then click the preview to set where this zoom looks (Esc cancels)"));
             Flat(insDelete, "🗑 " + L("删除", "Delete"), (s, e) => DeleteSelected());
             flow.Controls.AddRange(new Control[] { insTitle, insTime, scaleL, insZoom, insZoomValue, insFollow, insFixed, insPick });
+            AddZoomSpeed(flow);
             inspector.Controls.Add(flow);
             insDelete.Dock = DockStyle.Right;
             inspector.Controls.Add(insDelete);
@@ -328,6 +333,7 @@ namespace ScreenRecorder
             }
             SyncVoiceCaption();
             SyncLayoutInspector();
+            SyncW4();
             optBtn.Text = "⚙ " + ExportOpt.Summary(L);
             playBtn.Invalidate();
             tlMinus.Enabled = Timeline.Scale > 1.001; tlPlus.Enabled = Timeline.Scale < 7.999;
@@ -343,9 +349,10 @@ namespace ScreenRecorder
                 insFixed.BackColor = seg.Fixed ? Theme.Accent : Theme.Control; insFixed.ForeColor = seg.Fixed ? Color.White : Theme.Text;
                 insPick.Visible = seg.Fixed;
                 insPick.Text = Picking ? L("点画面…", "Click the picture…") : L("选位置", "Set Position");
+                SyncZoomSpeed(seg);
             }
             preview.Picking = Picking;
-            preview.Hint = Picking ? L("在画面上点一下，设成这段推近盯住的位置（Esc 取消）", "Click the picture to set where this zoom looks (Esc to cancel)") : voiceHint;
+            preview.Hint = Tool != null ? ToolHint : Picking ? L("在画面上点一下，设成这段推近盯住的位置（Esc 取消）", "Click the picture to set where this zoom looks (Esc to cancel)") : voiceHint;
             preview.Invalidate();
             Timeline.Invalidate();
             style.Sync();
@@ -387,7 +394,7 @@ namespace ScreenRecorder
 
         void SetProject(StudioProject p)
         {
-            bool lookChanged = !p.Look.Same(Project.Look), segsChanged = !p.SameSegments(Project);
+            bool lookChanged = !p.Look.Same(Project.Look), segsChanged = !p.SameSegments(Project) || (p.Look.CursorLoop && (p.TrimStart != Project.TrimStart || p.TrimEnd != Project.TrimEnd));
             Project = p;
             if (lookChanged) Rebuild(); else if (segsChanged) Replan();
             saveTimer.Stop(); saveTimer.Start();
@@ -464,7 +471,7 @@ namespace ScreenRecorder
 
         public void DeleteSelected()
         {
-            if (DeleteSelectedLayout()) return;
+            if (DeleteSelectedLayout() || DeleteSelectedW4()) return;
             if (SelectedVoice != null) { var vid = SelectedVoice; Edit(p => p.Voiceovers.RemoveAll(v => v.Id == vid)); Select(null, null); return; }
             if (SelectedCaption != null) { var kid = SelectedCaption; Edit(p => p.Captions.RemoveAll(c => c.Id == kid)); Select(null, null); return; }
             if (SelectedCut != null)
@@ -507,14 +514,14 @@ namespace ScreenRecorder
         void Rebuild()
         {
             var sc = new StudioScene(Dir, ptrack, Project.Look.Clone(), st, CursorTracker.LoadCursor);
-            var pl = sc.Plan(Project.Segments, Duration, Math.Max(1, (int)(Duration * Fps)));
+            var pl = sc.Plan(Project.Segments, Duration, Math.Max(1, (int)(Duration * Fps)), (Project.TrimStart, Project.TrimEnd));
             lock (sceneGate) { scene = sc; plan = pl; }
         }
 
         void Replan()
         {
             StudioScene sc; lock (sceneGate) sc = scene;
-            var pl = sc.Plan(Project.Segments.Select(s => s.Clone()).ToList(), Duration, Math.Max(1, (int)(Duration * Fps)));
+            var pl = sc.Plan(Project.Segments.Select(s => s.Clone()).ToList(), Duration, Math.Max(1, (int)(Duration * Fps)), (Project.TrimStart, Project.TrimEnd));
             lock (sceneGate) plan = pl;
         }
 
@@ -541,7 +548,7 @@ namespace ScreenRecorder
             int CW = (int)sc.Lay.cw, CH = (int)sc.Lay.ch;
             var dst = new byte[CW * CH * 4];
             int i = Math.Min(Math.Max((int)Math.Round(t * Fps), 0), pl.Length - 1);
-            sc.Frame(sc.Cpu, src, i, pl, dst);
+            sc.Frame(sc.Cpu, MarkOverlays(src, t), i, pl, dst);
             try { ApplyCanvas(sc, dst, t); } catch { }
             var bmp = new Bitmap(CW, CH, PixelFormat.Format32bppRgb);
             var bd = bmp.LockBits(new Rectangle(0, 0, CW, CH), ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
@@ -601,7 +608,7 @@ namespace ScreenRecorder
         readonly System.Windows.Forms.Timer audioTimer = new System.Windows.Forms.Timer { Interval = 400 };
 
         static string AudioSig(StudioProject p) =>
-            p.Audio.ToJson() + "|" + string.Join(";", p.Voiceovers.Select(v => $"{v.File},{v.Start:R},{v.TrimIn:R},{v.TrimOut:R},{v.Volume:R}")) + "|" + string.Join(";", p.Cuts.Select(c => $"{c.Start:R},{c.End:R},{c.Speed},{c.Rate:R}")) + "|" + p.TrimStart.ToString("R") + "," + p.TrimEnd.ToString("R") + "|" + p.Look.ClickSound + p.Look.ClickStyle;
+            p.Audio.ToJson() + "|" + string.Join(";", p.Voiceovers.Select(v => $"{v.File},{v.Start:R},{v.TrimIn:R},{v.TrimOut:R},{v.Volume:R}")) + "|" + string.Join(";", p.Cuts.Select(c => $"{c.Start:R},{c.End:R},{c.Speed},{c.Rate:R}")) + "|" + p.TrimStart.ToString("R") + "," + p.TrimEnd.ToString("R") + "|" + p.Look.ClickSound + p.Look.ClickStyle + "|" + p.Music.ToJson();
 
         // 预览声音过期了（改了音量、剪辑、修剪、点击声）：后台重做一份，做好换上
         void StartAudioPrep()
@@ -811,11 +818,13 @@ namespace ScreenRecorder
                 case Keys.Right: Step(1); return true;
                 case Keys.Control | Keys.Z: Undo(); return true;
                 case Keys.Control | Keys.Y: case Keys.Control | Keys.Shift | Keys.Z: Redo(); return true;
-                case Keys.Delete: case Keys.Back: if (Selected != null || SelectedCut != null || SelectedVoice != null || SelectedCaption != null || SelectedLayout != null) { DeleteSelected(); return true; } break;
+                case Keys.Delete: case Keys.Back: if (Selected != null || SelectedCut != null || SelectedVoice != null || SelectedCaption != null || SelectedLayout != null || SelectedRed != null || SelectedAnn != null || SelectedMusic != null) { DeleteSelected(); return true; } break;
+                case Keys.Control | Keys.D: if (SelectedAnn != null || SelectedRed != null) { DuplicateOverlay(); return true; } break;
                 case Keys.Escape:
                     if (RecordingVoice || countdownLeft > 0) { ToggleVoice(); return true; }
                     if (Picking) { Picking = false; Changed?.Invoke(); return true; }
-                    if (Selected != null || SelectedCut != null || SelectedVoice != null || SelectedCaption != null || SelectedLayout != null) { Select(null, null); return true; } break;
+                    if (Tool != null) { Tool = null; Changed?.Invoke(); return true; }
+                    if (Selected != null || SelectedCut != null || SelectedVoice != null || SelectedCaption != null || SelectedLayout != null || SelectedRed != null || SelectedAnn != null || SelectedMusic != null) { Select(null, null); return true; } break;
             }
             return base.ProcessCmdKey(ref msg, keyData);
         }
@@ -860,8 +869,16 @@ namespace ScreenRecorder
         public Func<double, double, bool> GrabCamera;     // 在摄像头小窗上按下：返回 true 开始拖
         public Action<double, double> MoveCamera;
         public Action ReleaseCamera;
-        bool draggingCam;
+        // 遮挡、标注：在画面上拖出来、选中后拖动 / 拉八个点、双击改字；Decor 画选中框和把手
+        public Func<double, double, bool> OverlayDown;
+        public Action<double, double> OverlayMove;
+        public Action OverlayUp;
+        public Func<double, double, bool> OverlayDouble;
+        public Func<double, double, Cursor> OverlayCursor;
+        public Action<Graphics, RectangleF> Decor;
+        bool draggingCam, draggingOv;
         RectangleF imgRect;
+        public RectangleF ImageRect => imgRect;
 
         public PreviewBox()
         {
@@ -884,6 +901,7 @@ namespace ScreenRecorder
                 g.InterpolationMode = InterpolationMode.HighQualityBilinear;
                 g.PixelOffsetMode = PixelOffsetMode.Half;
                 g.DrawImage(Image, imgRect);
+                Decor?.Invoke(g, imgRect);
             }
             if (Hint != null)
             {
@@ -899,18 +917,30 @@ namespace ScreenRecorder
         {
             base.OnMouseMove(e);
             if (draggingCam && imgRect.Width > 0) { MoveCamera?.Invoke((e.X - imgRect.X) / imgRect.Width, (e.Y - imgRect.Y) / imgRect.Height); return; }
-            Cursor = Picking && imgRect.Contains(e.Location) ? Cursors.Cross : Cursors.Default;
+            if (draggingOv && imgRect.Width > 0) { OverlayMove?.Invoke((e.X - imgRect.X) / imgRect.Width, (e.Y - imgRect.Y) / imgRect.Height); return; }
+            var oc = !Picking && imgRect.Width > 0 && OverlayCursor != null ? OverlayCursor((e.X - imgRect.X) / imgRect.Width, (e.Y - imgRect.Y) / imgRect.Height) : null;
+            Cursor = oc ?? (Picking && imgRect.Contains(e.Location) ? Cursors.Cross : Cursors.Default);
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
             if (draggingCam) { draggingCam = false; Capture = false; ReleaseCamera?.Invoke(); }
+            if (draggingOv) { draggingOv = false; Capture = false; OverlayUp?.Invoke(); }
+        }
+
+        protected override void OnMouseDoubleClick(MouseEventArgs e)
+        {
+            base.OnMouseDoubleClick(e);
+            if (!Picking && e.Button == MouseButtons.Left && imgRect.Width > 0 && imgRect.Contains(e.Location))
+                OverlayDouble?.Invoke((e.X - imgRect.X) / imgRect.Width, (e.Y - imgRect.Y) / imgRect.Height);
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
+            if (!Picking && e.Button == MouseButtons.Left && imgRect.Width > 0 && imgRect.Contains(e.Location) && e.Clicks == 1 &&
+                OverlayDown != null && OverlayDown((e.X - imgRect.X) / imgRect.Width, (e.Y - imgRect.Y) / imgRect.Height)) { draggingOv = true; Capture = true; return; }
             if (!Picking && e.Button == MouseButtons.Left && imgRect.Width > 0 && imgRect.Contains(e.Location) &&
                 GrabCamera != null && GrabCamera((e.X - imgRect.X) / imgRect.Width, (e.Y - imgRect.Y) / imgRect.Height)) { draggingCam = true; Capture = true; Cursor = Cursors.SizeAll; return; }
             if (!Picking || !imgRect.Contains(e.Location) || imgRect.Width <= 0) return;

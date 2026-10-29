@@ -195,7 +195,7 @@ namespace ScreenRecorder
     struct Spring
     {
         public double x, v;
-        readonly double w;
+        public double w;                     // 越大越快；推近速度改它
         public Spring(double x, double w) { this.x = x; v = 0; this.w = w; }
         public void Step(double g, double dt)
         {
@@ -289,7 +289,8 @@ namespace ScreenRecorder
         }
 
         // 逐帧算镜头和鼠标：从 0 秒算到结尾（修剪只决定导出哪几帧，镜头怎么走不受影响，预览和成片一致）
-        public static FramePlan[] Make(Track tr, StudioLayout L, StudioStyle st, StudioLook look, List<ZoomSegment> segments, int n, double duration)
+        // range = 成片从哪导到哪（修剪起止，同一条时间线）：「结尾鼠标回到起点」用
+        public static FramePlan[] Make(Track tr, StudioLayout L, StudioStyle st, StudioLook look, List<ZoomSegment> segments, int n, double duration, (double a, double b)? range = null)
         {
             double W = L.W, H = L.H, dt = 1.0 / st.Fps;
             var mouse = new Mouse(tr); var ev = Events(tr, duration);
@@ -302,7 +303,10 @@ namespace ScreenRecorder
             moved.AddRange(tr.Clicks.Select(c => c[0])); moved.Sort();
             int mi = 0; double alpha = 1, lastMove = 0;
             var segs = segments.OrderBy(x => x.Start).ToList();
-            var lz = new Spring(0, 4); var cx = new Spring(W / 2, 4); var cy = new Spring(H / 2, 4);
+            // 推近速度：镜头弹簧的强度。全局按样式；某一段单独设了就用它（段结束后拉远的那 2 秒也按它，免得拉远突然变速）
+            double baseW = 4 * Math.Min(Math.Max(look.ZoomSpeed, 0.3), 3);
+            var lz = new Spring(0, baseW); var cx = new Spring(W / 2, baseW); var cy = new Spring(H / 2, baseW);
+            double segW = baseW, segWUntil = -1;
             Spring mxs = default, mys = default; bool haveMouse = false;
             int si = 0; string cur = null;
             double fx = W / 2, fy = H / 2;
@@ -322,7 +326,11 @@ namespace ScreenRecorder
                 }
                 while (si < segs.Count && segs[si].End <= t) si++;
                 double tz = 1, tx = W / 2, ty = H / 2;
-                if (si < segs.Count && segs[si].Start <= t)
+                bool inSeg = si < segs.Count && segs[si].Start <= t;
+                if (inSeg) { segW = segs[si].Speed is double sp ? 4 * Math.Min(Math.Max(sp, 0.3), 3) : baseW; segWUntil = segs[si].End + 2; }
+                double ww = inSeg || t < segWUntil ? segW : baseW;
+                lz.w = ww; cx.w = ww; cy.w = ww;
+                if (inSeg)
                 {
                     var seg = segs[si]; double Z = Math.Max(1, seg.Zoom);
                     double hw = L.cw / (2 * Z * L.s), hh = L.ch / (2 * Z * L.s);   // 放大时看得到的原画面半宽、半高
@@ -371,7 +379,38 @@ namespace ScreenRecorder
                 }
                 outp[i] = f;
             }
+            if (look.CursorLoop && range is (double, double) rg) LoopBack(outp, rg, st.Fps, look.CursorLoopSec, look.LoopZoomOut, L);
             return outp;
+        }
+
+        // 结尾鼠标回到起点：最后 seconds 秒，鼠标从当时的位置缓缓（缓进缓出）走回修剪起点那一帧的位置；
+        // zoomOut 时镜头同样缓缓回到全景，最后一帧和第一帧接得上，做循环视频（同 Mac 版）
+        public static void LoopBack(FramePlan[] outp, (double a, double b) range, double fps, double seconds, bool zoomOut, StudioLayout L)
+        {
+            if (outp.Length == 0) return;
+            int first = Math.Min(Math.Max(0, (int)Math.Round(range.a * fps)), outp.Length - 1);
+            int last = Math.Min(outp.Length - 1, Math.Max(first, (int)Math.Round(range.b * fps) - 1));   // 导出的最后一帧
+            int len = Math.Max(1, (int)Math.Round(Math.Min(Math.Max(seconds, 0.2), 4) * fps));
+            int from = Math.Max(first + 1, last - len);
+            if (last <= from) return;
+            var home = outp[first];
+            double fullX = L.cw / 2, fullY = L.ch / 2;
+            for (int i = from; i <= last; i++)
+            {
+                double u = (i - from) / (double)(last - from), e = u * u * (3 - 2 * u);
+                var f = outp[i];
+                f.mx += (home.mx - f.mx) * e; f.my += (home.my - f.my) * e;
+                f.alpha += (Math.Max(home.alpha, 1) - f.alpha) * e;      // 回到起点时鼠标是显示着的
+                if (home.shape >= 0) f.shape = e > 0.5 ? home.shape : (f.shape >= 0 ? f.shape : home.shape);
+                if (zoomOut)
+                {
+                    double lzv = Math.Log(f.z) * (1 - e);              // 放大倍数按对数插值回 1
+                    f.z = Math.Exp(lzv); f.sx += (fullX - f.sx) * e; f.sy += (fullY - f.sy) * e;
+                    double ex = L.cw / (2 * f.z), ey = L.ch / (2 * f.z);
+                    f.sx = Math.Min(Math.Max(f.sx, ex), L.cw - ex); f.sy = Math.Min(Math.Max(f.sy, ey), L.ch - ey);
+                }
+                outp[i] = f;
+            }
         }
 
         // 快门子位置（运动模糊）：镜头每帧移动（含推拉）换算成画布上的像素，超过门槛才模糊；快门角 轻 90° / 中 180° / 强 270°，取 3–8 个位置。
@@ -838,8 +877,8 @@ namespace ScreenRecorder
             }
         }
 
-        public FramePlan[] Plan(List<ZoomSegment> segments, double duration, int frames = 0) =>
-            StudioPlan.Make(Track, Lay, St, Look, segments, frames > 0 ? frames : Math.Max(1, (int)(duration * St.Fps)), duration);
+        public FramePlan[] Plan(List<ZoomSegment> segments, double duration, int frames = 0, (double a, double b)? range = null) =>
+            StudioPlan.Make(Track, Lay, St, Look, segments, frames > 0 ? frames : Math.Max(1, (int)(duration * St.Fps)), duration, range);
 
         // 第 i 帧（从 0 秒算）的点击波纹和鼠标
         public List<Compositor.Overlay> Overlays(int i, FramePlan f)
@@ -879,6 +918,7 @@ namespace ScreenRecorder
     sealed class VideoInfo
     {
         public int Width, Height; public double Duration; public bool HasAudio; public string Matrix = "bt709";
+        public bool ForceBgra;               // 合成要 BGRA 原画面（有遮挡 / 标注时：先画进原画面再合成，显卡版也走这条）
         public List<int> AudioChannels = new List<int>();   // 每条音轨几个声道（Mac 录的：双声道 = 电脑声音、单声道 = 麦克风；Windows 录的只有一条，两样混在一起）
         public VideoInfo With(int w, int h) { var c = (VideoInfo)MemberwiseClone(); c.Width = w; c.Height = h; return c; }
     }
@@ -1021,10 +1061,13 @@ namespace ScreenRecorder
             var lay = new StudioLayout(track, proj.Look, k / kd);
             var scene = new StudioScene(dir, wtrack, proj.Look, st, loadCursor, null, lay);
             int nAll = Math.Max(1, (int)(outDur * st.Fps));
-            var plan = scene.Plan(wproj.Segments, outDur, nAll);
+            double outEnd = wproj.TrimEnd > proj.TrimStart ? wproj.TrimEnd : outDur;
+            var plan = scene.Plan(wproj.Segments, outDur, nAll, (proj.TrimStart, outEnd));
             // 修剪：导出成片第 first..<last 帧（镜头按整段算，和预览一致）
             int first = Math.Min(Math.Max(0, (int)Math.Round(proj.TrimStart * st.Fps)), nAll - 1);
             int last = Math.Max(first + 1, Math.Min(nAll, wproj.TrimEnd > proj.TrimStart ? (int)Math.Round(wproj.TrimEnd * st.Fps) : nAll));
+            // 遮挡、标注：画进原画面（素材时间）再合成；有的话原画面一律按 BGRA 解（显卡版也是）
+            var overlay = OverlayLayer.Make(proj);
             int n = last - first;
             double t0 = first / (double)st.Fps, len = n / (double)st.Fps;
             // 自测：STUDIO_PLANDUMP=文件 → 每帧写「秒,放大倍数,鼠标离画面中心多远（横、竖，按半个画面算）,镜头横 / 竖是否顶到画布边（1/0）」
@@ -1042,13 +1085,14 @@ namespace ScreenRecorder
             log?.Invoke(string.Format(CultureInfo.InvariantCulture, "source {0}x{1} {2:0.00}s audio={3} matrix={4} → canvas {5}x{6} frames {7} (trim {8:0.00}–{9:0.00}s) segments {10} clicks {11} keys {12} aspect={13} background={14} blur={15} clickSound={16} fps={17} res={18} decode={19}x{20} cuts={21} out={22:0.00}s",
                 info.Width, info.Height, info.Duration, info.HasAudio, info.Matrix, CW, CH, n, proj.TrimStart, proj.TrimEnd, wproj.Segments.Count, wtrack.Clicks.Count, wtrack.Keys.Count, proj.Look.Aspect, proj.Look.Background, proj.Look.Blur,
                 proj.Look.ClickSound ? proj.Look.ClickStyle : "off", st.Fps, opt?.Resolution ?? "original", W, H, map.Pieces.Count, len));
+            if (overlay != null) log?.Invoke($"overlays: redactions {proj.Redactions.Count} annotations {proj.Annotations.Count}");
 
             // 合成用显卡还是 CPU
             string want = (Environment.GetEnvironmentVariable("STUDIO_COMPOSE") ?? "").ToLowerInvariant();
             IComposer comp = cpu;
             if (want != "cpu" && GpuFactory != null)
             {
-                try { comp = GpuFactory(lay, cpu, info.With(W, H)) ?? cpu; }
+                try { var vi = info.With(W, H); vi.ForceBgra = overlay != null; comp = GpuFactory(lay, cpu, vi) ?? cpu; }
                 catch (Exception e) { if (want == "gpu") throw new Exception("GPU compositor failed: " + e.Message, e); log?.Invoke("gpu compositor unavailable: " + e.Message); }
             }
             else if (want == "gpu") throw new Exception("GPU compositor not available");
@@ -1148,6 +1192,8 @@ namespace ScreenRecorder
             reader.Start(); writer.Start();
 
             byte[] cur = null; int curIdx = -1;
+            byte[] marked = overlay != null ? new byte[frameBytes] : null;   // 画了遮挡 / 标注的原画面（原画面本身不动，下一帧可能还要用）
+            double unit = wtrack.PixelsPerPoint;
             var sw = Stopwatch.StartNew();
             var swIn = new Stopwatch(); var swComp = new Stopwatch(); var swOut = new Stopwatch();
             int blurred = 0;
@@ -1170,7 +1216,10 @@ namespace ScreenRecorder
                     swIn.Stop();
                     if (cur == null) throw new Exception("no frames decoded: " + decErr.ToString().Trim());
                     swOut.Start(); var dst = dstFree.Take(cts.Token); swOut.Stop();
-                    swComp.Start(); if (scene.Frame(comp, cur, i, plan, dst)) blurred++;
+                    swComp.Start();
+                    var srcF = cur;
+                    if (overlay != null && overlay.Apply(cur, marked, W, H, map.Src(i / (double)st.Fps), unit)) srcF = marked;
+                    if (scene.Frame(comp, srcF, i, plan, dst)) blurred++;
                     post?.Apply(dst, comp.Nv12Out, map.Src(i / (double)st.Fps), i / (double)st.Fps); swComp.Stop();
                     swOut.Start(); dstFull.Add(dst, cts.Token); swOut.Stop();
                     if (kf % 30 == 0) progress?.Invoke(kf / (double)n);
@@ -1294,7 +1343,20 @@ namespace ScreenRecorder
                     }
                 }
             }
-            if (streams.Count == 0 && !clicks && voiceWav == null) return null;
+            // 背景音乐：按成片时间混成一条（音量、淡入淡出、循环、说话时压低）
+            string musicWav = null;
+            if (proj.Music != null && proj.Music.Clips.Count > 0 && proj.Music.Volume > 0.001)
+            {
+                var env = proj.Music.Duck ? MusicDuck.Envelope(raw, info, a) : null;
+                var mus = MusicMix.Build(dir, proj, map, t0, len, vspans, env);
+                if (mus != null)
+                {
+                    musicWav = Path.Combine(Path.GetTempPath(), "studio-music-" + Guid.NewGuid().ToString("N") + ".wav");
+                    File.WriteAllBytes(musicWav, MusicMix.Wav(mus));
+                    plan.Temp(musicWav);
+                }
+            }
+            if (streams.Count == 0 && !clicks && voiceWav == null && musicWav == null) return null;
             var g = new StringBuilder(); var mix = new List<string>(); var orig = new List<string>();
             string F(double v) => v.ToString("0.######", CultureInfo.InvariantCulture);
             const string fmt = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo";
@@ -1357,6 +1419,12 @@ namespace ScreenRecorder
                 string vi = AddInput(voiceWav);
                 g.Append($"[{vi}:a:0]{fmt}[voice];\n");
                 mix.Add("[voice]");
+            }
+            if (musicWav != null)
+            {
+                string mi = AddInput(musicWav);
+                g.Append($"[{mi}:a:0]{fmt}[music];\n");
+                mix.Add("[music]");
             }
             // 限幅（防破音）：超过 100% 时用 ffmpeg 的前瞻限幅器压在 0.9 以内，不自动抬音量；正常音量不受影响
             string soft = $"alimiter=limit=0.9:attack=2:release=60:level=0:latency=1,{fmt}";

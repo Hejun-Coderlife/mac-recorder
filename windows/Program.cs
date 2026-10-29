@@ -90,6 +90,8 @@ namespace ScreenRecorder
             // Studio 合成用显卡（StudioGpu.cs）；建不起来自动回到 CPU。STUDIO_COMPOSE=gpu 时没有真显卡也用软件渲染（自测）
             Studio.GpuFactory = (lay, cpu, info) => GpuComposer.TryCreate(lay, cpu, info, Environment.GetEnvironmentVariable("STUDIO_COMPOSE") == "gpu");
             KeyLayer.Renderer = KeyCapsGdi.Render;   // 键帽用 GDI+ 画真字
+            OverlayLayer.TextRenderer = OverlayGdi.Text;   // 文字标注也是
+            if (Environment.GetEnvironmentVariable("W4TEST") != null) return SelfTestW4.Run();
             if (Environment.GetEnvironmentVariable("STUDIO") != null) return SelfTest.RenderOnly();
             if (Environment.GetEnvironmentVariable("W3TEST") != null) return SelfTestW3.Run();
             if (Environment.GetEnvironmentVariable("DNDTEST") != null) return SelfTestW3.DndTest();

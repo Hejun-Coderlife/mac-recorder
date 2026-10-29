@@ -151,7 +151,7 @@ float2 PSUV(float4 pos : SV_Position) : SV_Target
         GpuComposer(StudioLayout lay, Compositor cpu, VideoInfo info, bool allowSoftware)
         {
             L = lay; W = info.Width; H = info.Height; CW = (int)lay.cw; CH = (int)lay.ch;
-            Nv12In = W % 2 == 0 && H % 2 == 0;
+            Nv12In = !info.ForceBgra && W % 2 == 0 && H % 2 == 0;   // 有遮挡 / 标注时原画面按 BGRA 给（先在 CPU 上画好）
 
             // 挑一块真显卡（跳过软件适配器和「Microsoft 基本显示适配器」）
             IDXGIAdapter1 adapter = null; string adapterName = null;

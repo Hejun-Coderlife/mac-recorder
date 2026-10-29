@@ -600,6 +600,30 @@ jobs:
           }
           foreach ($k in "EDITOR", "EDITOR_W3DEMO", "APP_LANG", "EDITORSHOT") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
 
+      - name: W4 - redactions / annotations (CPU and GPU), background music (loop / fades / ducking / limiter), cursor loop, zoom speed, speed-up suggestions; editor real-mouse smoke; screenshots
+        run: |
+          foreach ($k in "AUTOTEST", "AUTOSTUDIO", "AUTOINPUT", "AUTOAUDIO", "AUTOOUT", "STUDIO_COMPOSE", "STUDIO_ENCODER", "STUDIO") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $work = Join-Path $env:RUNNER_TEMP "studio/w4"; New-Item -ItemType Directory -Force $work | Out-Null
+          $env:W4TEST = $work
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          Remove-Item env:W4TEST
+          $txt = Get-Content "$env:TEMP\w4_test.txt" -Raw
+          Write-Host "exit=$($p.ExitCode)`n$txt"
+          if (Test-Path (Join-Path $work "demo/project.json")) { Copy-Item (Join-Path $work "demo/project.json") (Join-Path $env:RUNNER_TEMP "studio/editor/project-after-w4.json") }
+          if ($p.ExitCode -ne 0 -or -not $txt.StartsWith("OK")) { throw "W4 tests failed" }
+          # 截图：遮挡 + 标注、音乐轨 + 声音分组、建议加速（中文 / 英文）
+          $shots = Join-Path $env:RUNNER_TEMP "studio/editor"; New-Item -ItemType Directory -Force $shots | Out-Null
+          foreach ($lang in "zh", "en") {
+            foreach ($demo in "overlays", "music", "suggest") {
+              $env:EDITOR = (Join-Path $work "demo"); $env:EDITOR_W4DEMO = $demo; $env:APP_LANG = $lang; $env:EDITORSHOT = (Join-Path $shots "w4-$demo-$lang.png")
+              $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+              Write-Host "[$lang/$demo] exit=$($p.ExitCode) $(Get-Content "$env:TEMP\editorshot.txt" -Raw)"
+              if ($p.ExitCode -ne 0) { throw "W4 screenshot $demo $lang failed" }
+            }
+          }
+          foreach ($k in "EDITOR", "EDITOR_W4DEMO", "APP_LANG", "EDITORSHOT") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          Get-ChildItem (Join-Path $work "w4-marked*.mp4"), (Join-Path $work "w4-music*.mp4") -ErrorAction SilentlyContinue | Copy-Item -Destination (Join-Path $env:RUNNER_TEMP "studio")
+
       - name: W3 - camera capture (a video file stands in for the camera) + do not disturb (banners off, restored, also after a crash)
         run: |
           $cam = Join-Path $env:RUNNER_TEMP "studio/w3cam"; New-Item -ItemType Directory -Force $cam | Out-Null

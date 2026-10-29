@@ -83,6 +83,25 @@ namespace ScreenRecorder
                     else { ed.Seek(3.0); ed.ScrollStyleTo(App.L("摄像头", "Camera")); }
                     Pump(3);
                 }
+                // EDITOR_W4DEMO=overlays|music|suggest：遮挡 + 标注（选中文字）/ 背景音乐轨（选中，声音分组）/ 建议加速的虚线块
+                if (Env("EDITOR_W4DEMO") is string w4)
+                {
+                    ed.Edit(p =>
+                    {
+                        p.Redactions.Add(new Redaction { Start = 0.5, End = 4, X = 0.08, Y = 0.12, W = 0.3, H = 0.22, Style = "blur", Strength = 0.8 });
+                        p.Redactions.Add(new Redaction { Start = 2, End = 6, X = 0.62, Y = 0.62, W = 0.25, H = 0.2, Style = "mosaic", Strength = 0.6 });
+                        p.Annotations.Add(new Annotation { Start = 1, End = 5, Kind = "rect", X = 0.45, Y = 0.15, W = 0.3, H = 0.3 });
+                        p.Annotations.Add(new Annotation { Start = 2, End = 6, Kind = "arrow", X = 0.2, Y = 0.75, W = 0.22, H = -0.2, Color = Annotation.Palette[4] });
+                        p.Annotations.Add(new Annotation { Start = 2.5, End = 7, Kind = "text", X = 0.45, Y = 0.5, Text = App.L("点这里", "Click here"), FontSize = 30, Color = Annotation.Palette[1] });
+                        p.Annotations.Add(new Annotation { Start = 8, End = 10, Kind = "highlight", X = 0.3, Y = 0.3, W = 0.4, H = 0.1, Color = Annotation.Palette[2] });
+                        if (w4 == "music" && File.Exists(Path.Combine(ed.Dir, "music", "tone.wav")))
+                            p.Music.Clips.Add(new MusicClip { File = "music/tone.wav", Name = "tone", Start = 2, TrimIn = 0, TrimOut = 3, FileLength = 3 });
+                    });
+                    if (w4 == "overlays") { ed.Select("ann", ed.Project.Annotations[2].Id); ed.Seek(3.0); ed.ScrollStyleTo(App.L("推近", "Zoom")); }
+                    else if (w4 == "music") { ed.Select("music", ed.Project.Music.Clips.FirstOrDefault()?.Id); ed.Seek(3.0); ed.ScrollStyleTo(App.L("声音", "Sound")); }
+                    else { ed.Seek(2.2); ed.SuggestSpeed(); PumpUntil(() => !ed.Suggesting, 60); ed.ScrollStyleTo(App.L("鼠标", "Cursor")); }
+                    Pump(3);
+                }
                 Pump(1.5);
                 using (var bmp = new Bitmap(ed.Width, ed.Height))
                 {
@@ -330,7 +349,7 @@ namespace ScreenRecorder
         }
 
         // 真的系统输入（SendInput）
-        static class In
+        internal static class In
         {
             public static void Move(Point p) => SetCursorPos(p.X, p.Y);
             public static void Down() => Mouse(0x0002);

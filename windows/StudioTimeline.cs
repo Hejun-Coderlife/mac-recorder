@@ -10,7 +10,7 @@ using static ScreenRecorder.App;
 
 namespace ScreenRecorder
 {
-    sealed class TimelineView : Control
+    sealed partial class TimelineView : Control
     {
         readonly StudioEditor ed;
         public double Scale = 1, Offset;      // 放大倍数（1–8）、内容滚出左边的像素
@@ -19,7 +19,8 @@ namespace ScreenRecorder
         readonly ToolTip tip = new ToolTip { InitialDelay = 500 };
         string tipText;
 
-        enum Hit { None, Ruler, TrimStart, TrimEnd, SegStart, SegEnd, SegBody, CutStart, CutEnd, CutBody, VoiceStart, VoiceEnd, VoiceBody, CapStart, CapEnd, CapBody, LayStart, LayEnd, LayBody, Empty }
+        enum Hit { None, Ruler, TrimStart, TrimEnd, SegStart, SegEnd, SegBody, CutStart, CutEnd, CutBody, VoiceStart, VoiceEnd, VoiceBody, CapStart, CapEnd, CapBody, LayStart, LayEnd, LayBody,
+                   RedStart, RedEnd, RedBody, AnnStart, AnnEnd, AnnBody, MusStart, MusEnd, MusBody, SugAccept, SugIgnore, Empty }
         Hit drag = Hit.None;
         string dragSeg;
         int downX;
@@ -209,6 +210,7 @@ namespace ScreenRecorder
                             TextRenderer.DrawText(g, CameraLayoutSeg.Name(l.Mode, L), cf, Rectangle.Round(new RectangleF(r.X + 7, r.Y, r.Width - 14, r.Height)), Color.White, TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
                     }
             }
+            PaintW4(g, p);
             // 修剪范围外压暗
             using (var dim = new SolidBrush(Color.FromArgb(70, 0, 0, 0)))
             {
@@ -289,6 +291,8 @@ namespace ScreenRecorder
                     if (x1 - x0 > EdgeW * 2.5f) { if (pt.X <= x0 + EdgeW) return Hit.LayStart; if (pt.X >= x1 - EdgeW) return Hit.LayEnd; }
                     return Hit.LayBody;
                 }
+            var hw = HitW4(pt, out var wid);
+            if (hw != Hit.None) { seg = wid; return hw; }
             if (pt.Y >= SegY && pt.Y <= SegY + SegH)
                 foreach (var s in p.Segments)
                 {
@@ -328,6 +332,7 @@ namespace ScreenRecorder
                 case Hit.VoiceStart: case Hit.VoiceEnd: case Hit.VoiceBody: ed.Select("voice", dragSeg); break;
                 case Hit.CapStart: case Hit.CapEnd: case Hit.CapBody: ed.Select("cap", dragSeg); break;
                 case Hit.LayStart: case Hit.LayEnd: case Hit.LayBody: ed.Select("layout", dragSeg); break;
+                default: DownW4(drag, dragSeg); break;
                 case Hit.TrimStart: case Hit.TrimEnd: break;   // 单击把手什么都不做（别把播放头叫过来）
             }
             Capture = true;
@@ -340,12 +345,13 @@ namespace ScreenRecorder
             {
                 var h = HitTest(e.Location, out _);
                 Cursor = h == Hit.TrimStart || h == Hit.TrimEnd || h == Hit.SegStart || h == Hit.SegEnd || h == Hit.CutStart || h == Hit.CutEnd || h == Hit.VoiceStart || h == Hit.VoiceEnd || h == Hit.CapStart || h == Hit.CapEnd || h == Hit.LayStart || h == Hit.LayEnd ? Cursors.SizeWE
-                       : h == Hit.SegBody || h == Hit.CutBody || h == Hit.VoiceBody || h == Hit.CapBody || h == Hit.LayBody ? Cursors.SizeAll : Cursors.Default;
+                       : h == Hit.SegBody || h == Hit.CutBody || h == Hit.VoiceBody || h == Hit.CapBody || h == Hit.LayBody ? Cursors.SizeAll : CursorW4(h) ?? Cursors.Default;
                 string t = h == Hit.TrimStart ? L("拖动剪掉开头", "Drag to cut the start") : h == Hit.TrimEnd ? L("拖动剪掉结尾", "Drag to cut the end")
                     : h == Hit.CutStart || h == Hit.CutEnd || h == Hit.CutBody ? L("拖两头改范围、拖中间挪；选中后可改成快放", "Drag the ends or the middle; select it to switch to speed-up")
                     : h == Hit.VoiceStart || h == Hit.VoiceEnd || h == Hit.VoiceBody ? L("讲解：拖中间挪位置，拖两头剪掉开头 / 结尾；选中后调音量、删除", "Voice-over: drag to move, drag the ends to trim; select it for volume / delete")
                     : h == Hit.CapStart || h == Hit.CapEnd || h == Hit.CapBody ? L("字幕：双击改字，拖两头改时间、拖中间挪", "Caption: double-click to edit, drag the ends or the middle")
                     : h == Hit.LayStart || h == Hit.LayEnd || h == Hit.LayBody ? L("摄像头布局：拖两头改范围、拖中间挪；选中后换布局", "Camera layout: drag the ends or the middle; select it to change the layout")
+                    : TipW4(h) is string tw ? tw
                     : L("点选推近段来调整，空白处双击新加，两端黄条修剪；Ctrl + 滚轮缩放时间轴", "Click a zoom to edit it, double-click empty space to add one, drag the yellow bars to trim; Ctrl + scroll zooms the timeline");
                 if (t != tipText) { tipText = t; tip.SetToolTip(this, t); }
                 return;
@@ -462,6 +468,9 @@ namespace ScreenRecorder
                         else l.End = Math.Max(Math.Min(baseEnd + dt, room.hi), baseStart + 0.3);
                     });
                     break;
+                case Hit.RedStart: case Hit.RedEnd: case Hit.RedBody: case Hit.AnnStart: case Hit.AnnEnd: case Hit.AnnBody: case Hit.MusStart: case Hit.MusEnd: case Hit.MusBody:
+                    DragW4(drag, id, dt);
+                    break;
                 case Hit.SegStart: case Hit.SegEnd:
                     bool st = drag == Hit.SegStart;
                     ed.DragBegin();
@@ -485,6 +494,7 @@ namespace ScreenRecorder
             if (ed.IsDragging) { ed.DragEnd(); return; }
             // 双击加了一段：WinForms 在双击之后还会来一次 MouseUp，别把刚加的那段又取消选中
             if (justAdded) { justAdded = false; return; }
+            if (!moved && (was == Hit.SugAccept || was == Hit.SugIgnore)) { if (was == Hit.SugAccept) ed.AcceptSuggestions(new[] { dragSeg }); else ed.IgnoreSuggestions(new[] { dragSeg }); return; }
             if (!moved && was == Hit.Empty) { ed.Select(null, null); ed.Seek(T(e.X)); }
             if (!moved && was != Hit.Empty && was != Hit.None && was != Hit.TrimStart && was != Hit.TrimEnd && was != Hit.Ruler) ed.Touch();
         }
@@ -494,6 +504,8 @@ namespace ScreenRecorder
             base.OnMouseDoubleClick(e);
             var h = HitTest(e.Location, out var id);
             if (h == Hit.CapBody || h == Hit.CapStart || h == Hit.CapEnd) { ed.Select("cap", id); ed.EditCaptionText(); justAdded = true; return; }
+            if (h == Hit.AnnBody && ed.Project.Annotations.FirstOrDefault(a => a.Id == id)?.Kind == "text") { ed.Select("ann", id); ed.EditAnnotationText(); justAdded = true; return; }
+            if (h == Hit.Empty && e.Y >= RedY && e.Y < MusY + MusH) return;   // 遮挡 / 标注 / 音乐轨上双击不加推近段
             if (h == Hit.Empty)
             {
                 if (e.Y >= CutY && e.Y <= CutY + CutH) ed.AddCut(T(e.X));          // 剪辑轨上双击 = 加一段剪掉
