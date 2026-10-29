@@ -1,6 +1,6 @@
 // 录制时的 W3 部分（照 Mac 版 Camera.swift / Keys.swift）：
 //   · 摄像头：用随包的 ffmpeg（DirectShow）开摄像头，屏幕上浮一个能拖的圆形小窗；Studio 模式同时写 camera.mp4（小窗不录进画面），
-//     普通录制小窗直接录进画面（录单个窗口时录不到小窗，见 README）
+//     普通录制小窗直接录进画面（录单个窗口时录不到小窗，见 README）；camera.mp4 用分段 MP4，万一被强制结束也读得出来
 //   · 键帽：GDI+ 画真字（核心的 KeyLayer.Renderer 指过来）
 //   · 勿扰：录制期间临时关掉系统通知横幅（HKCU PushNotifications\ToastEnabled = 0），录完 / 下次打开时换回原值
 using System;
@@ -61,7 +61,7 @@ namespace ScreenRecorder
             var c = new CameraCapture { File = file };
             string inject = Environment.GetEnvironmentVariable("CAMERA_INJECT");
             string input = inject != null ? $"-re -stream_loop -1 -i \"{inject}\"" : $"-f dshow -rtbufsize 256M -i video=\"{device}\"";
-            string rec = file != null ? $"-map 0:v -c:v libx264 -preset ultrafast -crf 23 -pix_fmt yuv420p -an -movflags +faststart \"{file}\" " : "";
+            string rec = file != null ? $"-map 0:v -c:v libx264 -preset ultrafast -crf 23 -pix_fmt yuv420p -an -movflags +frag_keyframe+empty_moov+default_base_moof \"{file}\" " : "";
             string pv = $"-map 0:v -vf \"fps=20,scale={PreviewSize}:{PreviewSize}:force_original_aspect_ratio=increase,crop={PreviewSize}:{PreviewSize},format=bgra\" -f rawvideo -pix_fmt bgra pipe:1";
             var psi = new ProcessStartInfo(Studio.FfmpegPath, $"-hide_banner -v error -y {input} {rec}{pv}")
             { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true, RedirectStandardInput = true };
@@ -80,11 +80,13 @@ namespace ScreenRecorder
             {
                 var s = proc.StandardOutput.BaseStream;
                 int n = PreviewSize * PreviewSize * 4;
-                while (!stopping)
+                // 一直读到 ffmpeg 退出：停的时候也要把管道里的帧读掉，不然 ffmpeg 写管道堵住、收不到 q，camera.mp4 收不了尾
+                while (true)
                 {
                     var buf = new byte[n]; int got = 0;
                     while (got < n) { int k = s.Read(buf, got, n - got); if (k <= 0) break; got += k; }
                     if (got < n) break;
+                    if (stopping) continue;
                     if (FirstFrameAt == 0) FirstFrameAt = Clock.Now;
                     Frame?.Invoke(buf);
                 }
@@ -99,7 +101,7 @@ namespace ScreenRecorder
             stopping = true;
             try { proc.StandardInput.Write("q"); proc.StandardInput.Flush(); } catch { }
             if (!proc.WaitForExit(8000)) try { proc.Kill(); } catch { }
-            reader?.Join(1000);
+            reader?.Join(3000);
             proc.Dispose(); proc = null;
         }
 
