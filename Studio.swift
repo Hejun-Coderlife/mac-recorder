@@ -1335,8 +1335,6 @@ final class AudioWarp: @unchecked Sendable {
     private var sumL: Float = 0, sumR: Float = 0, cnt = 0
 
     init(map: TimeMap, gain: Float, clicks: ClickSound) { self.map = map; self.gain = gain; self.clicks = clicks }
-    nonisolated(unsafe) static var peak: Float = 0
-    static let debug = ProcessInfo.processInfo.environment["AUDIOWARP_DEBUG"] != nil
 
     func process(_ sb: CMSampleBuffer) -> CMSampleBuffer? {
         let n = CMSampleBufferGetNumSamples(sb)
@@ -1369,7 +1367,6 @@ final class AudioWarp: @unchecked Sendable {
         if gain != 1 { for k in out.indices { out[k] *= gain } }
         clicks.add(into: &out, frames: frames, at: at)
         for k in out.indices { out[k] = ClickSound.softLimit(out[k]) }
-        if Self.debug { Self.peak = max(Self.peak, out.map(abs).max() ?? 0); if frames > 0 && at % 480000 < Int64(frames) { print("AUDIOWARP gain", gain, "peak", Self.peak) } }
         outAt = at + Int64(frames)
         return clicks.make(out, frames: frames, at: at, format: fmt)
     }

@@ -3,6 +3,7 @@
 import AppKit
 import AVFoundation
 import CoreImage
+import MediaToolbox
 import SwiftUI
 
 // 预览合成在后台线程读最新的渲染器和镜头计划：改了段落 / 样式就换一份（两样一起换，免得对不上）
@@ -38,6 +39,9 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     private var timeObserver: Any?
     private var endObserver: Any?, statusObserver: NSKeyValueObservation?
     private var keyMonitor: Any?
+    private var boundaryObserver: Any?         // 播到剪掉 / 快放的段、点击时刻时叫一下
+    private var gains: [GainBox] = []          // 预览每条音轨的音量（拖滑块实时生效）
+    let audioChannels: [Int]                   // 每条音轨几个声道：2 = 电脑声音，1 = 麦克风
     private var saveWork: DispatchWorkItem?
     private var refreshPending = false
 
@@ -66,6 +70,9 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     var canRedo: Bool { !redoStack.isEmpty }
     var plan: [FramePlan] { box.plan }
     var events: [Double] { (track.clicks.map { $0[0] } + track.keys).filter { $0 >= 0 && $0 <= duration } }
+    var timeMap: TimeMap { TimeMap(project) }
+    var hasSystemAudio: Bool { audioChannels.contains { $0 != 1 } }
+    var hasMicAudio: Bool { audioChannels.contains(1) }
 
     static func open(_ dir: URL) async {
         if let e = open[dir.standardizedFileURL] { e.window?.makeKeyAndOrderFront(nil); return }
@@ -91,7 +98,15 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         project = p
         box = PlanBox(StudioRenderer(project: dir, track: track, style: StudioStyle(), look: p.look))
         player = AVPlayer()
+        var chans: [Int] = []
+        let aTracks = try await asset.loadTracks(withMediaType: .audio)
+        for t in aTracks {
+            let fd = try await t.load(.formatDescriptions).first
+            chans.append(Int(fd.flatMap { CMAudioFormatDescriptionGetStreamBasicDescription($0)?.pointee.mChannelsPerFrame } ?? 2))
+        }
+        audioChannels = chans
         super.init()
+        gains = aTracks.map { _ in GainBox() }
         if !FileManager.default.fileExists(atPath: StudioProject.url(dir).path) { try? project.save(dir) }
         // 打开时按新规则重排了推近段：原来的段放进撤销栈，⌘Z 能拿回来（拿回来就算手动改过，以后不再重排）
         else if let d = try? Data(contentsOf: StudioProject.url(dir)), var old = try? JSONDecoder().decode(StudioProject.self, from: d),
@@ -103,6 +118,9 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         box.set(box.renderer.plan(project, duration: duration), renderer: box.renderer)
         let item = AVPlayerItem(asset: asset)
         item.videoComposition = makeComposition()
+        item.audioMix = PreviewAudio.mix(tracks: aTracks, gains: gains)
+        item.audioTimePitchAlgorithm = .timeDomain   // 快放时声音不变尖
+        updateGains()
         item.forwardPlaybackEndTime = CMTime(seconds: project.trimEnd, preferredTimescale: 600)
         player.replaceCurrentItem(with: item)
         player.actionAtItemEnd = .pause
@@ -113,8 +131,10 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
                 if self.scrubber.observed(t.seconds) { self.time = t.seconds }
                 let rate = self.player.rate
                 if self.playing && rate == 0 { self.playing = false }
+                self.syncPlayback()
             }
         }
+        resetBoundaries()
         // 播到结尾（或修剪的终点）时间就不走了，上面的回调不再来：另外听「播完」和播放状态，把图标换回播放
         endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.playing = false; self.map { $0.time = $0.player.currentTime().seconds } }
@@ -154,6 +174,13 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
                     exit(0)
                 }
                 selected = project.segments.first?.id
+                // EDITOR_DEMOCUTS=1：放一段「剪掉」和一段「4× 加速」并选中加速那段，看剪辑轨和属性条
+                if ProcessInfo.processInfo.environment["EDITOR_DEMOCUTS"] != nil {
+                    let d = duration
+                    project.cuts = [CutSegment(start: d * 0.18, end: d * 0.27), CutSegment(start: d * 0.52, end: d * 0.66, mode: .speed, rate: 4)]
+                    project.look.clickSound = true
+                    selected = project.cuts[1].id
+                }
                 await renderStill(at: project.segments.first.map { ($0.start + $0.end) / 2 } ?? 1)
                 // EDITOR_AT_TRIM=1：把结尾修剪到 80% 处、播放头压在修剪点上，看两者重叠时分不分得清
                 if ProcessInfo.processInfo.environment["EDITOR_AT_TRIM"] != nil { project.trimEnd = duration * 0.8; time = project.trimEnd }
@@ -182,6 +209,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         player.pause()
         if let timeObserver { player.removeTimeObserver(timeObserver) }
+        if let boundaryObserver { player.removeTimeObserver(boundaryObserver) }
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         saveNow()
         Self.open[dir.standardizedFileURL] = nil
@@ -233,6 +261,8 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
                 if r.look != self.project.look { r = StudioRenderer(project: self.dir, track: self.track, style: self.style, look: self.project.look) }
                 self.box.set(r.plan(self.project, duration: self.duration), renderer: r)
                 self.player.currentItem?.videoComposition = self.makeComposition()
+                self.updateGains()
+                self.resetBoundaries()
                 if !self.playing { self.seek(self.time) }
                 if self.still != nil { Task { await self.renderStill(at: self.time) } }
             }
@@ -290,6 +320,48 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         let now = player.currentTime().seconds   // 播到头时 time 可能没跟上，按播放器实际位置判断
         if now >= project.trimEnd - 0.05 || now < project.trimStart - 0.01 { seek(project.trimStart) }
         player.play(); playing = true
+        syncPlayback()
+    }
+
+    // 播放中：落在剪掉的段里就跳到段尾，落在快放的段里就按倍数放，其他地方正常速度
+    func syncPlayback() {
+        guard playing, player.rate != 0 else { return }
+        let t = player.currentTime().seconds
+        if let pc = timeMap.piece(at: t + 0.001) {
+            if pc.rate == 0 {
+                player.seek(to: CMTime(seconds: pc.end, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+            } else if abs(Double(player.rate) - pc.rate) > 0.01 { player.rate = Float(pc.rate) }
+        } else if abs(player.rate - 1) > 0.01 { player.rate = 1 }
+    }
+    // 剪辑段的起止和点击时刻挂到播放器上：播到那一刻马上处理（比每秒 30 次的回调准）
+    private func resetBoundaries() {
+        if let boundaryObserver { player.removeTimeObserver(boundaryObserver); self.boundaryObserver = nil }
+        let map = timeMap
+        var times = map.pieces.flatMap { [$0.start, $0.end] }
+        let clickAt = project.look.clickSound
+            ? track.clicks.map { $0[0] }.filter { $0 >= project.trimStart && $0 < project.trimEnd && !map.inCut($0) } : []
+        times += clickAt
+        guard !times.isEmpty else { return }
+        let clicks = Set(clickAt.map { Int(($0 * 1000).rounded()) })
+        boundaryObserver = player.addBoundaryTimeObserver(forTimes: times.map { NSValue(time: CMTime(seconds: $0, preferredTimescale: 6000)) }, queue: .main) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.playing else { return }
+                let t = self.player.currentTime().seconds
+                // 点击声：跟着预览一起响（导出时也是同一种、同样音量）
+                if clicks.contains(where: { abs(Double($0) / 1000 - t) < 0.06 }) {
+                    ClickPreview.play(self.project.look.clickStyle, volume: self.project.audio.clicks)
+                }
+                self.syncPlayback()
+            }
+        }
+    }
+    // 预览的音量：每条音轨按声道数认电脑声音 / 麦克风，静音就是 0
+    private func updateGains() {
+        let a = project.audio
+        for (i, g) in gains.enumerated() {
+            let v = a.muted ? 0 : (audioChannels.indices.contains(i) && audioChannels[i] == 1 ? a.mic : a.system)
+            g.gain = Float(v)
+        }
     }
     func step(_ n: Int) {
         player.pause(); playing = false
@@ -356,9 +428,35 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         selected = seg.id
     }
     func deleteSelected() {
+        if let i = cutIndex(selected) { edit { $0.cuts.remove(at: i) }; selected = nil; return }
         guard let i = index(selected) else { return }
         edit { $0.segments.remove(at: i) }
         selected = nil
+    }
+
+    // ---- 剪掉 / 快放的段 ----
+    func cutIndex(_ id: UUID?) -> Int? { project.cuts.firstIndex { $0.id == id } }
+    // 某一段剪辑能占的范围：不压到别的剪辑段、不出修剪范围
+    func cutRoom(for id: UUID, in p: StudioProject) -> ClosedRange<Double> {
+        let cs = p.cuts.sorted { $0.start < $1.start }
+        guard let i = cs.firstIndex(where: { $0.id == id }) else { return p.trimStart...p.trimEnd }
+        let lo = max(p.trimStart, i > 0 ? cs[i - 1].end : 0)
+        let hi = min(p.trimEnd, i + 1 < cs.count ? cs[i + 1].start : duration)
+        return lo...max(lo, hi)
+    }
+    // 在播放头处放一段「剪掉」（默认 2 秒），放不下就缩短
+    func addCut(at t: Double) {
+        let len = 2.0
+        let cs = project.cuts.sorted { $0.start < $1.start }
+        guard !cs.contains(where: { t >= $0.start && t < $0.end }) else { NSSound.beep(); return }
+        let lo = max(project.trimStart, cs.last(where: { $0.end <= t })?.end ?? 0)
+        let hi = min(project.trimEnd, cs.first(where: { $0.start > t })?.start ?? duration)
+        guard hi - lo >= 0.2 else { NSSound.beep(); return }
+        var s = max(lo, t), e = min(hi, s + len)
+        s = max(lo, e - len); e = min(hi, s + len)
+        let c = CutSegment(start: s, end: e)
+        edit { $0.cuts.append(c); $0.cuts.sort { $0.start < $1.start } }
+        selected = c.id
     }
 
     // 在预览上点一下：设成选中那段的固定位置。p = 预览画面里的比例（左上为原点）
@@ -377,6 +475,13 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     }
     func lookSlider(_ kp: WritableKeyPath<StudioLook, Double>) -> Binding<Double> {
         Binding(get: { self.project.look[keyPath: kp] }, set: { v in self.dragBegin(); self.dragUpdate { $0.look[keyPath: kp] = v } })
+    }
+    // 声音设置（音量滑块拖一次算一步撤销）
+    func audioSlider(_ kp: WritableKeyPath<AudioSettings, Double>) -> Binding<Double> {
+        Binding(get: { self.project.audio[keyPath: kp] }, set: { v in self.dragBegin(); self.dragUpdate { $0.audio[keyPath: kp] = v } })
+    }
+    func audioToggle(_ kp: WritableKeyPath<AudioSettings, Bool>) -> Binding<Bool> {
+        Binding(get: { self.project.audio[keyPath: kp] }, set: { v in self.edit { $0.audio[keyPath: kp] = v } })
     }
     func chooseImage() {
         let p = NSOpenPanel()
@@ -460,9 +565,11 @@ struct EditorView: View {
                     controlBar.padding(.horizontal, 14).padding(.vertical, 8)
                     Divider()
                     VStack(alignment: .leading, spacing: 10) {
-                        if ed.selected != nil { inspector.frame(height: 30) }   // 选中推近段才出现
+                        if ed.cutIndex(ed.selected) != nil { cutInspector.frame(height: 30) }   // 选中剪辑段
+                        else if ed.selected != nil { inspector.frame(height: 30) }   // 选中推近段才出现
                         timeline.frame(height: 120)
-                            .help(L("点选推近段来调整，空白处双击新加，两端黄条修剪", "Click a zoom to edit it, double-click empty space to add one, drag the yellow bars to trim"))
+                            .help(L("上面一条是剪掉 / 快放的段，下面是推近段；点选来调整，空白处双击新加推近，两端黄条修剪",
+                                   "Top lane: cut / speed-up parts; below: zooms. Click to edit, double-click empty space to add a zoom, drag the yellow bars to trim"))
                     }
                     .padding(14)
                 }
@@ -501,6 +608,8 @@ struct EditorView: View {
             HStack(spacing: 10) {
                 Button { ed.addSegment(at: ed.time) } label: { Label(L("推近", "Zoom"), systemImage: "plus.magnifyingglass") }
                     .help(L("在播放头处新加一段推近（镜头放大凑近看）；也可以在时间轴空白处双击", "Add a zoom-in at the playhead; you can also double-click empty space on the timeline"))
+                Button { ed.addCut(at: ed.time) } label: { Label(L("剪掉", "Cut"), systemImage: "scissors") }
+                    .help(L("在播放头处放一段「剪掉」（红色），拖两头盖住不要的部分；选中后也能改成「加速」快放", "Mark a part to cut out at the playhead (red); drag its ends over what you don't want. Select it to switch to speed-up instead"))
                 Button { ed.regenerate() } label: { Label(L("重新自动生成", "Auto-Generate"), systemImage: "wand.and.stars") }
                     .help(L("按录制时的点击和打字重新排推近段（会替换现在的段，可以撤销 ⌘Z）", "Rebuild zooms from your clicks and typing (replaces the current zooms; undo with ⌘Z)"))
                 Button { ed.undo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!ed.canUndo).help(L("撤销上一步（⌘Z）", "Undo the last change (⌘Z)"))
@@ -523,7 +632,8 @@ struct EditorView: View {
                         .foregroundStyle(.white).background(Circle().fill(Color.accentColor))
                 }
                 .buttonStyle(.plain).help(L("播放 / 暂停（空格）", "Play / Pause (Space)"))
-                Text(clock(ed.time - ed.project.trimStart) + " / " + clock(ed.project.trimEnd - ed.project.trimStart))   // 按修剪后的成片算
+                let m = ed.timeMap
+                Text(clock(m.out(ed.time) - ed.project.trimStart) + " / " + clock(m.out(ed.project.trimEnd) - ed.project.trimStart))   // 按成片算（修剪、剪掉、快放之后）
                     .font(.callout.monospacedDigit()).foregroundStyle(.secondary).frame(width: 130, alignment: .leading)
             }
         }
@@ -598,6 +708,36 @@ struct EditorView: View {
                 if seg.mode == .fixed {
                     Button(ed.picking ? L("点画面…", "Click the picture…") : L("选位置", "Set Position")) { ed.picking.toggle() }
                 }
+                Spacer()
+                Button(role: .destructive) { ed.deleteSelected() } label: { Label(L("删除", "Delete"), systemImage: "trash") }
+            }
+        }
+    }
+}
+
+extension EditorView {
+    // 选中剪辑段：剪掉 / 加速几倍，原来多长、成片里多长
+    @ViewBuilder var cutInspector: some View {
+        if let i = ed.cutIndex(ed.selected) {
+            let c = ed.project.cuts[i], len = c.end - c.start
+            HStack(spacing: 14) {
+                Text(L("剪辑", "Edit")).font(.callout.weight(.semibold))
+                Text(clock(c.start) + " – " + clock(c.end)).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                Divider().frame(height: 16)
+                Picker("", selection: Binding(get: { c.mode }, set: { m in ed.edit { $0.cuts[i].mode = m } })) {
+                    Text(L("剪掉", "Cut out")).tag(CutSegment.Mode.cut)
+                    Text(L("加速", "Speed up")).tag(CutSegment.Mode.speed)
+                }
+                .pickerStyle(.segmented).labelsHidden().frame(width: 150)
+                if c.mode == .speed {
+                    Picker("", selection: Binding(get: { c.rate }, set: { r in ed.edit { $0.cuts[i].rate = r } })) {
+                        Text("2×").tag(2.0); Text("4×").tag(4.0); Text("8×").tag(8.0)
+                    }
+                    .pickerStyle(.segmented).labelsHidden().frame(width: 130)
+                }
+                Text(c.mode == .cut ? L("成片里去掉 \(String(format: "%.1f", len)) 秒", "Removes \(String(format: "%.1f", len))s")
+                                    : L("\(String(format: "%.1f", len)) 秒 → \(String(format: "%.1f", len / c.rate)) 秒", "\(String(format: "%.1f", len))s → \(String(format: "%.1f", len / c.rate))s"))
+                    .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                 Spacer()
                 Button(role: .destructive) { ed.deleteSelected() } label: { Label(L("删除", "Delete"), systemImage: "trash") }
             }
@@ -681,7 +821,7 @@ struct TimelineGestures: NSViewRepresentable {
 
 struct TimelineStrip: View {
     @ObservedObject var ed: StudioEditor
-    private let rulerH = 22.0, segY = 40.0, segH = 46.0
+    private let rulerH = 22.0, cutY = 38.0, cutH = 20.0, segY = 64.0, segH = 40.0
     private let accent = Color(red: 0.42, green: 0.36, blue: 0.95)
 
     var body: some View {
@@ -703,6 +843,13 @@ struct TimelineStrip: View {
                 ForEach(Array(ed.events.enumerated()), id: \.offset) { _, t in
                     Circle().fill(Color.secondary.opacity(0.55)).frame(width: 4, height: 4).position(x: x(t), y: rulerH + 9)
                 }.allowsHitTesting(false)
+                // 剪辑轨：剪掉（红斜纹）/ 快放（蓝斜纹 + 倍数）
+                RoundedRectangle(cornerRadius: 5).fill(Color.secondary.opacity(0.07)).frame(width: w - 4, height: cutH)
+                    .offset(x: 2, y: cutY).allowsHitTesting(false)
+                ForEach(ed.project.cuts) { c in
+                    CutBlock(ed: ed, cut: c, w: w, d: d).frame(width: max(6, x(c.end) - x(c.start)), height: cutH)
+                        .offset(x: x(c.start), y: cutY)
+                }
                 ForEach(ed.project.segments) { seg in
                     SegmentBlock(ed: ed, seg: seg, w: w, d: d, accent: accent).frame(width: max(6, x(seg.end) - x(seg.start)), height: segH)
                         .offset(x: x(seg.start), y: segY)
@@ -833,6 +980,79 @@ enum TimelineMath {
     static func wheelFactor(_ dy: Double, precise: Bool) -> Double { pow(precise ? 1.006 : 1.12, dy) }
 }
 
+// 剪辑轨上的一段：拖中间挪、拖两头改范围，单击选中
+struct CutBlock: View {
+    @ObservedObject var ed: StudioEditor
+    let cut: CutSegment
+    let w: Double, d: Double
+    private let minLen = 0.2
+
+    var body: some View {
+        let sel = ed.selected == cut.id
+        let base = cut.mode == .cut ? Color(red: 0.92, green: 0.27, blue: 0.27) : Color(red: 0.20, green: 0.52, blue: 0.96)
+        ZStack {
+            RoundedRectangle(cornerRadius: 5).fill(base.opacity(sel ? 0.95 : 0.75))
+            // 斜纹
+            Canvas { ctx, size in
+                var p = Path()
+                var x = -size.height
+                while x < size.width { p.move(to: CGPoint(x: x, y: size.height)); p.addLine(to: CGPoint(x: x + size.height, y: 0)); x += 8 }
+                ctx.stroke(p, with: .color(.white.opacity(0.28)), lineWidth: 2.5)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            RoundedRectangle(cornerRadius: 5).stroke(sel ? Color.white : Color.clear, lineWidth: 2)
+            HStack(spacing: 3) {
+                Image(systemName: cut.mode == .cut ? "scissors" : "forward.fill").font(.system(size: 9, weight: .bold))
+                if cut.mode == .speed { Text(String(format: "%.0f×", cut.rate)).font(.system(size: 10, weight: .bold).monospacedDigit()) }
+            }
+            .foregroundStyle(.white).lineLimit(1).padding(.horizontal, 8)
+            HStack {
+                edge(isStart: true)
+                Spacer(minLength: 0)
+                edge(isStart: false)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { ed.selected = cut.id; ed.picking = false }
+        .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .named(TimelineStrip.space))
+            .onChanged { v in
+                ed.selected = cut.id
+                ed.dragBegin()
+                let dt = v.translation.width / w * d
+                ed.dragUpdate { p in
+                    guard let i = p.cuts.firstIndex(where: { $0.id == cut.id }) else { return }
+                    let b = p.cuts[i], r = ed.cutRoom(for: cut.id, in: p), len = b.end - b.start
+                    let s = min(max(b.start + dt, r.lowerBound), r.upperBound - len)
+                    p.cuts[i].start = s; p.cuts[i].end = s + len
+                }
+            }
+            .onEnded { _ in ed.dragEnd() })
+        .help(cut.mode == .cut ? L("这段会被剪掉，预览时直接跳过", "This part is cut out; the preview skips it")
+                               : L("这段会快放", "This part plays sped up"))
+    }
+
+    private func edge(isStart: Bool) -> some View {
+        Rectangle().fill(Color.white.opacity(0.001)).frame(width: 8)
+            .overlay(Capsule().fill(Color.white.opacity(0.9)).frame(width: 2.5, height: 10))
+            .contentShape(Rectangle())
+            .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
+            .onTapGesture { ed.selected = cut.id; ed.picking = false }
+            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named(TimelineStrip.space))
+                .onChanged { v in
+                    ed.selected = cut.id
+                    ed.dragBegin()
+                    let dt = v.translation.width / w * d
+                    ed.dragUpdate { p in
+                        guard let i = p.cuts.firstIndex(where: { $0.id == cut.id }) else { return }
+                        let r = ed.cutRoom(for: cut.id, in: p)
+                        if isStart { p.cuts[i].start = min(max(p.cuts[i].start + dt, r.lowerBound), p.cuts[i].end - minLen) }
+                        else { p.cuts[i].end = max(min(p.cuts[i].end + dt, r.upperBound), p.cuts[i].start + minLen) }
+                    }
+                }
+                .onEnded { _ in ed.dragEnd() })
+    }
+}
+
 struct SegmentBlock: View {
     @ObservedObject var ed: StudioEditor
     let seg: ZoomSegment
@@ -900,7 +1120,8 @@ struct StylePanel: View {
     @ObservedObject var ed: StudioEditor
     @State private var naming = false
     @State private var newName = ""
-    @State private var open: Set<String> = ["preset", "aspect", "bg", "frame", "cursor", "blur"]
+    @State private var open: Set<String> = ProcessInfo.processInfo.environment["EDITOR_OPEN"].map { Set($0.split(separator: ",").map(String.init)) }
+        ?? ["preset", "aspect", "bg", "frame", "cursor", "audio", "blur"]
 
     var body: some View {
         ScrollView {
@@ -910,6 +1131,7 @@ struct StylePanel: View {
                 section("bg", L("背景", "Background")) { backgroundBox }
                 section("frame", L("画面", "Frame")) { frameBox }
                 section("cursor", L("鼠标", "Cursor")) { cursorBox }
+                section("audio", L("声音", "Sound")) { audioBox }
                 section("blur", L("运动模糊", "Motion Blur")) { blurBox }
             }
             .frame(width: 270, alignment: .leading)   // 面板 300 宽，左右各留 15
@@ -1083,7 +1305,7 @@ struct StylePanel: View {
             }
             Toggle(L("点击波纹", "Click ripple"), isOn: ed.look(\.ripple))
             Toggle(L("点击音效", "Click sound"), isOn: ed.look(\.clickSound))
-                .help(L("导出时在每次点击处加一声轻响（预览里听不到）", "Adds a soft click sound at each click when exporting (not in the preview)"))
+                .help(L("每次点击处加一声轻响，预览和导出都有；音量在「声音」里调", "Adds a soft click at each click, in the preview and the export; set its volume under Sound"))
             if look.clickSound {
                 HStack(spacing: 6) {
                     Picker("", selection: Binding(get: { look.clickStyle }, set: { v in ed.look(\.clickStyle).wrappedValue = v; ClickPreview.play(v) })) {
@@ -1094,6 +1316,33 @@ struct StylePanel: View {
                 }.controlSize(.small)
             }
         }.toggleStyle(.checkbox).font(.callout)
+    }
+
+    // 声音：录到的电脑声音 / 麦克风各自的音量、静音，点击声音量
+    private var audioBox: some View {
+        let a = ed.project.audio
+        func pct(_ v: Double) -> String { v < 0.005 ? L("静音", "Off") : "\(Int((v * 100).rounded()))%" }
+        return VStack(alignment: .leading, spacing: 8) {
+            if ed.audioChannels.isEmpty {
+                Text(L("这段录制没有录到声音", "This recording has no sound")).font(.caption).foregroundStyle(.secondary)
+            } else {
+                Toggle(L("录到的声音静音", "Mute recorded sound"), isOn: ed.audioToggle(\.muted))
+                if ed.hasSystemAudio { audioSlider(L("电脑声音", "Computer"), \.system, pct).disabled(a.muted).opacity(a.muted ? 0.45 : 1) }
+                if ed.hasMicAudio { audioSlider(L("麦克风", "Microphone"), \.mic, pct).disabled(a.muted).opacity(a.muted ? 0.45 : 1) }
+            }
+            if ed.project.look.clickSound {
+                audioSlider(L("点击声", "Clicks"), \.clicks, pct)
+            }
+            Text(L("最大 200%，太响会自动压住、不会爆音", "Up to 200%; loud parts are softened so they don't distort"))
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }.toggleStyle(.checkbox).font(.callout)
+    }
+    private func audioSlider(_ title: String, _ kp: WritableKeyPath<AudioSettings, Double>, _ fmt: @escaping (Double) -> String) -> some View {
+        HStack(spacing: 8) {
+            Text(title).font(.callout).frame(width: 62, alignment: .leading)
+            Slider(value: ed.audioSlider(kp), in: 0...2, onEditingChanged: { if !$0 { ed.dragEnd() } }).controlSize(.small)
+            Text(fmt(ed.project.audio[keyPath: kp])).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
+        }
     }
 
     private var blurBox: some View {
@@ -1134,6 +1383,40 @@ struct WallpaperThumb: View {
 
 // ---- 自测 ----
 enum StudioTests {
+    // CUTTEST=1 → 剪掉 / 快放的时间换算（不碰界面）：素材 ↔ 成片来回换、剪掉段里的点击去掉、推近段跟着挪、旧工程读得进来
+    @MainActor static func cutTest() -> Bool {
+        guard ProcessInfo.processInfo.environment["CUTTEST"] != nil else { return false }
+        var ok = true
+        func check(_ n: String, _ c: Bool, _ info: String = "") { print(c ? "PASS" : "FAIL", n, info); ok = ok && c }
+        func near(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 1e-9 }
+        var p = StudioProject(segments: [ZoomSegment(start: 1, end: 4), ZoomSegment(start: 5.5, end: 7), ZoomSegment(start: 12, end: 16)], trimStart: 0.5, trimEnd: 30)
+        p.cuts = [CutSegment(start: 5, end: 8), CutSegment(start: 10, end: 14, mode: .speed, rate: 4)]
+        let m = TimeMap(p)
+        check("剪掉前不变", near(m.out(3), 3) && near(m.src(3), 3))
+        check("剪掉段压成 0", near(m.out(5), 5) && near(m.out(6.5), 5) && near(m.out(8), 5))
+        check("剪掉后往前挪 3 秒", near(m.out(9), 6) && near(m.src(6), 9))
+        check("快放段 4 倍", near(m.out(12), 7 + 0.5) && near(m.src(7.5), 12) && near(m.out(14), 8))
+        check("成片总长", near(m.out(30) - 0.5, 30 - 0.5 - 3 - 3), "\(m.out(30))")
+        let probes = stride(from: 0.0, through: 24.0, by: 0.37).map { $0 }
+        check("成片→素材→成片 来回一样", probes.allSatisfy { abs(m.out(m.src($0)) - $0) < 1e-9 })
+        check("成片时间单调", zip(probes, probes.dropFirst()).allSatisfy { m.src($0.0) < m.src($0.1) })
+        var tr = Track(width: 100, height: 100, pixelsPerPoint: 2)
+        tr.clicks = [[3, 1, 1], [6, 1, 1], [12, 1, 1], [20, 1, 1]]; tr.keys = [7, 9]
+        let wt = m.warp(tr)
+        check("剪掉段里的点击 / 按键去掉", wt.clicks.map { $0[0] } == [3, 7.5, 14] && wt.keys == [6], "\(wt.clicks.map { $0[0] }) \(wt.keys)")
+        let wp = m.warp(p)
+        check("推近段跟着挪，整段被剪掉的去掉", wp.segments.count == 2 && near(wp.segments[1].start, 7.5) && near(wp.segments[1].end, 10) && near(wp.trimEnd, 24), "\(wp.segments.map { ($0.start, $0.end) })")
+        check("没剪辑 = 原样", TimeMap(StudioProject(trimStart: 0, trimEnd: 10)).isIdentity)
+        // 旧工程（没有 cuts / audio 字段）读得进来，存了再读一样
+        let old = #"{"segments":[],"trimStart":0,"trimEnd":10}"#.data(using: .utf8)!
+        let po = try? JSONDecoder().decode(StudioProject.self, from: old)
+        check("旧工程兼容", po?.cuts == [] && po?.audio == AudioSettings())
+        let rt = try? JSONDecoder().decode(StudioProject.self, from: JSONEncoder().encode(p))
+        check("cuts 存了再读一样", rt?.cuts == p.cuts)
+        print(ok ? "CUTTEST OK" : "CUTTEST FAIL")
+        exit(ok ? 0 : 1)
+    }
+
     // SCRUBTEST=1 → 拖动逻辑（不碰界面）：修剪把手按「起点值 + 拖动距离」算、拖动中播放头不被播放器的旧时间拉回、seek 不堆积只追最新
     @MainActor static func scrubTest() -> Bool {
         guard ProcessInfo.processInfo.environment["SCRUBTEST"] != nil else { return false }
@@ -1421,9 +1704,41 @@ enum StudioTests {
         case .tick: L("清脆滴答", "Crisp tick")
         }
     }
-    static func play(_ c: StudioLook.Click) {
+    static func play(_ c: StudioLook.Click, volume: Double = 1) {
+        guard StudioEditor.testShot == nil else { return }   // 截图自测时不出声
         player = try? AVAudioPlayer(data: ClickSound.wav(c))
+        player?.volume = Float(min(max(volume, 0), 1))
         player?.play()
+    }
+}
+
+// 预览音量：每条音轨挂一个处理器，按 GainBox 的音量放大 / 缩小（超过 100% 也行，带软限幅）；拖滑块只改数字，不用重建播放器
+final class GainBox: @unchecked Sendable { var gain: Float = 1 }
+enum PreviewAudio {
+    static func mix(tracks: [AVAssetTrack], gains: [GainBox]) -> AVAudioMix {
+        let m = AVMutableAudioMix()
+        m.inputParameters = zip(tracks, gains).map { t, g in
+            let ip = AVMutableAudioMixInputParameters(track: t)
+            var cb = MTAudioProcessingTapCallbacks(
+                version: kMTAudioProcessingTapCallbacksVersion_0,
+                clientInfo: Unmanaged.passRetained(g).toOpaque(),
+                init: { _, info, storage in storage.pointee = info },
+                finalize: { tap in Unmanaged<GainBox>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).release() },
+                prepare: nil, unprepare: nil,
+                process: { tap, frames, _, buffers, framesOut, flagsOut in
+                    guard MTAudioProcessingTapGetSourceAudio(tap, frames, buffers, flagsOut, nil, framesOut) == noErr else { return }
+                    let g = Unmanaged<GainBox>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue().gain
+                    guard abs(g - 1) > 0.001 else { return }
+                    for b in UnsafeMutableAudioBufferListPointer(buffers) {
+                        guard let p = b.mData?.assumingMemoryBound(to: Float.self) else { continue }
+                        for k in 0..<Int(b.mDataByteSize) / 4 { p[k] = ClickSound.softLimit(p[k] * g) }
+                    }
+                })
+            var tap: MTAudioProcessingTap?
+            if MTAudioProcessingTapCreate(kCFAllocatorDefault, &cb, kMTAudioProcessingTapCreationFlag_PostEffects, &tap) == noErr { ip.audioTapProcessor = tap }
+            return ip
+        }
+        return m
     }
 }
 
