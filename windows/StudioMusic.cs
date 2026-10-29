@@ -199,7 +199,19 @@ namespace ScreenRecorder
         }
 
         // 时长（秒）：选音乐时记下 fileLength
-        public static double Duration(string file) { try { return Studio.Probe(file).Duration; } catch { return 0; } }
+        // 音乐文件多长（Studio.Probe 要有画面，纯音频会报错，这里只读 Duration 那行）
+        public static double Duration(string file)
+        {
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo(Studio.FfmpegPath, $"-hide_banner -i \"{file}\"") { UseShellExecute = false, RedirectStandardError = true, CreateNoWindow = true };
+                string err;
+                using (var p = System.Diagnostics.Process.Start(psi)) { err = p.StandardError.ReadToEnd(); p.WaitForExit(); }
+                var d = System.Text.RegularExpressions.Regex.Match(err, @"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)");
+                return d.Success ? int.Parse(d.Groups[1].Value) * 3600 + int.Parse(d.Groups[2].Value) * 60 + double.Parse(d.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture) : 0;
+            }
+            catch { return 0; }
+        }
 
         // 音乐按成片时间混成一条：从成片 t0 起、len 秒，立体声交错 48k（乘音量、淡入淡出、压低曲线）；没有音乐返回 null
         public static float[] Build(string dir, StudioProject p, TimeMap map, double t0, double len, List<(double a, double b)> voice, float[] env)

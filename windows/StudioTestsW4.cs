@@ -204,6 +204,8 @@ namespace ScreenRecorder
                 var mos = (x: 0.30, y: 0.30, w: 0.25, h: 0.20);
                 StudioProject Zoomed() { var p = Base(); p.Segments.Add(new ZoomSegment { Start = 10.5, End = 12, Zoom = 2, Fixed = true, FixedX = mos.x + mos.w / 2, FixedY = mos.y + mos.h / 2 }); return p; }
                 var plainP = Zoomed();
+                // 显卡有遮挡 / 标注时原画面按 BGRA 传（没有时走 NV12，色彩换算差一点点）：对照组也放一个永远不出现的遮挡，两份走同一条路，只比遮挡本身
+                plainP.Redactions.Add(new Redaction { Start = 20, End = 21, X = 0, Y = 0, W = 0.1, H = 0.1 });
                 var ov = Zoomed();
                 var blurR = (x: 0.10, y: 0.15, w: 0.30, h: 0.25);
                 ov.Redactions.Add(new Redaction { Start = 0.5, End = 2.5, X = blurR.x, Y = blurR.y, W = blurR.w, H = blurR.h, Style = "blur", Strength = 0.8 });
@@ -276,6 +278,8 @@ namespace ScreenRecorder
                 Directory.CreateDirectory(Path.Combine(dir, "music")); Directory.CreateDirectory(Path.Combine(dir, "voice"));
                 Studio.RunQuiet($"-v error -y -f lavfi -i \"aevalsrc=0.5*sin(2*PI*440*t):s=48000:d=3\" -ac 2 -c:a pcm_s16le \"{Path.Combine(dir, "music", "tone.wav")}\"", 60000);
                 Studio.RunQuiet($"-v error -y -f lavfi -i \"anullsrc=r=48000:cl=mono\" -t 1 -c:a pcm_s16le \"{Path.Combine(dir, "voice", "quiet.wav")}\"", 60000);
+                double toneLen = MusicMix.Duration(Path.Combine(dir, "music", "tone.wav"));
+                r.Check("music file length read (audio only, no picture)", Math.Abs(toneLen - 3) < 0.05, F(toneLen));
                 var mp = Base(); mp.TrimEnd = 12;
                 mp.Music.Clips.Add(new MusicClip { File = "music/tone.wav", Name = "tone.wav", Start = 2, TrimIn = 0, TrimOut = 3, FileLength = 3 });
                 mp.Music.Volume = 1; mp.Music.FadeIn = 1; mp.Music.FadeOut = 2; mp.Music.Loop = true; mp.Music.Duck = true; mp.Music.DuckDB = -14;

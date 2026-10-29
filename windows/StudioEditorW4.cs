@@ -158,9 +158,11 @@ namespace ScreenRecorder
         double downNx, downNy;
         (double x, double y, double w, double h) ovBase;
 
+        public string OverlayLog = "";        // 自测看：预览上按下时的情况
         public bool OverlayDown(double vx, double vy)
         {
             var (nx, ny) = FromView(vx, vy);
+            OverlayLog += $"down v({vx:0.000},{vy:0.000}) n({nx:0.000},{ny:0.000}) tool={Tool ?? "-"}; ";
             downNx = nx; downNy = ny;
             if (Tool != null)
             {
