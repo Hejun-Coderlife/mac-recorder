@@ -222,12 +222,16 @@ struct StudioLook: Codable, Equatable {
     var keysAt = KeysAt.bottom
     var keysSize = 0.045           // 键帽高约占画布短边几成（0.03–0.08）
     var keysDark = true            // 深色键帽（白字）/ 浅色键帽（黑字）
+    var zoomSpeed = 1.0            // 推近速度：镜头弹簧快慢的倍数（慢 0.6 / 标准 1 / 快 1.7）
+    var cursorLoop = false         // 结尾鼠标回到起点（做循环视频）
+    var cursorLoopSec = 1.0        // 最后几秒往回走：0.5–2
+    var loopZoomOut = true         // 回到起点时镜头也拉回全景
 
     init() {}
     enum CodingKeys: String, CodingKey {
         case aspect, background, color, gradient0, gradient1, gradientAngle, wallpaper, imagePath, imageBookmark, padding, cornerRadius,
              shadow, shadowBlur, cursorScale, smoothing, hideIdleCursor, hideAfter, clickSound, clickStyle, ripple, blur,
-             showKeys, keysAt, keysSize, keysDark
+             showKeys, keysAt, keysSize, keysDark, zoomSpeed, cursorLoop, cursorLoopSec, loopZoomOut
     }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self), z = StudioLook()
@@ -241,6 +245,8 @@ struct StudioLook: Codable, Equatable {
         clickStyle = v(.clickStyle, z.clickStyle)
         ripple = v(.ripple, z.ripple); blur = v(.blur, z.blur)
         showKeys = v(.showKeys, z.showKeys); keysAt = v(.keysAt, z.keysAt); keysSize = v(.keysSize, z.keysSize); keysDark = v(.keysDark, z.keysDark)
+        zoomSpeed = v(.zoomSpeed, z.zoomSpeed); cursorLoop = v(.cursorLoop, z.cursorLoop); cursorLoopSec = v(.cursorLoopSec, z.cursorLoopSec)
+        loopZoomOut = v(.loopZoomOut, z.loopZoomOut)
     }
 
     // 选了「图片 / 壁纸」但还没选到能用的图：按透明处理（预览、导出都一样）
@@ -360,7 +366,7 @@ struct StudioLayout {
 // 临界阻尼弹簧：往目标走，起步快、到位前慢下来，不过冲（精确解，步长多大都稳）
 struct Spring {
     var x: Double, v = 0.0
-    let w: Double                  // 越大越快；大约 4/w 秒到位
+    var w: Double                  // 越大越快；大约 4/w 秒到位（推近速度可以中途改）
     mutating func step(to g: Double, dt: Double) {
         let y = x - g, e = exp(-w * dt), k = v + w * y
         x = g + (y + k * dt) * e
@@ -387,6 +393,7 @@ struct ZoomSegment: Codable, Equatable, Identifiable {
     var zoom = 2.0
     var mode = Mode.follow
     var fixedX = 0.5, fixedY = 0.5     // 固定位置：在原画面里的比例，左上角为原点
+    var speed: Double?                 // 这一段的推近速度（nil = 跟全局「推近速度」）
 }
 
 // 中间剪掉的一段 / 快放的一段（素材时间）
@@ -479,11 +486,12 @@ struct StudioProject: Codable, Equatable {
     var layouts: [CameraLayoutSeg] = []  // 布局轨：不在任何一段里 = 小窗
     var redactions: [Redaction] = []    // 遮挡（模糊 / 马赛克 / 色块；原画面位置、素材时间；Windows 版还没有）
     var annotations: [Annotation] = []  // 标注（箭头 / 框 / 圈 / 高亮 / 文字；Windows 版还没有）
+    var music = MusicTrack()            // 背景音乐（成片时间；Windows 版还没有）
 
     init(segments: [ZoomSegment] = [], trimStart: Double = 0, trimEnd: Double = 0, look: StudioLook = StudioLook()) {
         self.segments = segments; self.trimStart = trimStart; self.trimEnd = trimEnd; self.look = look
     }
-    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look, segmentsEdited, cuts, audio, voiceovers, captions, captionStyle, camera, layouts, redactions, annotations }
+    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look, segmentsEdited, cuts, audio, voiceovers, captions, captionStyle, camera, layouts, redactions, annotations, music }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         segments = try c.decodeIfPresent([ZoomSegment].self, forKey: .segments) ?? []
@@ -500,6 +508,7 @@ struct StudioProject: Codable, Equatable {
         layouts = (try? c.decodeIfPresent([CameraLayoutSeg].self, forKey: .layouts)) ?? []
         redactions = (try? c.decodeIfPresent([Redaction].self, forKey: .redactions)) ?? []
         annotations = (try? c.decodeIfPresent([Annotation].self, forKey: .annotations)) ?? []
+        music = (try? c.decodeIfPresent(MusicTrack.self, forKey: .music)) ?? MusicTrack()
     }
 
     static func url(_ dir: URL) -> URL { dir.appendingPathComponent("project.json") }
@@ -661,7 +670,9 @@ enum StudioPlan {
     }
 
     // 逐帧算镜头和鼠标：从 0 秒算到结尾（修剪只决定导出哪几帧，镜头怎么走不受影响，预览和成片一致）
-    static func make(_ tr: Track, _ L: StudioLayout, _ st: StudioStyle, look: StudioLook, segments: [ZoomSegment], frames n: Int, duration: Double) -> [FramePlan] {
+    // range = 成片从哪导到哪（修剪起止）：「结尾鼠标回到起点」用
+    static func make(_ tr: Track, _ L: StudioLayout, _ st: StudioStyle, look: StudioLook, segments: [ZoomSegment], frames n: Int, duration: Double,
+                     range: (Double, Double)? = nil) -> [FramePlan] {
         let W = L.W, H = L.H, dt = 1 / Double(st.fps)
         let mouse = Mouse(tr), ev = events(tr, duration: duration)
         // 鼠标顺滑：弹簧越软越顺；0 = 不平滑，直接用原位置
@@ -673,7 +684,10 @@ enum StudioPlan {
         moved.append(contentsOf: tr.clicks.map { $0[0] }); moved.sort()
         var mi = 0, alpha = 1.0, lastMove = 0.0
         let segs = segments.sorted { $0.start < $1.start }
-        var lz = Spring(x: 0, w: 4), cx = Spring(x: W / 2, w: 4), cy = Spring(x: H / 2, w: 4)
+        // 推近速度：镜头弹簧的强度。全局按样式；某一段单独设了就用它（段结束后拉远的那 2 秒也按它，免得拉远突然变速）
+        let baseW = 4 * min(max(look.zoomSpeed, 0.3), 3)
+        var lz = Spring(x: 0, w: baseW), cx = Spring(x: W / 2, w: baseW), cy = Spring(x: H / 2, w: baseW)
+        var segW = baseW, segWUntil = -1.0
         var mx: Spring?, my: Spring?
         var si = 0
         var cur: UUID?
@@ -692,6 +706,10 @@ enum StudioPlan {
             }
             while si < segs.count && segs[si].end <= t { si += 1 }
             var tz = 1.0, tx = W / 2, ty = H / 2
+            let inSeg = si < segs.count && segs[si].start <= t
+            if inSeg { segW = segs[si].speed.map { 4 * min(max($0, 0.3), 3) } ?? baseW; segWUntil = segs[si].end + 2 }
+            let w = inSeg || t < segWUntil ? segW : baseW
+            lz.w = w; cx.w = w; cy.w = w
             if si < segs.count && segs[si].start <= t {
                 let seg = segs[si], Z = max(1, seg.zoom)
                 let hw = L.cw / (2 * Z * L.s), hh = L.ch / (2 * Z * L.s)   // 放大时看得到的原画面半宽、半高
@@ -737,7 +755,36 @@ enum StudioPlan {
             }
             out[i] = f
         }
+        if look.cursorLoop, let range { loopBack(&out, range: range, fps: Double(st.fps), seconds: look.cursorLoopSec, zoomOut: look.loopZoomOut, L) }
         return out
+    }
+
+    // 结尾鼠标回到起点：最后 seconds 秒，鼠标从当时的位置缓缓（缓进缓出）走回修剪起点那一帧的位置；
+    // zoomOut 时镜头同样缓缓回到全景，最后一帧和第一帧接得上，做循环视频
+    static func loopBack(_ out: inout [FramePlan], range: (Double, Double), fps: Double, seconds: Double, zoomOut: Bool, _ L: StudioLayout) {
+        guard !out.isEmpty else { return }
+        let first = min(max(0, Int((range.0 * fps).rounded())), out.count - 1)
+        let last = min(out.count - 1, max(first, Int((range.1 * fps).rounded()) - 1))   // 导出的最后一帧
+        let len = max(1, Int((min(max(seconds, 0.2), 4) * fps).rounded()))
+        let from = max(first + 1, last - len)
+        guard last > from else { return }
+        let home = out[first]
+        let fullX = L.cw / 2, fullY = L.ch / 2
+        for i in from...last {
+            let u = Double(i - from) / Double(last - from)
+            let e = u * u * (3 - 2 * u)                         // 缓进缓出
+            var f = out[i]
+            f.mx += (home.mx - f.mx) * e; f.my += (home.my - f.my) * e
+            f.alpha += (max(home.alpha, 1) - f.alpha) * e      // 回到起点时鼠标是显示着的
+            if home.shape >= 0 { f.shape = e > 0.5 ? home.shape : (f.shape >= 0 ? f.shape : home.shape) }
+            if zoomOut {
+                let lz = log(f.z) * (1 - e)                    // 放大倍数按对数插值回 1
+                f.z = exp(lz); f.sx += (fullX - f.sx) * e; f.sy += (fullY - f.sy) * e
+                let ex = L.cw / (2 * f.z), ey = L.ch / (2 * f.z)
+                f.sx = min(max(f.sx, ex), L.cw - ex); f.sy = min(max(f.sy, ey), L.ch - ey)
+            }
+            out[i] = f
+        }
     }
 }
 
@@ -846,7 +893,8 @@ final class StudioRenderer: @unchecked Sendable {
     }
 
     func plan(_ project: StudioProject, duration: Double) -> [FramePlan] {
-        StudioPlan.make(track, lay, st, look: look, segments: project.segments, frames: max(1, Int(duration * Double(st.fps))), duration: duration)
+        StudioPlan.make(track, lay, st, look: look, segments: project.segments, frames: max(1, Int(duration * Double(st.fps))), duration: duration,
+                        range: (project.trimStart, project.trimEnd > project.trimStart ? project.trimEnd : duration))
     }
 
     // 背景 + 卡片阴影：每帧都一样，先画好存成一张图
@@ -1025,6 +1073,7 @@ final class StudioJob: @unchecked Sendable {
     private let audio: AudioSettings
     private let trackVolumes: [Double]         // 每条音轨的音量（按声道数认：双声道 = 电脑声音，单声道 = 麦克风）
     private let voice: VoiceMix?               // 后来录的讲解（GIF 不要声音）
+    private let music: MusicMix?               // 背景音乐（GIF 不要声音）
     private let captions: CaptionLayer         // 字幕：烧进画面（成片时间）
     private let camLayer: CameraLayer?         // 摄像头画中画（素材时间查布局和画面）
     private let overlay: OverlayLayer          // 遮挡、标注（素材时间）
@@ -1067,6 +1116,7 @@ final class StudioJob: @unchecked Sendable {
         }
         trackVolumes = vols
         voice = style.gif ? nil : try await VoiceMix.load(dir: dir, project: p, map: map)
+        music = style.gif ? nil : try await MusicMix.load(dir: dir, project: p, map: map, raw: raw)
         camLayer = CameraLayer(dir: dir, track: track, project: p, canvas: CGSize(width: r.lay.cw, height: r.lay.ch), background: r.background)
         overlay = OverlayLayer(p)
         captions = CaptionLayer(captions: p.captions, style: p.captionStyle, map: map, trim: (p.trimStart, p.trimEnd), canvas: CGSize(width: r.lay.cw, height: r.lay.ch))
@@ -1146,7 +1196,7 @@ final class StudioJob: @unchecked Sendable {
         ])
         writer.add(vIn)
         var aIn: AVAssetWriterInput?
-        if aOut != nil || !clickTimes.isEmpty || voice != nil {
+        if aOut != nil || !clickTimes.isEmpty || voice != nil || music != nil {
             let a = AVAssetWriterInput(mediaType: .audio, outputSettings: [
                 AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48000, AVNumberOfChannelsKey: 2, AVEncoderBitRateKey: 192_000,
             ])
@@ -1236,7 +1286,7 @@ final class StudioJob: @unchecked Sendable {
             group.enter()
             var audioDone = false
             let clicks = ClickSound(times: clickTimes, style: clickStyle, volume: audio.clicks)
-            let warp = AudioWarp(map: map, gain: Float(maxVol), clicks: clicks, voice: voice)
+            let warp = AudioWarp(map: map, gain: Float(maxVol), clicks: clicks, voice: voice, music: music)
             // 没有原声音（或原声音先读完了）：自己按 0.1 秒一块生成静音 + 点击 + 讲解，一直到成片结尾
             var genAt = Int64((range.start.seconds * 48000).rounded()), genEnd = Int64((range.end.seconds * 48000).rounded())
             var origDone = aOut == nil
@@ -1248,10 +1298,10 @@ final class StudioJob: @unchecked Sendable {
                     else if !origDone, let aOut {
                         // 原声音：剪掉的扔掉、快放的压短，再调音量、压低（有讲解时）、混讲解和点击声、软限幅
                         if let raw = aOut.copyNextSampleBuffer() { sb = warp.process(raw) }
-                        else { origDone = true; if let at = warp.outAt { genAt = max(genAt, at) }; if voice == nil { end = true } }
+                        else { origDone = true; if let at = warp.outAt { genAt = max(genAt, at) }; if voice == nil && music == nil { end = true } }
                     } else if genAt < genEnd {
                         let n = Int(min(4800, genEnd - genAt))
-                        sb = clicks.silence(frames: n, at: genAt, voice: voice); genAt += Int64(n)
+                        sb = clicks.silence(frames: n, at: genAt, voice: voice, music: music); genAt += Int64(n)
                     } else { end = true }
                     if end { audioDone = true; aIn.markAsFinished(); group.leave(); return }
                     if let sb { aIn.append(sb) }
@@ -1397,10 +1447,11 @@ final class ClickSound: @unchecked Sendable {
         return make(data, frames: n, at: a0, format: fmt)
     }
 
-    func silence(frames n: Int, at a0: Int64, voice: VoiceMix? = nil) -> CMSampleBuffer? {
+    func silence(frames n: Int, at a0: Int64, voice: VoiceMix? = nil, music: MusicMix? = nil) -> CMSampleBuffer? {
         var data = [Float](repeating: 0, count: n * 2)
         _ = add(&data, frames: n, at: a0)
         voice?.add(into: &data, frames: n, at: a0)
+        music?.add(into: &data, frames: n, at: a0)
         for k in data.indices { data[k] = Self.softLimit(data[k]) }
         if format == nil {
             var asbd = AudioStreamBasicDescription(mSampleRate: 48000, mFormatID: kAudioFormatLinearPCM, mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
@@ -1443,12 +1494,14 @@ final class ClickSound: @unchecked Sendable {
 // 导出时的声音：按素材时间读进来的一块块 PCM → 剪掉段扔掉、快放段每 rate 个采样取平均压短 → 乘音量 → 混点击声 → 软限幅，
 // 时间戳按成片时间连续往后排
 final class AudioWarp: @unchecked Sendable {
-    private let map: TimeMap, gain: Float, clicks: ClickSound, voice: VoiceMix?
+    private let map: TimeMap, gain: Float, clicks: ClickSound, voice: VoiceMix?, music: MusicMix?
     private(set) var outAt: Int64?             // 下一个输出采样在成片里的位置
     private var pi = 0                         // 当前看到第几个剪辑段
     private var sumL: Float = 0, sumR: Float = 0, cnt = 0
 
-    init(map: TimeMap, gain: Float, clicks: ClickSound, voice: VoiceMix? = nil) { self.map = map; self.gain = gain; self.clicks = clicks; self.voice = voice }
+    init(map: TimeMap, gain: Float, clicks: ClickSound, voice: VoiceMix? = nil, music: MusicMix? = nil) {
+        self.map = map; self.gain = gain; self.clicks = clicks; self.voice = voice; self.music = music
+    }
 
     func process(_ sb: CMSampleBuffer) -> CMSampleBuffer? {
         let n = CMSampleBufferGetNumSamples(sb)
@@ -1483,6 +1536,7 @@ final class AudioWarp: @unchecked Sendable {
             voice.duck(&out, frames: frames, at: at)          // 有讲解的地方原声音压低
             voice.add(into: &out, frames: frames, at: at)
         }
+        music?.add(into: &out, frames: frames, at: at)
         clicks.add(into: &out, frames: frames, at: at)
         for k in out.indices { out[k] = ClickSound.softLimit(out[k]) }
         outAt = at + Int64(frames)

@@ -42,7 +42,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     let style = StudioStyle()
     let fps: Double
     let player: AVPlayer
-    private let asset: AVURLAsset
+    let asset: AVURLAsset
     private var previewAsset: AVAsset          // 预览播的：raw.mp4，开了降噪是「画面 + 降噪后的声音」
     private let box: PlanBox
     var renderer: StudioRenderer { box.renderer }
@@ -61,7 +61,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     @Published var project: StudioProject { didSet { if project != oldValue { replan(); scheduleSave() } } }
     @Published var selected: UUID?
     @Published var time = 0.0
-    @Published var playing = false
+    @Published var playing = false { didSet { if !playing { musicPlayer.pauseAll() } } }
     @Published var picking = false             // 正在等用户在预览上点固定位置
     @Published var exportProgress: Double?
     @Published var exported: URL?
@@ -83,6 +83,12 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     private var recorder: AVAudioRecorder?
     private var countdownTask: Task<Void, Never>?
     private let voicePlayer = VoicePreview()
+    let musicPlayer = MusicPreview()          // 背景音乐预览
+    var musicEnv: [Float]?                    // 原声音的音量包络（压低音乐用；打开时算一次）
+    var musicDuckKey = ""                     // 压低曲线缓存：工程里相关的东西变了才重算
+    var musicDuckCache: [Float] = []
+    @Published var suggestions: [SpeedSuggestion] = []   // 「建议加速」找到的段（还没采纳）
+    @Published var suggesting = false
     private var duckNow: Float = 1             // 预览里原声音现在压到多少（有讲解时 0.25）
     static var countdownOn: Bool { UserDefaults.standard.object(forKey: "voiceCountdown") as? Bool ?? true }
     static var muteWhileRecording: Bool { UserDefaults.standard.object(forKey: "voiceMuteOriginal") as? Bool ?? true }
@@ -179,6 +185,8 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         resetBoundaries()
         for c in project.voiceovers { loadPeaks(c.file) }
         refreshDenoise()   // 工程里开着降噪：打开时就换成处理后的声音
+        loadMusicEnv()
+        for c in project.music.clips { loadPeaks(c.file) }
         // 播到结尾（或修剪的终点）时间就不走了，上面的回调不再来：另外听「播完」和播放状态，把图标换回播放
         observeEnd(item)
         statusObserver = player.observe(\.timeControlStatus) { [weak self] p, _ in
@@ -236,6 +244,20 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
                     selected = project.voiceovers[0].id
                     loadPeaks("voice/demo.m4a")
                 }
+                // EDITOR_MUSICDEMO=music|suggest：合成一段音乐放到音乐轨（选中它）；suggest 再放两个建议加速块（不选中，露出总条）
+                if let k = ProcessInfo.processInfo.environment["EDITOR_MUSICDEMO"] {
+                    let f = dir.appendingPathComponent("music/demo.wav")
+                    try? FileManager.default.createDirectory(at: f.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try? StudioTests.writeChord(f, length: 8, amp: 0.5)
+                    let d = duration
+                    project.music.clips = [MusicClip(file: "music/demo.wav", name: "Demo Song", start: d * 0.05, trimIn: 0, trimOut: 8, fileLength: 8)]
+                    project.music.volume = 0.6
+                    loadPeaks("music/demo.wav")
+                    if k == "suggest" {
+                        selected = nil
+                        suggestions = [SpeedSuggestion(start: d * 0.3, end: d * 0.45, kind: .idle), SpeedSuggestion(start: d * 0.62, end: d * 0.74, kind: .typing)]
+                    } else { selected = project.music.clips[0].id }
+                }
                 // EDITOR_OVERLAYDEMO=blur|mosaic|arrow|text：在截图那一刻放一块遮挡、一个框、一个箭头、一段文字，选中指定的那个
                 if let which = ProcessInfo.processInfo.environment["EDITOR_OVERLAYDEMO"] {
                     let t = project.segments.first.map { ($0.start + $0.end) / 2 } ?? 1, d = duration
@@ -285,6 +307,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         cancelCaptions()
         countdownTask?.cancel(); countdown = nil
         voicePlayer.stopAll()
+        musicPlayer.stopAll()
         player.pause()
         if let timeObserver { player.removeTimeObserver(timeObserver) }
         if let boundaryObserver { player.removeTimeObserver(boundaryObserver) }
@@ -517,6 +540,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     func voiceTick() {
         let map = timeMap, o = map.out(player.currentTime().seconds)
         let mute = voiceRec != nil && Self.muteWhileRecording
+        musicTick(outTime: o)
         let active = voicePlayer.sync(dir: dir, clips: project.voiceovers, map: map, outTime: o, level: project.audio.denoise,
                                       playing: playing && Self.testShot == nil, master: mute ? 0 : project.audio.voice)
         var d: Float = 1
@@ -690,6 +714,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         if let i = cutIndex(selected) { edit { $0.cuts.remove(at: i) }; selected = nil; return }
         if let i = layoutIndex(selected) { edit { $0.layouts.remove(at: i) }; selected = nil; return }
         if let i = voiceIndex(selected) { edit { $0.voiceovers.remove(at: i) }; selected = nil; return }
+        if let i = musicIndex(selected) { edit { $0.music.clips.remove(at: i) }; selected = nil; return }
         guard let i = index(selected) else { return }
         edit { $0.segments.remove(at: i) }
         selected = nil
@@ -993,10 +1018,12 @@ struct EditorView: View {
                         else if ed.cutIndex(ed.selected) != nil { cutInspector.frame(height: 30) }   // 选中剪辑段
                         else if ed.layoutIndex(ed.selected) != nil { layoutInspector.frame(height: 30) }   // 选中布局段
                         else if ed.voiceIndex(ed.selected) != nil { voiceInspector.frame(height: 30) }   // 选中讲解
+                        else if ed.musicIndex(ed.selected) != nil { MusicInspector(ed: ed).frame(height: 30) }   // 选中音乐
                         else if ed.selected != nil { inspector.frame(height: 30) }   // 选中推近段才出现
-                        timeline.frame(height: ed.hasCamera ? 252 : 226)
-                            .help(L("从上到下：剪掉 / 快放、推近、讲解、字幕、遮挡、标注；点选来调整，空白处双击新加推近（字幕那条双击新加字幕），两端黄条修剪",
-                                   "Top to bottom: cut / speed-up, zooms, voiceovers, captions, redactions, annotations. Click to edit, double-click empty space to add a zoom (a caption on the caption lane), drag the yellow bars to trim"))
+                        else if !ed.suggestions.isEmpty || ed.suggesting { SuggestionBar(ed: ed).frame(height: 30) }   // 建议加速
+                        timeline.frame(height: ed.hasCamera ? 278 : 252)
+                            .help(L("从上到下：剪掉 / 快放、推近、讲解、字幕、遮挡、标注、音乐；点选来调整，空白处双击新加推近（字幕那条双击新加字幕），两端黄条修剪",
+                                   "Top to bottom: cut / speed-up, zooms, voiceovers, captions, redactions, annotations, music. Click to edit, double-click empty space to add a zoom (a caption on the caption lane), drag the yellow bars to trim"))
                     }
                     .padding(14)
                 }
@@ -1056,6 +1083,10 @@ struct EditorView: View {
                 OverlayButtons(ed: ed)
                 Spacer()
                 // 右半边：自动生成、撤销重做（只放图标，鼠标停上去有说明），再是时间轴缩放
+                Button { ed.suggestSpeed() } label: { Image(systemName: "gauge.with.dots.needle.67percent") }
+                    .disabled(ed.suggesting)
+                    .help(L("建议加速：找出很久没操作、画面也不动的空档（建议 4×）和一直在打字的地方（建议 2×），在剪辑轨上用虚线标出来，点 ✓ 采纳",
+                            "Suggest speed-ups: finds long idle stretches (4×) and long typing (2×) and marks them on the cut lane with dashed outlines; click ✓ to apply"))
                 Button { ed.regenerate() } label: { Image(systemName: "wand.and.stars") }
                     .help(L("重新自动生成：按录制时的点击和打字重新排推近段（会替换现在的段，可以撤销 ⌘Z）", "Auto-generate: rebuild zooms from your clicks and typing (replaces the current zooms; undo with ⌘Z)"))
                 Button { ed.undo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!ed.canUndo).help(L("撤销上一步（⌘Z）", "Undo the last change (⌘Z)"))
@@ -1182,6 +1213,7 @@ struct EditorView: View {
                 if seg.mode == .fixed {
                     Button(ed.picking ? L("点画面…", "Click the picture…") : L("选位置", "Set Position")) { ed.picking.toggle() }
                 }
+                ZoomSpeedPicker(ed: ed, index: i)
                 Spacer()
                 Button(role: .destructive) { ed.deleteSelected() } label: { Label(L("删除", "Delete"), systemImage: "trash") }
             }
@@ -1435,7 +1467,7 @@ struct TimelineGestures: NSViewRepresentable {
 struct TimelineStrip: View {
     @ObservedObject var ed: StudioEditor
     private let rulerH = 22.0, cutY = 38.0, cutH = 20.0, segY = 64.0, segH = 40.0, voiceY = 112.0, voiceH = 26.0, capY = 144.0, capH = 26.0
-    private let redY = 176.0, redH = 20.0, annY = 200.0, annH = 20.0, layY = 226.0, layH = 22.0
+    private let redY = 176.0, redH = 20.0, annY = 200.0, annH = 20.0, musY = 226.0, musH = 22.0, layY = 252.0, layH = 22.0
     private let accent = Color(red: 0.42, green: 0.36, blue: 0.95)
 
     var body: some View {
@@ -1463,6 +1495,11 @@ struct TimelineStrip: View {
                 ForEach(ed.project.cuts) { c in
                     CutBlock(ed: ed, cut: c, w: w, d: d).frame(width: max(6, x(c.end) - x(c.start)), height: cutH)
                         .offset(x: x(c.start), y: cutY)
+                }
+                // 建议加速：虚线半透明，块上直接点 ✓ 采纳 / ✕ 忽略
+                ForEach(ed.suggestions) { g in
+                    SuggestionBlock(ed: ed, sug: g).frame(width: max(6, x(g.end) - x(g.start)), height: cutH)
+                        .offset(x: x(g.start), y: cutY)
                 }
                 ForEach(ed.project.segments) { seg in
                     SegmentBlock(ed: ed, seg: seg, w: w, d: d, accent: accent).frame(width: max(6, x(seg.end) - x(seg.start)), height: segH)
@@ -1512,6 +1549,23 @@ struct TimelineStrip: View {
                     let (row, rows) = ap[a.id] ?? (0, 1), ah = annH / Double(rows)
                     OverlayBlock(ed: ed, id: a.id, lane: .annotation, w: w, d: d, compact: rows > 1).frame(width: max(6, x(a.end) - x(a.start)), height: ah - (rows > 1 ? 1 : 0))
                         .offset(x: x(a.start), y: annY + Double(row) * ah)
+                }
+                // 音乐轨：每段一块（带波形）；开了循环时最后一段之后淡色画出「一直重复到片尾」
+                RoundedRectangle(cornerRadius: 5).fill(Color.secondary.opacity(0.07)).frame(width: w - 4, height: musH)
+                    .overlay(Text(ed.project.music.clips.isEmpty ? L("音乐（在「声音」里选一首）", "Music (choose one under Sound)") : "")
+                        .font(.system(size: 9)).foregroundStyle(.secondary).padding(.leading, 8), alignment: .leading)
+                    .offset(x: 2, y: musY).allowsHitTesting(false)
+                let fe = m.out(ed.project.trimEnd)
+                ForEach(ed.project.music.occurrences(filmEnd: fe).filter { $0.at > $0.clip.start + 0.001 }, id: \.at) { o in
+                    let a = x(m.src(o.at)), b = x(m.src(o.at + o.len))
+                    RoundedRectangle(cornerRadius: 5).fill(MusicBlock.tint.opacity(0.28))
+                        .overlay(Image(systemName: "repeat").font(.system(size: 9, weight: .bold)).foregroundStyle(.white.opacity(0.9)).padding(.leading, 6), alignment: .leading)
+                        .frame(width: max(4, b - a), height: musH).offset(x: a, y: musY).allowsHitTesting(false)
+                }
+                ForEach(ed.project.music.clips) { c in
+                    let a = x(m.src(c.start)), b = x(m.src(min(c.start + c.length, max(fe, c.start + 0.05))))
+                    MusicBlock(ed: ed, clip: c, w: w, d: d, peaks: ed.voicePeaks[c.file] ?? []).frame(width: max(6, b - a), height: musH)
+                        .offset(x: a, y: musY)
                 }
                 // 布局轨（有摄像头才有）：每段一块；空白处双击新加一段
                 if ed.hasCamera {
@@ -2041,7 +2095,7 @@ struct StylePanel: View {
     @AppStorage("voiceCountdown") private var voiceCountdown = true
     @AppStorage("voiceMuteOriginal") private var voiceMuteOriginal = true
     @State private var open: Set<String> = ProcessInfo.processInfo.environment["EDITOR_OPEN"].map { Set($0.split(separator: ",").map(String.init)) }
-        ?? ["preset", "aspect", "bg", "frame", "cursor", "keys", "audio", "camera", "caption", "blur"]
+        ?? ["preset", "aspect", "bg", "frame", "zoom", "cursor", "keys", "audio", "music", "camera", "caption", "blur"]
 
     var body: some View {
         ScrollView {
@@ -2050,9 +2104,11 @@ struct StylePanel: View {
                 section("aspect", L("画面比例", "Aspect Ratio")) { aspectBox }
                 section("bg", L("背景", "Background")) { backgroundBox }
                 section("frame", L("画面", "Frame")) { frameBox }
+                section("zoom", L("推近", "Zoom")) { ZoomSpeedBox(ed: ed) }
                 section("cursor", L("鼠标", "Cursor")) { cursorBox }
                 section("keys", L("快捷键", "Keystrokes")) { keysBox }
                 section("audio", L("声音", "Sound")) { audioBox }
+                section("music", L("背景音乐", "Music")) { MusicBox(ed: ed) }
                 if ed.hasCamera { section("camera", L("摄像头", "Camera")) { cameraBox } }
                 section("caption", L("字幕", "Captions")) { captionBox }
                 section("blur", L("运动模糊", "Motion Blur")) { blurBox }
@@ -2292,6 +2348,12 @@ struct StylePanel: View {
                     Button { ClickPreview.play(look.clickStyle) } label: { Image(systemName: "speaker.wave.2.fill") }
                         .help(L("试听", "Preview sound"))
                 }.controlSize(.small)
+            }
+            Toggle(L("结尾鼠标回到起点", "Return cursor to start at the end"), isOn: ed.look(\.cursorLoop))
+                .help(L("最后一小段鼠标慢慢走回第一帧的位置，首尾接得上，适合做循环播放的视频", "In the last moment the cursor glides back to where it started, so the video loops seamlessly"))
+            if look.cursorLoop {
+                slider(L("回去用时", "Duration"), \.cursorLoopSec, 0.5...2) { String(format: L("%.1f 秒", "%.1fs"), $0) }
+                Toggle(L("镜头也拉回全景", "Also zoom back out"), isOn: ed.look(\.loopZoomOut))
             }
         }.toggleStyle(.checkbox).font(.callout)
     }
