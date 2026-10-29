@@ -75,13 +75,13 @@ namespace ScreenRecorder
                 Pump(2.0);
                 Check("preview is playing while recording", ed.Playing && ed.Time > 1.5, $"time {ed.Time:0.00}");
                 Shot("voice-recording");
-                Pump(2.0);
+                Pump(2.4);   // 第一句约 4 秒才说完，多录一点，别因为启动快慢差 0.1 秒把最后一个字切掉
                 ed.ToggleVoice();
                 Check("voice-over added to the project", PumpUntil(() => ed.VoiceAdded == 1, 30), ed.CaptionStatus);
                 var v = ed.Project.Voiceovers.FirstOrDefault();
                 Check("one clip, file saved as m4a", ed.Project.Voiceovers.Count == 1 && v != null && v.File.EndsWith(".m4a") && File.Exists(Path.Combine(dir, v.File)), v?.File ?? "");
                 Check("clip anchored at the playhead (1.0 s)", v != null && Math.Abs(v.Start - 1.0) < 0.05, $"{v?.Start:0.000}");
-                Check("clip length ≈ 4 s", v != null && Math.Abs(v.Length - 4.0) < 0.6, $"{v?.Length:0.00}s (trimIn {v?.TrimIn:0.000})");
+                Check("clip length ≈ 4.4 s", v != null && Math.Abs(v.Length - 4.4) < 0.6, $"{v?.Length:0.00}s (trimIn {v?.TrimIn:0.000})");
                 Check("wav removed after converting", !Directory.GetFiles(Path.Combine(dir, "voice"), "*.wav").Any());
                 Check("clip selected (inspector shown)", ed.SelectedVoice == v?.Id);
                 PumpUntil(() => ed.Peaks(v.File) != null, 10); Pump(0.5);
