@@ -66,12 +66,15 @@ namespace ScreenRecorder
         // 小按钮组（像分段控件，能换行，不会被裁）
         Control Chips(IList<(string value, string text)> items, int columns, Func<StudioLook, string> get, Action<StudioLook, string> set)
         {
-            var t = new TableLayoutPanel { ColumnCount = columns, AutoSize = true, Width = W, Margin = new Padding(0), Padding = new Padding(0) };
+            // 固定宽度（不跟着按钮文字撑大），按钮在格子里缩放；一行放 columns 个
+            int rows = (items.Count + columns - 1) / columns;
+            var t = new TableLayoutPanel { ColumnCount = columns, RowCount = rows, AutoSize = false, Width = W, Height = rows * 32, Margin = new Padding(0), Padding = new Padding(0) };
             for (int i = 0; i < columns; i++) t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / columns));
+            for (int i = 0; i < rows; i++) t.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
             var buttons = new List<(Button b, string v)>();
             foreach (var (v, text) in items)
             {
-                var b = new Button { Text = text, Dock = DockStyle.Fill, Height = 28, Margin = new Padding(0, 0, 4, 4), FlatStyle = FlatStyle.Flat, Font = Font, TabStop = false };
+                var b = new Button { Text = text, Dock = DockStyle.Fill, AutoSize = false, Margin = new Padding(0, 0, 4, 4), FlatStyle = FlatStyle.Flat, Font = Font, TabStop = false, AutoEllipsis = true, Padding = new Padding(0) };
                 b.FlatAppearance.BorderSize = 0;
                 b.Click += (s, e) => { if (!syncing) ed.EditLook(l => set(l, v)); };
                 buttons.Add((b, v)); t.Controls.Add(b);
@@ -233,7 +236,7 @@ namespace ScreenRecorder
             for (int i = 0; i < StudioLook.Gradients.Length; i++)
             {
                 int k = i; var g = StudioLook.Gradients[i];
-                var b = new Button { Width = 38, Height = 26, Margin = new Padding(0, 0, 6, 6), FlatStyle = FlatStyle.Flat, TabStop = false };
+                var b = new Button { Width = 36, Height = 26, Margin = new Padding(0, 0, 5, 6), FlatStyle = FlatStyle.Flat, TabStop = false };
                 b.Paint += (s, e) =>
                 {
                     using (var br = new System.Drawing.Drawing2D.LinearGradientBrush(b.ClientRectangle, C(g.a), C(g.b), 315f)) e.Graphics.FillRectangle(br, b.ClientRectangle);
