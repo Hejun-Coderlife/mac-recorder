@@ -186,8 +186,8 @@ namespace ScreenRecorder
             var wp = m.Warp(p);
             r.Check("warped segments (one fully cut away)", wp.Segments.Count == 2 && Math.Abs(wp.Segments[1].Start - 9) < 1e-9 && Math.Abs(wp.TrimEnd - 28.933) < 1e-6 && wp.Cuts.Count == 0, SegList(wp.Segments));
             // Mac 写的工程：cuts / audio 读得懂，Windows 不认识的字段（讲解、字幕、样式里的新键、推近段的 speed）存回去还在
-            var mac = "{\"segments\":[{\"id\":\"A\",\"start\":1,\"end\":3,\"zoom\":2,\"mode\":\"follow\",\"fixedX\":0.5,\"fixedY\":0.5,\"speed\":\"fast\"}],\"trimStart\":0,\"trimEnd\":10,\"segmentsEdited\":true," +
-                      "\"look\":{\"aspect\":\"16:9\",\"background\":\"transparent\",\"keysShow\":true,\"zoomSpeed\":\"slow\"}," +
+            var mac = "{\"segments\":[{\"id\":\"A\",\"start\":1,\"end\":3,\"zoom\":2,\"mode\":\"follow\",\"fixedX\":0.5,\"fixedY\":0.5,\"speed\":1.7}],\"trimStart\":0,\"trimEnd\":10,\"segmentsEdited\":true," +
+                      "\"look\":{\"aspect\":\"16:9\",\"background\":\"transparent\",\"keysShow\":true,\"zoomSpeed\":0.6}," +
                       "\"cuts\":[{\"id\":\"C1\",\"start\":2,\"end\":4,\"mode\":\"speed\",\"rate\":8}],\"audio\":{\"system\":1.5,\"mic\":0.5,\"clicks\":0.8,\"muted\":false,\"voice\":0.7,\"duck\":true,\"denoise\":\"medium\"}," +
                       "\"voiceovers\":[{\"id\":\"V\",\"file\":\"voice/a.m4a\",\"start\":1,\"trimIn\":0,\"trimOut\":2,\"fileLength\":2,\"volume\":1}],\"captions\":[{\"start\":1,\"end\":2,\"text\":\"你好\"}],\"music\":{\"clips\":[]}}";
             var mp = StudioProject.FromJson(mac);
@@ -197,10 +197,10 @@ namespace ScreenRecorder
             r.Check("mac-only fields kept", back.ContainsKey("voiceovers") && back.ContainsKey("captions") && back.ContainsKey("music") && ((List<object>)back["voiceovers"]).Count == 1);
             r.Check("caption text kept", ((string)((Dictionary<string, object>)((List<object>)back["captions"])[0])["text"]) == "你好");
             var bl = (Dictionary<string, object>)back["look"]; var ba = (Dictionary<string, object>)back["audio"];
-            r.Check("unknown look keys kept", bl.ContainsKey("keysShow") && (string)bl["zoomSpeed"] == "slow");
+            r.Check("unknown look keys kept", bl.ContainsKey("keysShow") && Math.Abs((double)bl["zoomSpeed"] - 0.6) < 1e-9 && Math.Abs(mp.Look.ZoomSpeed - 0.6) < 1e-9);
             r.Check("mac transparent stays transparent", (string)bl["background"] == "transparent");
             r.Check("unknown audio keys kept", (string)ba["denoise"] == "medium" && (bool)ba["duck"] && Math.Abs((double)ba["voice"] - 0.7) < 1e-9);
-            r.Check("segment speed kept", (string)((Dictionary<string, object>)((List<object>)back["segments"])[0])["speed"] == "fast");
+            r.Check("segment speed kept", Math.Abs((double)((Dictionary<string, object>)((List<object>)back["segments"])[0])["speed"] - 1.7) < 1e-9 && mp.Segments[0].Speed == 1.7);
             var bc = (Dictionary<string, object>)((List<object>)back["cuts"])[0];
             r.Check("cut has every key Mac needs", new[] { "id", "start", "end", "mode", "rate" }.All(bc.ContainsKey) && (string)bc["mode"] == "speed");
             r.Check("roundtrip with extras", StudioProject.FromJson(mp.ToJson()).Same(mp));

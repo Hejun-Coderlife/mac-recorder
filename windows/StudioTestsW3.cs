@@ -62,11 +62,11 @@ namespace ScreenRecorder
             r.Check("project round-trip: camera + layouts", p2.Camera != null && Near(p2.Camera.Size, 0.3) && Near(p2.Camera.X, 0.2) && p2.Camera.BorderColor.Same(new RGB(1, 0, 0)) && !p2.Camera.Mirror && !p2.Camera.Round &&
                     p2.Layouts.Count == 1 && p2.Layouts[0].Mode == "split" && Near(p2.Layouts[0].Start, 2) && p2.Layouts[0].Id == p.Layouts[0].Id);
             r.Check("project: layouts / camera no longer kept as unknown extras", !p2.Extra.ContainsKey("camera") && !p2.Extra.ContainsKey("layouts"));
-            var macp = StudioProject.FromJson("{\"look\":{\"showKeys\":true,\"keysAt\":\"bottomLeft\",\"keysSize\":0.05,\"keysDark\":true,\"zoomSpeed\":\"fast\"},\"camera\":{\"show\":true,\"round\":true,\"size\":0.24,\"x\":0.86,\"y\":0.8,\"border\":4,\"borderColor\":{\"r\":1,\"g\":1,\"b\":1},\"shadow\":0.5,\"mirror\":true},\"layouts\":[{\"id\":\"8E1D2C5A-1111-2222-3333-444455556666\",\"start\":1,\"end\":3,\"mode\":\"splitSwap\"}],\"segments\":[],\"trimStart\":0,\"trimEnd\":10}");
+            var macp = StudioProject.FromJson("{\"look\":{\"showKeys\":true,\"keysAt\":\"bottomLeft\",\"keysSize\":0.05,\"keysDark\":true,\"futureLookKey\":\"fast\"},\"camera\":{\"show\":true,\"round\":true,\"size\":0.24,\"x\":0.86,\"y\":0.8,\"border\":4,\"borderColor\":{\"r\":1,\"g\":1,\"b\":1},\"shadow\":0.5,\"mirror\":true},\"layouts\":[{\"id\":\"8E1D2C5A-1111-2222-3333-444455556666\",\"start\":1,\"end\":3,\"mode\":\"splitSwap\"}],\"segments\":[],\"trimStart\":0,\"trimEnd\":10}");
             r.Check("Mac project.json: keycaps / camera / layouts read", macp.Look.ShowKeys && macp.Look.KeysAt == "bottomLeft" && macp.Camera != null && macp.Layouts.Count == 1 && macp.Layouts[0].Mode == "splitSwap" &&
-                    macp.Layouts[0].Id == "8E1D2C5A-1111-2222-3333-444455556666" && macp.Look.Extra.ContainsKey("zoomSpeed"));
+                    macp.Layouts[0].Id == "8E1D2C5A-1111-2222-3333-444455556666" && macp.Look.Extra.ContainsKey("futureLookKey"));
             var back = StudioProject.FromJson(macp.ToJson());
-            r.Check("Mac project re-saved keeps everything", back.Layouts.Count == 1 && back.Layouts[0].Id == macp.Layouts[0].Id && back.Look.Extra.ContainsKey("zoomSpeed") && back.Camera != null);
+            r.Check("Mac project re-saved keeps everything", back.Layouts.Count == 1 && back.Layouts[0].Id == macp.Layouts[0].Id && back.Look.Extra.ContainsKey("futureLookKey") && back.Camera != null);
             var tr = new Track { Width = 100, Height = 100, Camera = new CameraTrack { X = 0.1, Y = 0.2, Size = 0.15, Round = false } };
             var dir = Path.Combine(Path.GetTempPath(), "w3-load-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(dir);
             var lp = StudioProject.Load(dir, tr, 10);
