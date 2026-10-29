@@ -17,11 +17,15 @@
     <AssemblyTitle>录屏 Screen Recorder</AssemblyTitle>
     <Version>1.0.0</Version>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="ScreenRecorderLib" Version="6.6.0" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
     <EmbeddedResource Include="app.ico" LogicalName="app.ico" />
+    <!-- tools/ 里是在 Mac 上跑合成用的 .NET 8 小工具，不编进程序 -->
+    <Compile Remove="tools/**" />
+    <None Remove="tools/**" />
     <!-- .NET Framework 直接引用 WinForms，不走 WindowsDesktop SDK（Mac 上也能编译） -->
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Drawing" />

@@ -81,6 +81,9 @@ namespace ScreenRecorder
         public string Path { get; }
         public event Action<string> Completed;   // 文件路径
         public event Action<string> Failed;      // 错误信息
+        // Studio 用：原始画面第一帧出来的时刻（Clock 时钟），轨迹按它对齐
+        public double FirstFrameAt => firstFrame > 0 ? firstFrame : started;
+        double firstFrame, started;
 
         public Session(Source src, bool systemAudio, bool microphone, bool cursor, string path)
         {
@@ -129,6 +132,8 @@ namespace ScreenRecorder
             rec = Recorder.CreateRecorder(opts);
             rec.OnRecordingComplete += (s, e) => Completed?.Invoke(e.FilePath);
             rec.OnRecordingFailed += (s, e) => Failed?.Invoke(e.Error);
+            rec.OnFrameRecorded += (s, e) => { if (firstFrame == 0) firstFrame = Clock.Now; };
+            rec.OnStatusChanged += (s, e) => { if (e.Status == RecorderStatus.Recording && started == 0) started = Clock.Now; };
         }
 
         public void Start() => rec.Record(Path);

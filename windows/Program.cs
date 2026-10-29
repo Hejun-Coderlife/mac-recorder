@@ -1,6 +1,6 @@
 // 录屏 · Screen Recorder（Windows 版）
 // 录制引擎：ScreenRecorderLib（Desktop Duplication / Windows.Graphics.Capture + Media Foundation 硬件编码，声音在库里混成一条音轨）
-// 界面语言跟随系统（中文 / 英文）；Studio 效果 Windows 版暂不支持
+// 界面语言跟随系统（中文 / 英文）；Studio 效果见 StudioCore.cs / StudioWin.cs（背景白色、出 mp4，读写视频用同目录的 ffmpeg.exe）
 using System;
 using System.Drawing;
 using System.Globalization;
@@ -27,8 +27,8 @@ namespace ScreenRecorder
             }
         }
 
-        public static string NewFilePath() =>
-            Path.Combine(Folder, $"{L("录屏", "Recording")} {DateTime.Now:yyyy-MM-dd HH.mm.ss}.mp4");
+        public static string NewName() => $"{L("录屏", "Recording")} {DateTime.Now:yyyy-MM-dd HH.mm.ss}";
+        public static string NewFilePath() => Path.Combine(Folder, NewName() + ".mp4");
 
         public static Icon Icon
         {
@@ -43,6 +43,7 @@ namespace ScreenRecorder
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+            if (Environment.GetEnvironmentVariable("STUDIO") != null) return SelfTest.RenderOnly();
             if (Environment.GetEnvironmentVariable("AUTOTEST") != null) return SelfTest.Run();
             Application.Run(new MainForm());
             return 0;

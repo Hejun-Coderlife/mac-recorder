@@ -1,4 +1,4 @@
-# Windows 版：编译 → 打包 zip（exe + 录制引擎 + 同目录 VC++ 运行库）→ 在 runner 上真录几秒自测
+# Windows 版：编译 → 打包 zip（exe + 录制引擎 + 同目录 VC++ 运行库 + Studio 用的 ffmpeg.exe）→ 在 runner 上真录几秒自测（含 Studio 效果）
 name: Windows
 
 on:
@@ -29,6 +29,13 @@ jobs:
           foreach ($d in "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll") {
             Copy-Item "C:\Windows\System32\$d" pkg/
           }
+          # Studio 效果读写视频用的 ffmpeg（BtbN 的 Windows 64 位 GPL 版，带 libx264）
+          Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-gpl-7.1.zip" -OutFile ff.zip
+          Expand-Archive ff.zip -DestinationPath ff
+          $ffdir = Get-ChildItem ff -Directory | Select-Object -First 1
+          Copy-Item "$($ffdir.FullName)/bin/ffmpeg.exe" pkg/
+          Copy-Item "$($ffdir.FullName)/LICENSE.txt" "pkg/ffmpeg-LICENSE.txt"
+          & pkg/ffmpeg.exe -hide_banner -version | Select-Object -First 1
           Copy-Item windows/README.txt pkg/
           Compress-Archive -Path pkg/* -DestinationPath ScreenRecorder-Windows-x64.zip
           Get-ChildItem pkg, ScreenRecorder-Windows-x64.zip | Format-Table Name, Length
@@ -82,8 +89,63 @@ jobs:
           ffprobe -v error -show_entries "stream=codec_type,codec_name,channels,sample_rate:format=duration" -of compact $out
           if (-not (ffprobe -v error -select_streams a -show_entries stream=codec_name -of csv=p=0 $out)) { throw "no audio track" }
 
+      - name: Self-test (Studio effects, simulated mouse / clicks / typing)
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "studio"; New-Item -ItemType Directory -Force $dir | Out-Null
+          $out = Join-Path $dir "studio.mp4"
+          foreach ($k in "AUTOREGION", "AUTOWINDOW") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $env:AUTOTEST = "6"; $env:AUTOOUT = $out; $env:AUTOSTUDIO = "1"; $env:AUTOINPUT = "1"; $env:AUTOAUDIO = "1"
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          $res = Get-Content "$env:TEMP\recorder_test.txt" -Raw
+          Write-Host "exit=$($p.ExitCode)`n$res"
+          if ($p.ExitCode -ne 0 -or -not $res.StartsWith("OK")) { throw "studio recording failed" }
+          # 素材也留一份看
+          $raw = ($res -split "`n" | Where-Object { $_ -match "^studio raw=(.+?) first" } | ForEach-Object { $Matches[1] })
+          Copy-Item (Split-Path $raw) (Join-Path $dir "project") -Recurse
+          Get-Content (Join-Path $dir "project/track.json") -Raw | Write-Host
+          $info = ffprobe -v error -show_entries "stream=codec_type,codec_name,width,height,r_frame_rate:format=duration" -of json $out | ConvertFrom-Json
+          $v = $info.streams | Where-Object codec_type -eq video; $a = @($info.streams | Where-Object codec_type -eq audio)
+          $dur = [double]$info.format.duration
+          Write-Host "studio: $($v.codec_name) $($v.width)x$($v.height) $($v.r_frame_rate) duration=$dur audio=$($a.Count)"
+          if ($v.codec_name -ne "h264" -or $v.r_frame_rate -ne "60/1") { throw "not h264 60fps" }
+          if ($dur -lt 5 -or $dur -gt 7.5) { throw "duration $dur not ~6s" }
+          if ($a.Count -ne 1) { throw "expected one audio track" }
+          foreach ($t in "0.3", "1.6", "2.6", "4.4", "5.5") { ffmpeg -v error -y -ss $t -i $out -frames:v 1 (Join-Path $dir "frame-$t.png") }
+          Add-Type -AssemblyName System.Drawing
+          # 画面四周一圈（外沿 2%）有多少接近白色：没放大时应该几乎全白（白色背景），放大后背景出画、应该很少
+          function WhiteBorder($file) {
+            $b = [System.Drawing.Bitmap]::new($file); $w = $b.Width; $h = $b.Height; $m = [int]([Math]::Min($w, $h) * 0.02); $n = 0; $white = 0
+            for ($x = 0; $x -lt $w; $x += 7) { foreach ($y in 1, ($h - 2)) { $c = $b.GetPixel($x, $y); $n++; if ($c.R -gt 240 -and $c.G -gt 240 -and $c.B -gt 240) { $white++ } } }
+            for ($y = 0; $y -lt $h; $y += 7) { foreach ($x in 1, ($w - 2)) { $c = $b.GetPixel($x, $y); $n++; if ($c.R -gt 240 -and $c.G -gt 240 -and $c.B -gt 240) { $white++ } } }
+            $center = $b.GetPixel([int]($w / 2), [int]($h / 2)); $b.Dispose()
+            return @{ white = $white / $n; center = $center }
+          }
+          $f0 = WhiteBorder (Join-Path $dir "frame-0.3.png"); $f1 = WhiteBorder (Join-Path $dir "frame-2.6.png")
+          Write-Host "border white: 0.3s=$($f0.white)  2.6s=$($f1.white)"
+          if ($f0.white -lt 0.95) { throw "white background missing at 0.3s ($($f0.white))" }
+          if ($f1.white -gt 0.5) { throw "not zoomed in at 2.6s ($($f1.white))" }
+
+      - name: Studio render speed (synthetic 1920x1080, 20 s)
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "speed"; New-Item -ItemType Directory -Force $dir | Out-Null
+          ffmpeg -v error -y -f lavfi -i "testsrc2=s=1920x1080:r=30:d=20" -f lavfi -i "sine=f=440:d=20" -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac (Join-Path $dir "raw.mp4")
+          foreach ($k in "AUTOTEST", "AUTOSTUDIO") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $env:STUDIO = $dir; $env:STUDIO_OUT = (Join-Path $dir "studio.mp4"); $env:STUDIO_FAKETRACK = "1"
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          $res = Get-Content "$env:TEMP\recorder_test.txt" -Raw
+          Write-Host "exit=$($p.ExitCode)`n$res"
+          Write-Host "cpu: $((Get-CimInstance Win32_Processor).Name) x $([Environment]::ProcessorCount)"
+          if ($p.ExitCode -ne 0) { throw "render failed" }
+          ffmpeg -v error -y -ss 8 -i (Join-Path $dir "studio.mp4") -frames:v 1 (Join-Path $env:RUNNER_TEMP "studio/speed-8s.png")
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: selftest-recordings
           path: ${{ runner.temp }}/*.mp4
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: studio-selftest
+          path: ${{ runner.temp }}/studio
