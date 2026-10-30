@@ -59,8 +59,9 @@ final class ControlServer {
             switch s {
             case .ready:
                 if let port = l.port?.rawValue { Task { @MainActor in ControlServer.shared.writeInfo(port: Int(port)) } }
-            case .failed, .cancelled:
-                // 控制口断了：一秒后重开（换个新端口，control.json 跟着更新）
+            case .failed:
+                // 控制口断了：关掉，一秒后重开（换个新端口，control.json 跟着更新）
+                l.cancel()
                 Task { @MainActor in
                     ControlServer.shared.listener = nil
                     try? await Task.sleep(for: .seconds(1))

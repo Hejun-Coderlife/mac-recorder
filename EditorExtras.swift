@@ -171,8 +171,8 @@ struct MusicBlock: View {
             .onChanged { v in
                 ed.selected = clip.id
                 ed.dragBegin()
-                let dt = v.translation.width / w * d
-                ed.dragUpdate { p in Self.move(&p, id: clip.id, dt: dt, duration: d) }
+                let dt = ed.srcDelta(v.translation.width / w * d, anchor: ed.timeMap.src(clip.start))   // 跨过删掉的段也跟手
+                ed.dragUpdate { p in Self.move(&p, id: clip.id, dt: dt, duration: ed.duration) }
             }
             .onEnded { _ in ed.dragEnd() })
         .help(L("背景音乐：拖动挪位置，拖两头剪掉不要的开头结尾", "Music: drag to move, drag the ends to trim"))
@@ -208,7 +208,7 @@ struct MusicBlock: View {
                 .onChanged { v in
                     ed.selected = clip.id
                     ed.dragBegin()
-                    let dt = v.translation.width / w * d
+                    let dt = ed.srcDelta(v.translation.width / w * d, anchor: ed.timeMap.src(isStart ? clip.start : clip.start + clip.length))
                     ed.dragUpdate { p in Self.trim(&p, id: clip.id, isStart: isStart, dt: dt, minLen: minLen) }
                 }
                 .onEnded { _ in ed.dragEnd() })

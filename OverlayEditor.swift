@@ -125,15 +125,19 @@ extension StudioEditor {
         selected = nil
     }
     // 文字标注直接在预览上改：打字时实时进工程（整次改字算一步撤销），回车 / 点别处收好，Esc 退回原来的字；改完是空的就删掉
-    // 改字时不占用拖动的快照（中途拖滑块、换颜色都不会把打的字冲掉）：打字直接写进工程，结束时整次改字记一步撤销
+    // 改字时不占用拖动的快照（中途拖滑块、换颜色都不会把打的字冲掉）：打字直接写进工程，第一下打字前记一步撤销
     func beginNote(_ id: UUID) {
-        if editingNote != nil && editingNote != id { endNote() }
-        textBase = project; noteOrig = project.annotations.first { $0.id == id }?.text
+        if editingNote == id { return }   // 已经在改这条：别重记
+        if editingNote != nil { endNote() }
+        noteOrig = project.annotations.first { $0.id == id }?.text
         editingNote = id
     }
     func typeNote(_ id: UUID, _ text: String) {
         guard let i = annotationIndex(id) else { return }
-        project.annotations[i].text = text.replacingOccurrences(of: "\n", with: " ")
+        let t = text.replacingOccurrences(of: "\n", with: " ")
+        guard project.annotations[i].text != t else { return }
+        willType(id)
+        project.annotations[i].text = t
     }
     func endNote(cancel: Bool = false) {
         guard let id = editingNote else { return }
@@ -142,8 +146,9 @@ extension StudioEditor {
         if let i = annotationIndex(id), project.annotations[i].text.trimmingCharacters(in: .whitespaces).isEmpty {
             project.annotations.remove(at: i)
             if selected == id { selected = nil }
+            dropNoopUndo()
         }
-        commitTextEdit()
+        endTyping(id)
         noteOrig = nil
     }
     func setNoteText(_ id: UUID, _ text: String) {

@@ -129,12 +129,16 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     private var previewKey = "off"             // 预览现在用的是哪一版声音
     private var undoStack: [StudioProject] = [], redoStack: [StudioProject] = []
     // 打字改文字 / 字幕：开始那一刻的工程，结束时和现在不一样就记一步撤销
-    var textBase: StudioProject?
+    // 改字的撤销：第一下打字时把「打字前」记成一步（之后中途拖滑块等各记各的，撤销顺序就是时间顺序）；同一处接着打不再记
+    var textEditKey: UUID?
     var noteOrig: String?
-    func commitTextEdit() {
-        if let b = textBase, b != project { undoStack.append(b); redoStack.removeAll() }
-        textBase = nil
+    func willType(_ id: UUID) {
+        guard textEditKey != id else { return }
+        undoStack.append(project); redoStack.removeAll(); textEditKey = id
     }
+    func endTyping(_ id: UUID) { if textEditKey == id { textEditKey = nil } }
+    // 空文字标注被删掉时：刚才「加标注」那步撤销记录和现在一样，去掉，免得 ⌘Z 一下没反应
+    func dropNoopUndo() { if undoStack.last == project { undoStack.removeLast() } }
     private(set) var dragBase: StudioProject?
     private var scrubber = Scrubber()          // 拖动时的 seek 排队：同时只有一个在路上，只留最新目标；拖动中不让播放器回调改播放头
 
@@ -2299,7 +2303,7 @@ struct VoiceBlock: View {
                 .onChanged { v in
                     ed.selected = clip.id
                     ed.dragBegin()
-                    let dt = ed.srcDelta(v.translation.width / w * d, anchor: clip.start)
+                    let dt = ed.srcDelta(v.translation.width / w * d, anchor: isStart ? clip.start : clip.srcEnd(ed.timeMap))
                     ed.dragUpdate { p in
                         guard let i = p.voiceovers.firstIndex(where: { $0.id == clip.id }) else { return }
                         p.voiceovers[i] = VoiceDrag.trim(p.voiceovers[i], isStart: isStart, dt: dt, map: TimeMap(p), minLen: minLen)
@@ -3402,7 +3406,17 @@ enum StudioTests {
                 let a = ed.project.annotations.first { $0.id == nid }
                 check("text kept after slider", a?.text == "Hi there" && a?.fontSize == 50, "\(a?.text ?? "nil") \(a?.fontSize ?? 0)")
                 ed.undo()
-                check("one undo reverts typing", ed.project.annotations.first { $0.id == nid }?.text != "Hi there")
+                let u1 = ed.project.annotations.first { $0.id == nid }
+                check("undo 1 = before slider (Hi, old size)", u1?.text == "Hi" && u1?.fontSize != 50, "\(u1?.text ?? "nil") \(u1?.fontSize ?? 0)")
+                ed.undo()
+                check("undo 2 = before typing", (ed.project.annotations.first { $0.id == nid }?.text ?? "") == "")
+                // 加了文字标注不打字就点走：删掉，⌘Z 不出现空的幽灵标注
+                ed.addAnnotation(.text, OverlayGeo(x: 0.5, y: 0.5, w: 0, h: 0))
+                let eid = ed.editingNote
+                ed.endNote()
+                check("empty note removed", !ed.project.annotations.contains { $0.id == eid })
+                ed.undo()
+                check("undo doesn't bring back empty note", !ed.project.annotations.contains { $0.id == eid })
                 // 选了片段再点空白：取消
                 ed.selectedPiece = ed.pieces.first?.start; ed.selected = UUID(); ed.selected = nil
                 check("blank click clears piece", ed.selectedPiece == nil)
@@ -3645,12 +3659,12 @@ struct CaptionField: View {
             .onChange(of: cap.text) { _, v in if !focused { text = v } }   // 另一处改了：跟上
             .onChange(of: text) { _, v in
                 guard v != cap.text, let i = ed.captionIndex(cap.id) else { return }
-                if ed.textBase == nil { ed.textBase = ed.project }
+                ed.willType(cap.id)
                 ed.project.captions[i].text = v.replacingOccurrences(of: "\n", with: " ")
             }
-            .onDisappear { ed.commitTextEdit() }   // 输入框被收起（点了别处）也要记撤销
+            .onDisappear { ed.endTyping(cap.id) }
             .onSubmit { focused = false }
-            .onChange(of: focused) { _, f in if !f { ed.commitTextEdit(); if inBlock { ed.editingCaption = nil }; if previewFont != nil { ed.editingCaptionOnPreview = nil } } }
+            .onChange(of: focused) { _, f in if !f { ed.endTyping(cap.id); if inBlock { ed.editingCaption = nil }; if previewFont != nil { ed.editingCaptionOnPreview = nil } } }
             .onExitCommand { focused = false }
     }
 }
