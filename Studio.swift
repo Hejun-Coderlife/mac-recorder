@@ -218,7 +218,7 @@ struct StudioLook: Codable, Equatable {
     var clickStyle = Click.soft    // 哪种声音：轻点 / 鼠标咔哒 / 低沉 / 木头 / 气泡 / 清脆滴答
     var typeSound = false          // 打字时每按一下加一声键盘声
     var typeStyle = Typing.mechanical
-    enum Typing: String, Codable, CaseIterable { case mechanical, clicky, thock, laptop, typewriter }
+    enum Typing: String, Codable, CaseIterable { case mechanical, laptop, clicky, thock }   // 都是真键盘录音（清脆 / 低沉由机械键盘升降调）
     var ripple = true              // 点击波纹
     var blur = Blur.light          // 运动模糊：只在镜头快速移动时有
     enum KeysAt: String, Codable, CaseIterable { case bottom, bottomLeft, bottomRight }
@@ -1387,50 +1387,40 @@ final class ClickSound: @unchecked Sendable {
 
     init(times: [Double], style: StudioLook.Click = .soft, volume: Double = 1, keyTimes: [Double] = [], keyStyle: StudioLook.Typing = .mechanical) {
         let v = Float(max(0, volume))
-        waves = [Self.wave(style).map { $0 * v }] + (0..<4).map { k in Self.keyWave(keyStyle, k).map { $0 * v } }
-        starts = (times.map { (Int64(($0 * 48000).rounded()), 0) } + keyTimes.enumerated().map { (Int64(($0.element * 48000).rounded()), 1 + ($0.offset * 3 + $0.offset / 2) % 4) })
+        let keys = Self.keyWaves(keyStyle).map { w in w.map { $0 * v } }, nk = keys.count
+        waves = [Self.wave(style).map { $0 * v }] + keys
+        starts = (times.map { (Int64(($0 * 48000).rounded()), 0) } + (nk > 0 ? keyTimes : []).enumerated().map { (Int64(($0.element * 48000).rounded()), 1 + ($0.offset * 3 + $0.offset / 2) % max(nk, 1)) })
             .sorted { $0.0 < $1.0 }
     }
 
-    // 打字声（几种键盘）：k 换一点音高和长短，连打时轮着用，听着不机械
-    static func keyWave(_ style: StudioLook.Typing, _ k: Int) -> [Float] {
-        var g = SystemRandomNumberGenerator()
-        let pitch = [1.0, 0.92, 1.08, 0.97][k % 4]
-        var lp = 0.0, lp2 = 0.0
-        func noise(_ a: Double) -> Double { let x = Double.random(in: -1...1, using: &g); lp += a * (x - lp); return lp }
-        func dec(_ t: Double, _ tau: Double) -> Double { t < 0 ? 0 : exp(-t / tau) }
-        let n: Int, f: (Double) -> Double
-        switch style {
-        case .mechanical:   // 机械键盘（茶轴）：短促的「嗒」+ 一点键帽回弹
-            n = 2400
-            f = { t in dec(t, 0.0022) * noise(0.35) * 0.55 + dec(t, 0.009) * sin(2 * .pi * 420 * pitch * t) * 0.16 + dec(t - 0.012, 0.003) * lp * 0.12 }
-        case .clicky:       // 青轴：清脆的「咔哒」，按下和回弹两声都亮
-            n = 2880
-            f = { t in dec(t, 0.0012) * noise(0.8) * 0.6 + dec(t, 0.004) * sin(2 * .pi * 3400 * pitch * t) * 0.14
-                     + dec(t - 0.028, 0.0015) * lp * 0.4 + dec(t - 0.028, 0.004) * sin(2 * .pi * 3000 * pitch * t) * 0.08 }
-        case .thock:        // 客制化「thock」：低沉厚实
-            n = 3360
-            f = { t in lp2 += 0.08 * (Double.random(in: -1...1, using: &g) - lp2)
-                return dec(t, 0.004) * lp2 * 1.1 + dec(t, 0.016) * sin(2 * .pi * 190 * pitch * t) * 0.32 + dec(t, 0.008) * sin(2 * .pi * 520 * pitch * t) * 0.1 }
-        case .laptop:       // 笔记本键盘：轻、薄、闷
-            n = 1680
-            f = { t in dec(t, 0.0018) * noise(0.22) * 0.42 + dec(t, 0.005) * sin(2 * .pi * 900 * pitch * t) * 0.07 }
-        case .typewriter:   // 打字机：金属字锤敲下去的「啪」+ 一点余震
-            n = 5280
-            f = { t in dec(t, 0.0016) * noise(0.9) * 0.7 + dec(t, 0.03) * (sin(2 * .pi * 1850 * pitch * t) * 0.07 + sin(2 * .pi * 2730 * pitch * t) * 0.04)
-                     + dec(t - 0.006, 0.006) * sin(2 * .pi * 150 * t) * 0.18 }
+    // 打字声：真键盘录音（App 里 Resources/keys/*.wav，48k 单声道），每种有好几下，连打时轮着用，听着不机械
+    nonisolated(unsafe) private static var keyCache: [StudioLook.Typing: [[Float]]] = [:]
+    private static let keyLock = NSLock()
+    static func keyWaves(_ style: StudioLook.Typing) -> [[Float]] {
+        keyLock.lock(); defer { keyLock.unlock() }
+        if let w = keyCache[style] { return w }
+        let prefix: String, n: Int
+        switch style { case .mechanical: prefix = "old"; n = 6; case .laptop: prefix = "mac"; n = 7; case .clicky: prefix = "hi"; n = 6; case .thock: prefix = "lo"; n = 6 }
+        let waves: [[Float]] = (1...n).compactMap { k in
+            guard let url = Bundle.main.url(forResource: String(format: "%@%02d", prefix, k), withExtension: "wav", subdirectory: "keys"),
+                  let f = try? AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false),
+                  let buf = AVAudioPCMBuffer(pcmFormat: f.processingFormat, frameCapacity: AVAudioFrameCount(f.length)),
+                  (try? f.read(into: buf)) != nil, let ch = buf.floatChannelData?[0] else { return nil }
+            return (0..<Int(buf.frameLength)).map { ch[$0] * 0.4 }   // 录音本身很响：压到和点击声差不多
         }
-        return (0..<n).map { Float(f(Double($0) / 48000) * 0.75) }
+        keyCache[style] = waves
+        return waves
     }
+
     static func typingName(_ s: StudioLook.Typing) -> String {
         switch s {
-        case .mechanical: L("机械键盘", "Mechanical"); case .clicky: L("青轴（清脆）", "Clicky"); case .thock: L("低沉 thock", "Thocky")
-        case .laptop: L("笔记本键盘", "Laptop"); case .typewriter: L("打字机", "Typewriter")
+        case .mechanical: L("机械键盘", "Mechanical"); case .laptop: L("苹果键盘", "Apple keyboard")
+        case .clicky: L("清脆机械", "Crisp mechanical"); case .thock: L("低沉 thock", "Deep thock")
         }
     }
 
     // 试听 / 预览用：一声按键包成 WAV
-    static func keyWav(_ s: StudioLook.Typing, _ k: Int) -> Data { wavData(keyWave(s, k)) }
+    static func keyWav(_ s: StudioLook.Typing, _ k: Int) -> Data { let w = keyWaves(s); return wavData(w.isEmpty ? [0] : w[k % w.count]) }
 
     // 超过 ±0.8 的部分柔和地压到 ±0.95 以内（音量调大、和点击声叠加时不爆音；留点余量，AAC 编码后也不会超过 1）
     @inline(__always) static func softLimit(_ x: Float) -> Float {
