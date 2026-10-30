@@ -260,7 +260,11 @@ struct OverlayCanvas: View {
     var body: some View {
         GeometryReader { g in
             let m = ed.overlayMapping()
-            let fit = OverlayMapping.fit(CGSize(width: m.lay.cw, height: m.lay.ch), in: g.size)
+            let fit0 = OverlayMapping.fit(CGSize(width: m.lay.cw, height: m.lay.ch), in: g.size)
+            // 预览放大了：编辑框跟着画面一起放大、挪动
+            let z = ed.previewZoom, pn = ed.previewPan
+            let fit = CGRect(x: g.size.width / 2 + (fit0.minX - g.size.width / 2) * z + pn.width, y: g.size.height / 2 + (fit0.minY - g.size.height / 2) * z + pn.height,
+                             width: fit0.width * z, height: fit0.height * z)
             ZStack(alignment: .topLeading) {
                 Color.clear
                 if let tool = ed.drawing { drawLayer(tool, m: m, fit: fit, size: g.size) }

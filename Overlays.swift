@@ -163,6 +163,15 @@ final class OverlayLayer: @unchecked Sendable {
       return p + n * depth * t * t;
     }
     """)
+    // 点击的玻璃波纹：外圈往外鼓、里圈往里收（两层系统自带的透镜变形），合起来像一圈水波从点击处扩开；只动波经过的那一圈
+    static func rippleWarp(_ img: CIImage, center c: CGPoint, radius r: Double, width w: Double, amplitude a: Double) -> CIImage {
+        guard a > 0.01, r > 1 else { return img }
+        let v = CIVector(x: c.x, y: c.y)
+        let ext = CGRect(x: c.x - r - w, y: c.y - r - w, width: (r + w) * 2, height: (r + w) * 2)
+        let outer = img.applyingFilter("CIBumpDistortion", parameters: [kCIInputCenterKey: v, kCIInputRadiusKey: r + w, kCIInputScaleKey: 0.55 * a])
+        let both = outer.applyingFilter("CIBumpDistortion", parameters: [kCIInputCenterKey: v, kCIInputRadiusKey: max(1, r - w), kCIInputScaleKey: -0.45 * a])
+        return both.cropped(to: ext).composited(over: img)
+    }
     static func lens(_ img: CIImage, rect R: CGRect, radius rad: Double, strength: Double, dark: Bool, alpha: Double) -> CIImage {
         let s = min(R.width, R.height)
         guard s > 2 else { return img }

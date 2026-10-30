@@ -58,7 +58,13 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     private var saveWork: DispatchWorkItem?
     private var refreshPending = false
 
-    @Published var project: StudioProject { didSet { if project != oldValue { replan(); scheduleSave() } } }
+    @Published var project: StudioProject { didSet { if project != oldValue { replan(only: Self.overlayOnly(oldValue, project)); scheduleSave() } } }
+    // 只改了遮挡 / 标注（拖它们的时候）：镜头计划、声音都不用重算，只换叠加层、重画这一帧——拖起来不卡
+    static func overlayOnly(_ a: StudioProject, _ b: StudioProject) -> Bool {
+        var x = a, y = b
+        x.annotations = []; y.annotations = []; x.redactions = []; y.redactions = []
+        return x == y
+    }
     @Published var selectedPiece: Double?                // 剪辑轨上选中的那段（起点）
     @Published var selected: UUID? { didSet { if selected != nil { selectedPiece = nil }; if let n = editingNote, selected != n { endNote() } } }   // 选了别的：正在改的字先收好
     @Published var time = 0.0
@@ -423,30 +429,50 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         return c
     }
 
-    private func replan() {
+    private func replan(only overlay: Bool = false) {
+        if overlay {
+            box.setOverlay(OverlayLayer(project))
+            if !playing { redrawPaused() }
+            return
+        }
         player.currentItem?.forwardPlaybackEndTime = CMTime(seconds: project.trimEnd, preferredTimescale: 600)
-        // 拖的时候别每次都重建：每秒最多刷新 20 次。样式变了要换渲染器（画布、背景都可能变）
+        // 拖的时候别每次都重建：每秒最多刷新 30 次。样式变了要换渲染器（画布、背景都可能变）
         guard !refreshPending else { return }
         refreshPending = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 20) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 30) { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.refreshPending = false
+                let p = self.project
                 var r = self.box.renderer
-                if r.look != self.project.look { r = StudioRenderer(project: self.dir, track: self.track, style: self.style, look: self.project.look) }
-                self.box.set(r.plan(self.project, duration: self.duration), renderer: r)
-                self.box.setCaptions(self.captionLayer(r))
-                self.box.setCamera(self.cameraLayer(r))
-                self.box.setOverlay(OverlayLayer(self.project))
+                let newLook = r.look != p.look
+                if newLook { r = StudioRenderer(project: self.dir, track: self.track, style: self.style, look: p.look) }
+                self.box.set(r.plan(p, duration: self.duration), renderer: r)
+                // 字幕层、摄像头层：用到的东西没变就不重建（拖推近段时它们都不变）
+                let capKey = CapKey(captions: p.captions, style: p.captionStyle, look: p.look, trim: [p.trimStart, p.trimEnd], cuts: p.cuts)
+                if newLook || capKey != self.capKey { self.capKey = capKey; self.box.setCaptions(self.captionLayer(r)) }
+                let camKey = CamKey(camera: p.camera, layouts: p.layouts, look: p.look)
+                if newLook || camKey != self.camKey { self.camKey = camKey; self.box.setCamera(self.cameraLayer(r)) }
+                self.box.setOverlay(OverlayLayer(p))
+                if self.dragBase != nil && !self.playing {
+                    // 拖动中：只重画预览（用缓存的那一帧直接合成，不让播放器重新解码）；声音、边界松手后再弄
+                    self.needsAudioRefresh = true
+                    Task { await self.renderDragFrame() }
+                    return
+                }
                 self.player.currentItem?.videoComposition = self.makeComposition()
                 self.refreshDenoise()
                 self.updateGains()
                 self.resetBoundaries()
+                self.needsAudioRefresh = false
                 if !self.playing { self.seek(self.time) }
                 if self.still != nil { Task { await self.renderStill(at: self.time) } }
+                if self.dragFrame != nil { DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { MainActor.assumeIsolated { if self.dragBase == nil { self.dragFrame = nil } } } }
             }
         }
     }
+    struct CapKey: Equatable { let captions: [Caption]; let style: CaptionStyle; let look: StudioLook; let trim: [Double]; let cuts: [CutSegment] }
+    struct CamKey: Equatable { let camera: CameraSettings?; let layouts: [CameraLayoutSeg]; let look: StudioLook }
 
     // 画一帧成片（给 AI 看）：和截图自测同一套合成，缩到 maxWidth 宽，返回 PNG
     func stillPNG(at t: Double, maxWidth: Double) async -> Data? {
@@ -463,6 +489,75 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
             .transformed(by: CGAffineTransform(scaleX: k, y: k))
         guard let out = CIContext().createCGImage(img, from: img.extent.integral) else { return nil }
         return NSBitmapImageRep(cgImage: out).representation(using: .png, properties: [:])
+    }
+
+    // 暂停时让播放器重画当前这一帧（叠加层换了）：每秒最多 60 次，跟手
+    private var redrawPending = false
+    private func redrawPaused() {
+        guard !redrawPending else { return }
+        redrawPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.redrawPending = false
+                if self.still != nil { Task { await self.renderStill(at: self.time) } }
+                else if self.dragBase != nil { Task { await self.renderDragFrame() } }   // 拖动中：用缓存的这一帧直接合成，不让播放器重新解码
+                else {
+                    self.player.currentItem?.videoComposition = self.makeComposition(); self.seek(self.time)
+                    // 播放器画好新的这一帧再把盖着的图拿掉，免得闪一下旧画面
+                    if self.dragFrame != nil { DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { MainActor.assumeIsolated { if self.dragBase == nil { self.dragFrame = nil } } } }
+                }
+            }
+        }
+    }
+
+    // 拖动遮挡 / 标注时盖在播放器上的画面（缩到预览大小，快）；松手后换回播放器
+    @Published var dragFrame: NSImage?
+    private var capKey: CapKey?, camKey: CamKey?, needsAudioRefresh = false
+    // 预览放大（像剪映）：1 = 适应窗口；pan = 放大后挪了多少（预览上的点，右 / 下为正）
+    @Published var previewZoom = 1.0
+    @Published var previewPan = CGSize.zero
+    var previewSize = CGSize(width: 1, height: 1)
+    func setPreviewZoom(_ z: Double, anchor: CGPoint? = nil) {
+        let nz = min(max(z, 1), 6), oz = previewZoom
+        // 以鼠标处为中心放大：那一点在放大前后不动
+        if let a = anchor {
+            let c = CGPoint(x: previewSize.width / 2, y: previewSize.height / 2)
+            let px = a.x - c.x - previewPan.width, py = a.y - c.y - previewPan.height
+            previewPan.width -= px * (nz / oz - 1); previewPan.height -= py * (nz / oz - 1)
+        }
+        previewZoom = nz
+        clampPan()
+    }
+    func panPreview(_ d: CGSize) { previewPan.width += d.width; previewPan.height += d.height; clampPan() }
+    private func clampPan() {
+        let mx = previewSize.width * (previewZoom - 1) / 2, my = previewSize.height * (previewZoom - 1) / 2
+        previewPan = CGSize(width: min(max(previewPan.width, -mx), mx), height: min(max(previewPan.height, -my), my))
+    }
+    private var cachedSource: (t: Double, img: CIImage)?
+    private func renderDragFrame() async {
+        let t = time
+        if cachedSource?.t != t {
+            let g = AVAssetImageGenerator(asset: asset)
+            g.requestedTimeToleranceBefore = .zero; g.requestedTimeToleranceAfter = .zero
+            guard let (cg, _) = try? await g.image(at: CMTime(seconds: t, preferredTimescale: 600)) else { return }
+            cachedSource = (t, CIImage(cgImage: cg))
+        }
+        guard let src = cachedSource?.img, dragBase != nil else { return }
+        let (r, plan) = box.both, i = min(max(Int((t * fps).rounded()), 0), plan.count - 1)
+        let lay = r.lay
+        var fr = r.frame(i, plan: plan, source: src, overlay: box.overlay, srcTime: t)
+        if let cam = box.camera { fr = cam.compose(fr, srcTime: t) }
+        if let c = box.captions?.image(atSource: t) { fr = c.composited(over: fr) }
+        let k = min(1, 1600 / lay.cw)
+        let img = fr.cropped(to: lay.canvas).transformed(by: CGAffineTransform(scaleX: k, y: k))
+        guard let out = dragCtx.createCGImage(img, from: img.extent.integral) else { return }
+        dragFrame = NSImage(cgImage: out, size: CGSize(width: lay.cw, height: lay.ch))
+    }
+    private let dragCtx = CIContext(options: [.cacheIntermediates: false])
+    func dragFinished() {
+        if needsAudioRefresh { replan() }               // 拖完把声音、边界、播放器都更新一遍
+        else if dragFrame != nil { redrawPaused() }
     }
 
     // 截图自测：同一个合成函数画一张静态画面
@@ -702,6 +797,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         if let base = dragBase, base != project { undoStack.append(base); redoStack.removeAll() }
         dragBase = nil
         scrubEnd()
+        dragFinished()
     }
     // 按自动规则重新排推近段（能撤销）；排完算「没手动改过」
     func regenerate() {
@@ -1044,6 +1140,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
 // ---- 界面 ----
 struct EditorView: View {
     @ObservedObject var ed: StudioEditor
+    @AppStorage("editorTimelineH") private var timelineH = 300.0
     @State var showCaptionMenu = false
     @State var captionSource = CaptionMaker.Source.recorded
 
@@ -1053,8 +1150,9 @@ struct EditorView: View {
             Divider()
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
-                    preview.padding(14)
-                    Divider()
+                    preview.clipShape(RoundedRectangle(cornerRadius: 8)).padding(14)
+                    // 预览和时间轴之间：上下拖动改两边的高度（记住）
+                    SplitHandle(height: $timelineH)
                     controlBar.padding(.horizontal, 14).padding(.vertical, 8)
                     Divider()
                     VStack(alignment: .leading, spacing: 10) {
@@ -1076,8 +1174,8 @@ struct EditorView: View {
                                 timeline.frame(height: total)
                             }
                         }
-                        .scrollIndicators(total > 340 ? .visible : .hidden)
-                        .frame(height: min(total, 340))
+                        .scrollIndicators(total > timelineH ? .visible : .hidden)
+                        .frame(height: timelineH)
                             .help(L("从上到下：剪掉 / 快放、推近、讲解、字幕、遮挡、标注、音乐；点选来调整，空白处双击新加推近（字幕那条双击新加字幕），两端黄条修剪",
                                    "Top to bottom: cut / speed-up, zooms, voiceovers, captions, redactions, annotations, music. Click to edit, double-click empty space to add a zoom (a caption on the caption lane), drag the yellow bars to trim"))
                     }
@@ -1198,13 +1296,15 @@ struct EditorView: View {
         ZStack {
             RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .underPageBackgroundColor))
             if let img = ed.still {
-                Image(nsImage: img).resizable().aspectRatio(contentMode: .fit)
+                Image(nsImage: img).resizable().aspectRatio(contentMode: .fit).scaleEffect(ed.previewZoom).offset(ed.previewPan)
             } else {
                 PlayerPane(player: ed.player, picking: ed.picking, camRect: ed.cameraPipRect, onPick: { ed.pick($0) }, onTap: { ed.tapPreview($0) },
-                           onCamMove: { d, ph in ed.moveCamera(by: d, phase: ph) })
+                           onCamMove: { d, ph in ed.moveCamera(by: d, phase: ph) }, zoom: ed.previewZoom, pan: ed.previewPan)
+            if let f = ed.dragFrame { Image(nsImage: f).resizable().aspectRatio(contentMode: .fit).scaleEffect(ed.previewZoom).offset(ed.previewPan).allowsHitTesting(false) }
             }
             // 遮挡、标注：选中的那个出编辑框，「遮挡 / 标注」按下后在画面上拖出来
             OverlayCanvas(ed: ed)
+            PreviewZoomBar(ed: ed)
             if let t = ed.toast {
                 VStack {
                     Spacer()
@@ -1445,8 +1545,10 @@ struct PlayerPane: NSViewRepresentable {
     let onPick: (CGPoint) -> Void
     var onTap: ((CGPoint?) -> Void)? = nil
     var onCamMove: ((CGSize, Int) -> Void)? = nil   // 拖了多远（画面比例）；0 开始 / 1 拖动中 / 2 松手
+    var zoom = 1.0, pan = CGSize.zero
     func makeNSView(context: Context) -> PlayerNSView { let v = PlayerNSView(); v.layerP.player = player; v.onPick = onPick; v.onTap = onTap; return v }
-    func updateNSView(_ v: PlayerNSView, context: Context) { v.picking = picking; v.onPick = onPick; v.onTap = onTap; v.camRect = camRect; v.onCamMove = onCamMove }
+    func updateNSView(_ v: PlayerNSView, context: Context) { v.picking = picking; v.onPick = onPick; v.onTap = onTap; v.camRect = camRect; v.onCamMove = onCamMove
+        if v.zoom != zoom || v.pan != pan { v.zoom = zoom; v.pan = pan; v.needsLayout = true } }
 }
 final class PlayerNSView: NSView {
     let layerP = AVPlayerLayer()
@@ -1464,10 +1566,19 @@ final class PlayerNSView: NSView {
         layer?.addSublayer(layerP)
     }
     required init?(coder: NSCoder) { fatalError() }
-    override func layout() { super.layout(); CATransaction.begin(); CATransaction.setDisableActions(true); layerP.frame = bounds; CATransaction.commit() }
+    var zoom = 1.0, pan = CGSize.zero
+    // 画面在本视图里的位置（放大后画面层比视图大，要换算过来）
+    private var videoRectInView: CGRect { layer.map { $0.convert(layerP.videoRect, from: layerP) } ?? layerP.videoRect }
+    override func layout() {
+        super.layout(); CATransaction.begin(); CATransaction.setDisableActions(true)
+        // 预览放大：画面层按中心放大、再挪 pan（SwiftUI 的 y 朝下，这里 y 朝上）
+        let w = bounds.width * zoom, h = bounds.height * zoom
+        layerP.frame = CGRect(x: bounds.midX - w / 2 + pan.width, y: bounds.midY - h / 2 - pan.height, width: w, height: h)
+        CATransaction.commit()
+    }
     // 画面比例（左上原点）的矩形 → 本视图坐标
     private func viewRect(_ n: CGRect) -> CGRect? {
-        let r = layerP.videoRect
+        let r = videoRectInView
         guard r.width > 0 else { return nil }
         return CGRect(x: r.minX + n.minX * r.width, y: r.minY + (1 - n.maxY) * r.height, width: n.width * r.width, height: n.height * r.height)
     }
@@ -1476,7 +1587,7 @@ final class PlayerNSView: NSView {
         else if let c = camRect, let v = viewRect(c) { addCursorRect(v, cursor: .openHand) }
     }
     override func mouseDown(with e: NSEvent) {
-        let p = convert(e.locationInWindow, from: nil), r = layerP.videoRect
+        let p = convert(e.locationInWindow, from: nil), r = videoRectInView
         if !picking, let c = camRect, let v = viewRect(c), v.contains(p) {
             camDragFrom = p; onCamMove?(.zero, 0); NSCursor.closedHand.push(); return
         }
@@ -1489,7 +1600,7 @@ final class PlayerNSView: NSView {
     }
     override func mouseDragged(with e: NSEvent) {
         guard let s = camDragFrom else { return }
-        let p = convert(e.locationInWindow, from: nil), r = layerP.videoRect
+        let p = convert(e.locationInWindow, from: nil), r = videoRectInView
         guard r.width > 0 else { return }
         onCamMove?(CGSize(width: (p.x - s.x) / r.width, height: -(p.y - s.y) / r.height), 1)
     }
@@ -2542,8 +2653,8 @@ struct StylePanel: View {
             Toggle(L("点击波纹", "Click ripple"), isOn: ed.look(\.ripple))
                 .help(L("每次点击时在鼠标处冒一下，让观众看清点了哪里", "A little effect at each click so viewers see where you clicked"))
             if look.ripple {
-                chips(ed.look(\.rippleStyle), [(.ring, L("圆圈", "Ring")), (.double, L("双圈", "Double")), (.pulse, L("圆点", "Dot")),
-                                               (.glow, L("光晕", "Glow")), (.glass, L("玻璃", "Glass")), (.focus, L("对焦", "Focus"))], columns: 3)
+                chips(ed.look(\.rippleStyle), [(.glass, L("玻璃", "Glass")), (.ring, L("圆圈", "Ring")), (.double, L("双圈", "Double")),
+                                               (.pulse, L("圆点", "Dot")), (.glow, L("光晕", "Glow")), (.focus, L("对焦", "Focus"))], columns: 3)
             }
             Toggle(L("点击音效", "Click sound"), isOn: ed.look(\.clickSound))
                 .help(L("每次点击处加一声轻响，预览和导出都有；音量在「声音」里调", "Adds a soft click at each click, in the preview and the export; set its volume under Sound"))
@@ -3417,4 +3528,89 @@ struct AnyTextFieldStyle: TextFieldStyle {
     private let make: (TextField<_Label>) -> AnyView
     init<S: TextFieldStyle>(_ s: S) { make = { AnyView($0.textFieldStyle(s)) } }
     func _body(configuration: TextField<_Label>) -> some View { make(configuration) }
+}
+
+// 预览右下角：放大倍数、−、+、适应；预览上双指捏合 / ⌘+滚轮放大，放大后双指滑动（或滚轮）平移
+struct PreviewZoomBar: View {
+    @ObservedObject var ed: StudioEditor
+    var body: some View {
+        GeometryReader { g in
+            ZStack(alignment: .bottomTrailing) {
+                PreviewGestures(ed: ed).allowsHitTesting(false)
+                HStack(spacing: 6) {
+                    Button { ed.setPreviewZoom(ed.previewZoom / 1.25) } label: { Image(systemName: "minus") }.disabled(ed.previewZoom <= 1)
+                    Text("\(Int((ed.previewZoom * 100).rounded()))%").font(.caption.monospacedDigit()).frame(width: 40)
+                    Button { ed.setPreviewZoom(ed.previewZoom * 1.25) } label: { Image(systemName: "plus") }
+                    if ed.previewZoom > 1.001 {
+                        Button(L("适应", "Fit")) { withAnimation(.easeOut(duration: 0.2)) { ed.previewZoom = 1; ed.previewPan = .zero } }
+                    }
+                }
+                .buttonStyle(.borderless).controlSize(.small)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(.ultraThinMaterial, in: Capsule())
+                .padding(10)
+                .opacity(ed.previewZoom > 1.001 || hover ? 1 : 0.55)
+                .onHover { hover = $0 }
+                .help(L("预览放大：双指捏合或按住 ⌘ 滚动；放大后双指滑动平移（只放大预览，不影响成片）", "Zoom the preview: pinch or ⌘-scroll; when zoomed, two-finger scroll to pan (preview only)"))
+            }
+            .onAppear { ed.previewSize = g.size }
+            .onChange(of: g.size) { _, v in ed.previewSize = v }
+        }
+    }
+    @State private var hover = false
+}
+
+struct PreviewGestures: NSViewRepresentable {
+    let ed: StudioEditor
+    final class Catcher: NSView {
+        weak var ed: StudioEditor?
+        private var monitor: Any?
+        override func hitTest(_ p: NSPoint) -> NSView? { nil }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify, .scrollWheel]) { [weak self] e in
+                guard let self, let ed = self.ed, e.window === self.window else { return e }
+                let p = self.convert(e.locationInWindow, from: nil)
+                guard self.bounds.contains(p) else { return e }
+                let a = CGPoint(x: p.x, y: self.bounds.height - p.y)   // SwiftUI 坐标（y 朝下）
+                return MainActor.assumeIsolated {
+                    if e.type == .magnify { ed.setPreviewZoom(ed.previewZoom * (1 + e.magnification), anchor: a); return nil }
+                    if e.modifierFlags.contains(.command) {
+                        ed.setPreviewZoom(ed.previewZoom * TimelineMath.wheelFactor(e.scrollingDeltaY, precise: e.hasPreciseScrollingDeltas), anchor: a); return nil
+                    }
+                    guard ed.previewZoom > 1.001 else { return e }
+                    let k = e.hasPreciseScrollingDeltas ? 1.0 : 12.0
+                    ed.panPreview(CGSize(width: e.scrollingDeltaX * k, height: e.scrollingDeltaY * k)); return nil
+                }
+            }
+        }
+        deinit { if let m = monitor { NSEvent.removeMonitor(m) } }
+    }
+    func makeNSView(context: Context) -> Catcher { let v = Catcher(); v.ed = ed; return v }
+    func updateNSView(_ v: Catcher, context: Context) { v.ed = ed }
+}
+
+// 预览和时间轴中间那条：上下拖改时间轴高度（往上拖 = 时间轴变高、预览变小），双击恢复默认
+struct SplitHandle: View {
+    @Binding var height: Double
+    @State private var start: Double?
+    var body: some View {
+        ZStack {
+            Divider()
+            Capsule().fill(Color.secondary.opacity(0.5)).frame(width: 36, height: 4)
+        }
+        .frame(height: 9)
+        .contentShape(Rectangle())
+        .onHover { inside in if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() } }
+        .gesture(DragGesture(minimumDistance: 1)
+            .onChanged { v in
+                if start == nil { start = height }
+                height = min(max((start ?? height) - v.translation.height, 110), 640)
+            }
+            .onEnded { _ in start = nil })
+        .onTapGesture(count: 2) { withAnimation(.easeOut(duration: 0.2)) { height = 300 } }
+        .help(L("上下拖动：调预览和时间轴的大小；双击恢复", "Drag up or down to resize the preview and timeline; double-click to reset"))
+    }
 }

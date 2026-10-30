@@ -220,8 +220,8 @@ struct StudioLook: Codable, Equatable {
     var typeStyle = Typing.mechanical
     enum Typing: String, Codable, CaseIterable { case mechanical, laptop, clicky, thock }   // 都是真键盘录音（清脆 / 低沉由机械键盘升降调）
     var ripple = true              // 点击波纹
-    var rippleStyle = Ripple.ring  // 波纹样子
-    enum Ripple: String, Codable, CaseIterable { case ring, double, pulse, glow, glass, focus }
+    var rippleStyle = Ripple.glass // 波纹样子（默认玻璃折射波）
+    enum Ripple: String, Codable, CaseIterable { case glass, ring, double, pulse, glow, focus }
     var blur = Blur.light          // 运动模糊：只在镜头快速移动时有
     enum KeysAt: String, Codable, CaseIterable { case bottom, bottomLeft, bottomRight }
     var showKeys = false           // 画面上显示按的快捷键（⌘ ⇧ C 这种键帽）
@@ -979,7 +979,7 @@ final class StudioRenderer: @unchecked Sendable {
         let t = Double(i) / Double(st.fps), ppp = track.pixelsPerPoint
         // 点击波纹：0.5 秒内从 6 点扩到 28 点、渐渐淡掉
         if look.ripple {
-            let style = look.rippleStyle, dur = style == .focus ? 0.7 : style == .double ? 0.65 : 0.5
+            let style = look.rippleStyle, dur = style == .focus ? 0.7 : style == .double ? 0.65 : style == .glass ? 0.6 : 0.5
             for c in clicks where t >= c.t && t < c.t + dur {
                 let u = (t - c.t) / dur, e = 1 - pow(1 - u, 3)
                 // 每种：(从多大扩到多大（点）, 透明度)；double 是两圈错开 0.15 秒
@@ -996,20 +996,20 @@ final class StudioRenderer: @unchecked Sendable {
                 case .focus: layers = [(46 - 30 * e, min(1, u * 4) * (1 - u))]   // 从大往点击处收
                 }
                 if style == .glass {
-                    // 玻璃波纹：点击处一块圆形玻璃透镜鼓出来再淡掉（没有边线），透镜下的画面被放大
-                    let rad = (10 + 26 * e) * ppp * look.cursorScale / 1.5
+                    // 玻璃波纹（像苹果）：一圈折射波往外扩、慢慢变弱；没有边线，只有经过处画面被弯折，外加一点点亮，空白处也看得出
+                    let k = ppp * look.cursorScale / 1.5 * lay.s
                     let p = CGPoint(x: c.x, y: c.y).applying(lay.toScene)
-                    let s = rad * lay.s
-                    let R = CGRect(x: p.x - s, y: p.y - s, width: s * 2, height: s * 2)
-                    scene = OverlayLayer.lens(scene, rect: R, radius: s, strength: 1.2 * (1 - u), dark: false, alpha: 1 - u * u)
-                    // 底下一圈很淡的影子：白底上也看得出有块玻璃鼓起来（没有边线）
-                    let sh = CIFilter(name: "CIRadialGradient", parameters: ["inputCenter": CIVector(x: p.x, y: p.y - s * 0.06), "inputRadius0": s * 0.97, "inputRadius1": s * 1.35,
-                                                                           "inputColor0": CIColor(red: 0, green: 0, blue: 0, alpha: 0.16 * (1 - u)), "inputColor1": CIColor(red: 0, green: 0, blue: 0, alpha: 0)])!.outputImage!
-                        .cropped(to: R.insetBy(dx: -s * 0.5, dy: -s * 0.5))
-                    // 只留透镜外面那一圈影子（渐变里面是实色，用圆形遮罩把透镜里面换回来）
-                    let disc = CIFilter(name: "CIRadialGradient", parameters: ["inputCenter": CIVector(x: p.x, y: p.y), "inputRadius0": s * 0.98, "inputRadius1": s,
-                                                                             "inputColor0": CIColor.white, "inputColor1": CIColor.black])!.outputImage!
-                    scene = scene.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: sh.composited(over: scene), kCIInputMaskImageKey: disc])
+                    let r = (6 + 38 * e) * k, w = (10 - 3 * u) * k, amp = 1 - u   // amp：变形强度 0–1
+                    scene = OverlayLayer.rippleWarp(scene, center: p, radius: r, width: w, amplitude: amp)
+                    let ring = CIFilter(name: "CIRadialGradient", parameters: ["inputCenter": CIVector(x: p.x, y: p.y), "inputRadius0": r, "inputRadius1": r + w,
+                                                                             "inputColor0": CIColor(red: 1, green: 1, blue: 1, alpha: 0.16 * (1 - u)), "inputColor1": CIColor(red: 1, green: 1, blue: 1, alpha: 0)])!.outputImage!
+                    let inner = CIFilter(name: "CIRadialGradient", parameters: ["inputCenter": CIVector(x: p.x, y: p.y), "inputRadius0": max(0, r - w), "inputRadius1": r,
+                                                                              "inputColor0": CIColor(red: 1, green: 1, blue: 1, alpha: 0), "inputColor1": CIColor(red: 1, green: 1, blue: 1, alpha: 0.16 * (1 - u))])!.outputImage!
+                    let mask = CIFilter(name: "CIRadialGradient", parameters: ["inputCenter": CIVector(x: p.x, y: p.y), "inputRadius0": r - 0.5, "inputRadius1": r + 0.5,
+                                                                             "inputColor0": CIColor.black, "inputColor1": CIColor.white])!.outputImage!
+                    let band = ring.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: inner, kCIInputMaskImageKey: mask])
+                        .cropped(to: CGRect(x: p.x - r - w, y: p.y - r - w, width: (r + w) * 2, height: (r + w) * 2))
+                    scene = band.composited(over: scene)
                 }
                 let art = rippleArt[style] ?? ring
                 for (rad, al) in layers {
