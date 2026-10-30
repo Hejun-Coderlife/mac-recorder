@@ -359,7 +359,7 @@ struct SelectionBox: View {
     let sel: OverlayCanvas.Sel
     let m: OverlayMapping
     let fit: CGRect
-    private let knob = 9.0
+    private let knob = 10.0
 
     var body: some View {
         let g = sel.geo
@@ -368,7 +368,8 @@ struct SelectionBox: View {
         let style = StrokeStyle(lineWidth: 1.5, dash: sel.active ? [] : [5, 4])
         ZStack(alignment: .topLeading) {
             if sel.kind == .arrow {
-                Path { p in p.move(to: p0); p.addLine(to: p1) }.stroke(Color.accentColor.opacity(0.9), style: style).allowsHitTesting(false)
+                Path { p in p.move(to: p0); p.addLine(to: p1) }.stroke(Color.white.opacity(0.7), lineWidth: 3).blur(radius: 1).allowsHitTesting(false)
+                Path { p in p.move(to: p0); p.addLine(to: p1) }.stroke(Color.accentColor.opacity(sel.active ? 0.95 : 0.6), style: StrokeStyle(lineWidth: 1, dash: sel.active ? [] : [4, 3])).allowsHitTesting(false)
                 // 沿着箭头拖 = 整个挪
                 Path { p in p.move(to: p0); p.addLine(to: p1) }.stroke(Color.white.opacity(0.001), lineWidth: 16)
                     .contentShape(Path { p in p.move(to: p0); p.addLine(to: p1) }.strokedPath(StrokeStyle(lineWidth: 16)))
@@ -376,9 +377,12 @@ struct SelectionBox: View {
                 handle(at: p0) { d, g in g.x += d.width; g.y += d.height; g.w -= d.width; g.h -= d.height }
                 handle(at: p1) { d, g in g.w += d.width; g.h += d.height }
             } else {
-                Rectangle().stroke(Color.accentColor, style: style)
-                    .background(Rectangle().fill(Color.white.opacity(0.001)))
-                    .frame(width: max(r.width, 4), height: max(r.height, 4)).offset(x: r.minX, y: r.minY)
+                // 像苹果（Keynote / 无边记）：细线、离物体留一点空、圆角，外面一圈淡淡的白光，什么背景上都看得清；文字跟着胶囊形
+                let pad = 3.0, shape = RoundedRectangle(cornerRadius: sel.kind == .text ? (r.height + pad * 2) / 2 : 5, style: .continuous)
+                shape.stroke(Color.white.opacity(0.7), lineWidth: 3).blur(radius: 1)
+                    .overlay(shape.stroke(Color.accentColor.opacity(sel.active ? 0.95 : 0.6), style: StrokeStyle(lineWidth: 1, dash: sel.active ? [] : [4, 3])))
+                    .background(shape.fill(Color.white.opacity(0.001)))
+                    .frame(width: max(r.width, 4) + pad * 2, height: max(r.height, 4) + pad * 2).offset(x: r.minX - pad, y: r.minY - pad)
                     .onHover { inside in if inside { NSCursor.openHand.push() } else { NSCursor.pop() } }
                     .gesture(moveGesture)
                     .simultaneousGesture(TapGesture(count: 2).onEnded { if sel.kind == .text { ed.beginNote(sel.id) } })
@@ -386,10 +390,9 @@ struct SelectionBox: View {
                     // 文字：拖四个角改字号（离中心越远字越大）
                     ForEach(0..<4, id: \.self) { k in
                         let sx = k % 2 == 0 ? -1.0 : 1.0, sy = k < 2 ? -1.0 : 1.0
-                        Circle().fill(Color.white).overlay(Circle().stroke(Color.accentColor, lineWidth: 1.5))
-                            .frame(width: knob, height: knob).shadow(color: .black.opacity(0.35), radius: 1)
+                        Knob().frame(width: knob, height: knob)
                             .contentShape(Rectangle().inset(by: -4))
-                            .offset(x: (sx < 0 ? r.minX : r.maxX) - knob / 2, y: (sy < 0 ? r.minY : r.maxY) - knob / 2)
+                            .offset(x: (sx < 0 ? r.minX - 3 : r.maxX + 3) - knob / 2, y: (sy < 0 ? r.minY - 3 : r.maxY + 3) - knob / 2)
                             .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named(OverlayCanvas.space))
                                 .onChanged { v in
                                     let grow = (v.translation.width * sx + v.translation.height * sy) / 2
@@ -402,7 +405,7 @@ struct SelectionBox: View {
                     let circle = sel.kind == .ellipse && ed.project.annotations.first(where: { $0.id == sel.id })?.oval != true
                     ForEach(0..<8, id: \.self) { k in
                         let hx = [-1, 0, 1, 1, 1, 0, -1, -1][k], hy = [-1, -1, -1, 0, 1, 1, 1, 0][k]
-                        handle(at: CGPoint(x: r.midX + Double(hx) * r.width / 2, y: r.midY + Double(hy) * r.height / 2)) { d, g in
+                        handle(at: CGPoint(x: r.midX + Double(hx) * (r.width / 2 + 3), y: r.midY + Double(hy) * (r.height / 2 + 3))) { d, g in
                             // 框在原画面里 y 朝下，和预览一样：左 / 上边挪起点，右 / 下边改大小
                             if hx < 0 { g.x += d.width; g.w -= d.width } else if hx > 0 { g.w += d.width }
                             if hy < 0 { g.y += d.height; g.h -= d.height } else if hy > 0 { g.h += d.height }
@@ -424,9 +427,8 @@ struct SelectionBox: View {
             .onEnded { _ in ed.dragEnd() }
     }
     private func handle(at p: CGPoint, _ change: @escaping (CGSize, inout OverlayGeo) -> Void) -> some View {
-        Circle().fill(Color.white).overlay(Circle().stroke(Color.accentColor, lineWidth: 1.5))
+        Knob()
             .frame(width: knob, height: knob)
-            .shadow(color: .black.opacity(0.35), radius: 1)
             .contentShape(Rectangle().inset(by: -4))
             .offset(x: p.x - knob / 2, y: p.y - knob / 2)
             .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named(OverlayCanvas.space))
@@ -655,5 +657,14 @@ struct NoteField: View {
             .onSubmit { ed.endNote() }
             .onExitCommand { ed.endNote(cancel: true) }
             .onChange(of: focused) { _, f in if !f { ed.endNote() } }
+    }
+}
+
+// 选中框的把手（像苹果）：白色小圆点、柔和阴影、极细的灰边
+struct Knob: View {
+    var body: some View {
+        Circle().fill(Color.white)
+            .overlay(Circle().stroke(Color.black.opacity(0.18), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.28), radius: 1.5, y: 0.5)
     }
 }
