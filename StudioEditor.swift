@@ -443,6 +443,23 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         }
     }
 
+    // 画一帧成片（给 AI 看）：和截图自测同一套合成，缩到 maxWidth 宽，返回 PNG
+    func stillPNG(at t: Double, maxWidth: Double) async -> Data? {
+        let g = AVAssetImageGenerator(asset: asset)
+        g.requestedTimeToleranceBefore = .zero; g.requestedTimeToleranceAfter = .zero
+        guard let (cg, _) = try? await g.image(at: CMTime(seconds: t, preferredTimescale: 600)) else { return nil }
+        let (r, plan) = box.both, i = min(max(Int((t * fps).rounded()), 0), plan.count - 1)
+        let lay = r.lay
+        var fr = r.frame(i, plan: plan, source: CIImage(cgImage: cg), overlay: box.overlay, srcTime: t)
+        if let cam = box.camera { fr = cam.compose(fr, srcTime: t) }
+        if let c = box.captions?.image(atSource: t) { fr = c.composited(over: fr) }
+        let k = min(1, maxWidth / lay.cw)
+        let img = fr.composited(over: CIImage(color: CIColor(red: 0.86, green: 0.86, blue: 0.88)).cropped(to: lay.canvas))
+            .transformed(by: CGAffineTransform(scaleX: k, y: k))
+        guard let out = CIContext().createCGImage(img, from: img.extent.integral) else { return nil }
+        return NSBitmapImageRep(cgImage: out).representation(using: .png, properties: [:])
+    }
+
     // 截图自测：同一个合成函数画一张静态画面
     private func renderStill(at t: Double) async {
         let g = AVAssetImageGenerator(asset: asset)

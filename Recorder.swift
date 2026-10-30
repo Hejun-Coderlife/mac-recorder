@@ -151,6 +151,7 @@ final class Recorder: NSObject, ObservableObject {
     private var countdownCancelled = false
     private var needsPermission = false
     @Published var lastFile: URL?
+    @Published var lastProject: URL?      // 最近一次 Studio 录制的素材文件夹（给 AI 控制用）
 
     private var content: SCShareableContent?
     private var stream: SCStream?
@@ -388,6 +389,7 @@ final class Recorder: NSObject, ObservableObject {
             if ProcessInfo.processInfo.environment["AUTOTEST"] == nil {
                 do { try tr.save(to: dir, start: w.startSeconds); await saveCamera(dir: dir, start: w.startSeconds) }
                 catch { say(L("保存 Studio 素材失败：", "Couldn't save Studio footage: ") + error.localizedDescription, error: true); return }
+                lastProject = dir
                 say(L("已打开 Studio 剪辑窗口，调好后点「导出」", "Opened the Studio editor — adjust, then click Export"))
                 await StudioEditor.open(dir)
                 return
@@ -870,8 +872,7 @@ struct UpdateBar: View {
     }
 }
 
-@main
-struct RecorderApp: App {
+struct RecorderApp: App {   // 入口在 Control.swift 的 Main（带 --mcp 时只当 MCP 服务）
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate   // 素材文件夹拖到程序坞图标上
     @StateObject private var rec = Recorder()
     private let hotKey = HotKey()
@@ -884,6 +885,7 @@ struct RecorderApp: App {
                     if ProcessInfo.processInfo.environment["AUTOTEST"] == nil {
                         Updater.shared.isBusy = { [weak rec] in rec.map { $0.recording || $0.busy } ?? false }
                         Updater.shared.start()
+                        ControlServer.shared.start(rec)   // 给 AI（MCP）用的本机控制口
                     }
                     // 自测：MIXTEST=视频路径 → 把这个文件的两条音轨合成一条（会改动文件，先复制一份再测），然后退出
                     if let path = ProcessInfo.processInfo.environment["MIXTEST"] {
