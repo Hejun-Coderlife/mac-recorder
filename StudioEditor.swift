@@ -2814,10 +2814,15 @@ struct StylePanel: View {
                         }.buttonStyle(.plain).help(name)
                     }
                     ColorPicker("", selection: Binding(get: { cs.color.color }, set: { ed.capStyle(\.color).wrappedValue = RGB($0) }), supportsOpacity: false).labelsHidden()
+                        .help(L("自定义颜色：点开选任意颜色", "Custom color: click to pick any color"))
                 }
-                HStack(spacing: 14) {
-                    Toggle(L("描边", "Outline"), isOn: ed.capStyle(\.outline))
-                    Toggle(L("阴影", "Shadow"), isOn: ed.capStyle(\.shadow))
+                .disabled(cs.box == .glass).opacity(cs.box == .glass ? 0.4 : 1)   // 玻璃底固定用深色字
+                // 描边、阴影只在没有底色条时有用（有底色条时字是干净的）
+                if cs.box == .none {
+                    HStack(spacing: 14) {
+                        Toggle(L("描边", "Outline"), isOn: ed.capStyle(\.outline))
+                        Toggle(L("阴影", "Shadow"), isOn: ed.capStyle(\.shadow))
+                    }
                 }
                 Text(L("底色条", "Background bar")).font(.caption).foregroundStyle(.secondary)
                 chips(ed.capStyle(\.box), [(.none, L("无", "None")), (.dark, L("深色", "Dark")), (.light, L("浅色", "Light")), (.glass, L("玻璃", "Glass"))], columns: 4)
