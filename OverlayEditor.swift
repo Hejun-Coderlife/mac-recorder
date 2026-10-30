@@ -267,6 +267,7 @@ struct OverlayCanvas: View {
                              width: fit0.width * z, height: fit0.height * z)
             ZStack(alignment: .topLeading) {
                 Color.clear
+                if ed.drawing == nil, let hit = ed.captionHit { CaptionHandle(ed: ed, hit: hit, fit: fit) }
                 if let tool = ed.drawing { drawLayer(tool, m: m, fit: fit, size: g.size) }
                 else if let sel = selection(m) { SelectionBox(ed: ed, sel: sel, m: m, fit: fit) }
                 if let id = ed.editingNote, let a = ed.project.annotations.first(where: { $0.id == id }) { NoteField(ed: ed, note: a, m: m, fit: fit) }
@@ -299,19 +300,19 @@ struct OverlayCanvas: View {
                 .onEnded { v in finish(tool, start: v.startLocation, end: v.location, m: m, fit: fit); from = nil; to = nil })
         if let a = from, let b = to {
             if tool == .annotate(.arrow) {
-                Path { p in p.move(to: a); p.addLine(to: b) }.stroke(Color.white, style: StrokeStyle(lineWidth: 2, dash: [5, 4]))
-                    .shadow(color: .black.opacity(0.5), radius: 1).allowsHitTesting(false)
+                Path { p in p.move(to: a); p.addLine(to: b) }.stroke(Color.white.opacity(0.7), lineWidth: 3).blur(radius: 1).allowsHitTesting(false)
+                Path { p in p.move(to: a); p.addLine(to: b) }.stroke(Color.accentColor, lineWidth: 1).allowsHitTesting(false)
             } else if tool == .annotate(.ellipse) {
                 // 圈默认是正圆：按拖得远的那个方向定直径
                 let side = max(abs(b.x - a.x), abs(b.y - a.y)), ox = b.x < a.x ? a.x - side : a.x, oy = b.y < a.y ? a.y - side : a.y
-                Circle().stroke(Color.white, style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
-                    .background(Circle().fill(Color.accentColor.opacity(0.12)))
-                    .shadow(color: .black.opacity(0.5), radius: 1)
+                Circle().stroke(Color.white.opacity(0.7), lineWidth: 3).blur(radius: 1)
+                    .overlay(Circle().stroke(Color.accentColor, lineWidth: 1))
+                    .background(Circle().fill(Color.accentColor.opacity(0.06)))
                     .frame(width: side, height: side).offset(x: ox, y: oy).allowsHitTesting(false)
             } else {
-                Rectangle().stroke(Color.white, style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
-                    .background(Rectangle().fill(Color.accentColor.opacity(0.12)))
-                    .shadow(color: .black.opacity(0.5), radius: 1)
+                RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(Color.white.opacity(0.7), lineWidth: 3).blur(radius: 1)
+                    .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(Color.accentColor, lineWidth: 1))
+                    .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Color.accentColor.opacity(0.06)))
                     .frame(width: abs(b.x - a.x), height: abs(b.y - a.y)).offset(x: min(a.x, b.x), y: min(a.y, b.y)).allowsHitTesting(false)
             }
         }
@@ -365,7 +366,9 @@ struct SelectionBox: View {
         let g = sel.geo
         let p0 = m.view(CGPoint(x: g.x, y: g.y), fit: fit), p1 = m.view(CGPoint(x: g.x + g.w, y: g.y + g.h), fit: fit)
         let r = CGRect(x: min(p0.x, p1.x), y: min(p0.y, p1.y), width: abs(p1.x - p0.x), height: abs(p1.y - p0.y))
-        let style = StrokeStyle(lineWidth: 1.5, dash: sel.active ? [] : [5, 4])
+        // 选中框要让开标注自己的线（框 / 圈的线有几个像素粗），不然细线压在粗线上看不见
+        let lw = ed.project.annotations.first(where: { $0.id == sel.id }).map { [.rect, .ellipse].contains($0.kind) ? $0.width * m.ppp * m.lay.s * (m.f?.z ?? 1) * fit.width / m.lay.cw : 0 } ?? 0
+        let gap = 4 + lw / 2
         ZStack(alignment: .topLeading) {
             if sel.kind == .arrow {
                 Path { p in p.move(to: p0); p.addLine(to: p1) }.stroke(Color.white.opacity(0.7), lineWidth: 3).blur(radius: 1).allowsHitTesting(false)
@@ -378,7 +381,7 @@ struct SelectionBox: View {
                 handle(at: p1) { d, g in g.w += d.width; g.h += d.height }
             } else {
                 // 像苹果（Keynote / 无边记）：细线、离物体留一点空、圆角，外面一圈淡淡的白光，什么背景上都看得清；文字跟着胶囊形
-                let pad = 3.0, shape = RoundedRectangle(cornerRadius: sel.kind == .text ? (r.height + pad * 2) / 2 : 5, style: .continuous)
+                let pad = gap, shape = RoundedRectangle(cornerRadius: sel.kind == .text ? (r.height + pad * 2) / 2 : 5, style: .continuous)
                 shape.stroke(Color.white.opacity(0.7), lineWidth: 3).blur(radius: 1)
                     .overlay(shape.stroke(Color.accentColor.opacity(sel.active ? 0.95 : 0.6), style: StrokeStyle(lineWidth: 1, dash: sel.active ? [] : [4, 3])))
                     .background(shape.fill(Color.white.opacity(0.001)))
@@ -392,7 +395,7 @@ struct SelectionBox: View {
                         let sx = k % 2 == 0 ? -1.0 : 1.0, sy = k < 2 ? -1.0 : 1.0
                         Knob().frame(width: knob, height: knob)
                             .contentShape(Rectangle().inset(by: -4))
-                            .offset(x: (sx < 0 ? r.minX - 3 : r.maxX + 3) - knob / 2, y: (sy < 0 ? r.minY - 3 : r.maxY + 3) - knob / 2)
+                            .offset(x: (sx < 0 ? r.minX - gap : r.maxX + gap) - knob / 2, y: (sy < 0 ? r.minY - gap : r.maxY + gap) - knob / 2)
                             .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named(OverlayCanvas.space))
                                 .onChanged { v in
                                     let grow = (v.translation.width * sx + v.translation.height * sy) / 2
@@ -405,7 +408,7 @@ struct SelectionBox: View {
                     let circle = sel.kind == .ellipse && ed.project.annotations.first(where: { $0.id == sel.id })?.oval != true
                     ForEach(0..<8, id: \.self) { k in
                         let hx = [-1, 0, 1, 1, 1, 0, -1, -1][k], hy = [-1, -1, -1, 0, 1, 1, 1, 0][k]
-                        handle(at: CGPoint(x: r.midX + Double(hx) * (r.width / 2 + 3), y: r.midY + Double(hy) * (r.height / 2 + 3))) { d, g in
+                        handle(at: CGPoint(x: r.midX + Double(hx) * (r.width / 2 + gap), y: r.midY + Double(hy) * (r.height / 2 + gap))) { d, g in
                             // 框在原画面里 y 朝下，和预览一样：左 / 上边挪起点，右 / 下边改大小
                             if hx < 0 { g.x += d.width; g.w -= d.width } else if hx > 0 { g.w += d.width }
                             if hy < 0 { g.y += d.height; g.h -= d.height } else if hy > 0 { g.h += d.height }
@@ -556,7 +559,7 @@ struct AnnotationInspector: View {
                         let c = Annotation.palette[k]
                         Button { ed.note(\.color).wrappedValue = c } label: {
                             Circle().fill(c.color).frame(width: 14, height: 14)
-                                .overlay(Circle().stroke(a.color == c ? Color.accentColor : Color.secondary.opacity(0.4), lineWidth: a.color == c ? 2 : 0.5))
+                                .overlay(Circle().stroke(Color.secondary.opacity(0.35), lineWidth: 0.5)).overlay(Circle().stroke(a.color == c ? Color.accentColor : Color.clear, lineWidth: 1.5).padding(-2.5))
                         }.buttonStyle(.plain)
                     }
                     ColorPicker("", selection: Binding(get: { a.color.color }, set: { c in ed.note(\.color).wrappedValue = RGB(c) }), supportsOpacity: false)
@@ -650,7 +653,8 @@ struct NoteField: View {
             .frame(minWidth: px * 3)
             .padding(.horizontal, note.textLook != .plain ? px * 0.45 : 2).padding(.vertical, note.textLook != .plain ? px * 0.27 : 1)
             .background(fieldBack(col))
-            .overlay(Capsule().stroke(Color.accentColor, lineWidth: 1.5).padding(-3))
+            .overlay(Capsule().stroke(Color.white.opacity(0.7), lineWidth: 3).blur(radius: 1).padding(-4))
+            .overlay(Capsule().stroke(Color.accentColor, lineWidth: 1).padding(-4))
             .offset(x: p.x, y: p.y)
             .onAppear { text = note.text; DispatchQueue.main.async { focused = true } }
             .onChange(of: text) { _, v in ed.typeNote(note.id, v) }
@@ -666,5 +670,43 @@ struct Knob: View {
         Circle().fill(Color.white)
             .overlay(Circle().stroke(Color.black.opacity(0.18), lineWidth: 0.5))
             .shadow(color: .black.opacity(0.28), radius: 1.5, y: 0.5)
+    }
+}
+
+// 预览上的字幕（像剪映）：单击选中（苹果样式的细框），拖动挪位置（整条字幕轨一起），双击改字
+struct CaptionHandle: View {
+    @ObservedObject var ed: StudioEditor
+    let hit: (id: UUID, rect: CGRect, cw: Double, ch: Double)
+    let fit: CGRect
+    @State private var start: CGPoint?
+    var body: some View {
+        let r = hit.rect
+        let v = CGRect(x: fit.minX + r.minX / hit.cw * fit.width, y: fit.minY + (1 - r.maxY / hit.ch) * fit.height,
+                       width: r.width / hit.cw * fit.width, height: r.height / hit.ch * fit.height)
+        let sel = ed.selected == hit.id
+        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        ZStack {
+            shape.fill(Color.white.opacity(0.001))
+            if sel {
+                shape.stroke(Color.white.opacity(0.7), lineWidth: 3).blur(radius: 1).padding(-4)
+                shape.stroke(Color.accentColor, lineWidth: 1).padding(-4)
+            }
+        }
+        .frame(width: v.width, height: v.height)
+        .contentShape(Rectangle())
+        .offset(x: v.minX, y: v.minY)
+        .onHover { inside in if inside { NSCursor.openHand.push() } else { NSCursor.pop() } }
+        .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .named(OverlayCanvas.space))
+            .onChanged { g in
+                if start == nil {
+                    ed.selected = hit.id
+                    start = CGPoint(x: (r.midX) / hit.cw, y: 1 - r.midY / hit.ch)
+                }
+                ed.dragCaption(by: CGSize(width: g.translation.width / fit.width, height: g.translation.height / fit.height), from: start!)
+            }
+            .onEnded { _ in start = nil; ed.dragEnd() })
+        .simultaneousGesture(TapGesture(count: 2).onEnded { ed.selected = hit.id; ed.editingCaption = hit.id })
+        .simultaneousGesture(TapGesture().onEnded { ed.selected = hit.id })
+        .help(L("字幕：单击选中，拖动挪位置（所有字幕一起），双击改字", "Caption: click to select, drag to move (all captions), double-click to edit"))
     }
 }

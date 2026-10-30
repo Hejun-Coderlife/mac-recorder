@@ -30,14 +30,16 @@ struct CaptionStyle: Codable, Equatable {
     var box = Box.none
     var position = Position.bottom
     var margin = 0.07               // 离上 / 下边多远（占画布高）
+    var cx: Double?, cy: Double?    // 在画面上拖过：字幕中心在画布里的位置（比例，左上为原点）；没拖过 = 按上 / 下 + 边距
 
     init() {}
-    enum CodingKeys: String, CodingKey { case show, weight, size, color, outline, shadow, box, position, margin }
+    enum CodingKeys: String, CodingKey { case show, weight, size, color, outline, shadow, box, position, margin, cx, cy }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self), z = CaptionStyle()
         func v<T: Decodable>(_ k: CodingKeys, _ def: T) -> T { (try? c.decodeIfPresent(T.self, forKey: k)) ?? def }
         show = v(.show, z.show); weight = v(.weight, z.weight); size = v(.size, z.size); color = v(.color, z.color)
         outline = v(.outline, z.outline); shadow = v(.shadow, z.shadow); box = v(.box, z.box); position = v(.position, z.position); margin = v(.margin, z.margin)
+        cx = try? c.decodeIfPresent(Double.self, forKey: .cx); cy = try? c.decodeIfPresent(Double.self, forKey: .cy)
     }
 
     var fontName: String {
@@ -90,10 +92,23 @@ final class CaptionLayer: @unchecked Sendable {
     }
     private func captionImage(atOut t: Double) -> CIImage? {
         guard let s = text(atOut: t), let img = Self.render(s, style: style, cw: cw, ch: ch) else { return nil }
-        // 水平居中；放底部时离下边 edge，放顶部时离上边 edge（Core Image 左下为原点）
-        let e = style.edge(canvas: cw, ch), w = Double(img.width), h = Double(img.height)
+        let o = place(w: Double(img.width), h: Double(img.height))
+        return CIImage(cgImage: img).transformed(by: CGAffineTransform(translationX: o.x, y: o.y))
+    }
+    // 字幕图左下角放哪：拖过就按拖到的中心；不然水平居中，放底部时离下边 edge，放顶部时离上边 edge（Core Image 左下为原点）
+    private func place(w: Double, h: Double) -> CGPoint {
+        if let x = style.cx, let y = style.cy {
+            return CGPoint(x: (x * cw - w / 2).rounded(), y: ((1 - y) * ch - h / 2).rounded())
+        }
+        let e = style.edge(canvas: cw, ch)
         let y = style.position == .bottom ? e - h * 0.2 : ch - e - h * 0.8
-        return CIImage(cgImage: img).transformed(by: CGAffineTransform(translationX: ((cw - w) / 2).rounded(), y: y.rounded()))
+        return CGPoint(x: ((cw - w) / 2).rounded(), y: y.rounded())
+    }
+    // 这一刻显示的那句字幕占画布哪块（预览上点选、拖动用）
+    func rect(atSource t: Double) -> CGRect? {
+        guard !map.inCut(t), let s = text(atOut: map.out(t)), let img = Self.render(s, style: style, cw: cw, ch: ch) else { return nil }
+        let w = Double(img.width), h = Double(img.height), o = place(w: w, h: h)
+        return CGRect(x: o.x, y: o.y, width: w, height: h)
     }
     func image(atSource t: Double) -> CIImage? { map.inCut(t) ? nil : image(atOut: map.out(t)) }
 

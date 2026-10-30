@@ -69,7 +69,8 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         return x == y
     }
     @Published var selectedPiece: Double?                // 剪辑轨上选中的那段（起点）
-    @Published var selected: UUID? { didSet { if selected != nil { selectedPiece = nil }; if let n = editingNote, selected != n { endNote() } } }   // 选了别的：正在改的字先收好
+    @Published var selected: UUID? { didSet { if selected != nil { selectedPiece = nil }; if let c = editingCaption, selected != c { editingCaption = nil }   // 点了别处：字幕块收起编辑
+        ; if let n = editingNote, selected != n { endNote() } } }   // 选了别的：正在改的字先收好
     @Published var time = 0.0
     @Published var playing = false { didSet { box.playing = playing; if !playing { musicPlayer.pauseAll(); if oldValue { redrawPausedFrame() } } } }
     @Published var picking = false             // 正在等用户在预览上点固定位置
@@ -559,6 +560,21 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     }
     private let dragCtx = CIContext(options: [.cacheIntermediates: false])
     func redrawPausedFrame() { player.currentItem?.videoComposition = makeComposition(); seek(time) }   // 停下时这一帧不带运动模糊重画
+    // 预览上的字幕：这一刻是哪句、在画布哪块
+    var captionHit: (id: UUID, rect: CGRect, cw: Double, ch: Double)? {
+        guard let c = project.captions.last(where: { time >= $0.start && time < $0.end && !$0.text.isEmpty }),
+              let r = box.captions?.rect(atSource: time) else { return nil }
+        let lay = box.renderer.lay
+        return (c.id, r, lay.cw, lay.ch)
+    }
+    // 在预览上拖字幕：整条字幕轨的位置一起挪（像剪映），中心夹在画布里
+    func dragCaption(by d: CGSize, from start: CGPoint) {
+        dragBegin()
+        dragUpdate { p in
+            p.captionStyle.cx = min(max(start.x + d.width, 0.05), 0.95)
+            p.captionStyle.cy = min(max(start.y + d.height, 0.05), 0.95)
+        }
+    }
     func dragFinished() {
         if needsAudioRefresh { replan() }               // 拖完把声音、边界、播放器都更新一遍
         else if dragFrame != nil { redrawPaused() }
@@ -2547,7 +2563,7 @@ struct StylePanel: View {
                         RoundedRectangle(cornerRadius: 6)
                             .fill(LinearGradient(colors: [g.a.color, g.b.color], startPoint: .bottomLeading, endPoint: .topTrailing))
                             .frame(width: 38, height: 26)
-                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(on ? Color.accentColor : Color.primary.opacity(0.15), lineWidth: on ? 2 : 1))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.15), lineWidth: 0.5)).overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(on ? Color.accentColor : Color.clear, lineWidth: 2).padding(-3.5))
                             .onTapGesture { ed.edit { $0.look.gradient0 = g.a; $0.look.gradient1 = g.b } }
                             .help(L(g.zh, g.en))
                     }
@@ -2563,7 +2579,7 @@ struct StylePanel: View {
                         let on = look.wallpaper == u.path
                         WallpaperThumb(url: u)
                             .frame(width: 84, height: 52).clipShape(RoundedRectangle(cornerRadius: 6))
-                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(on ? Color.accentColor : Color.primary.opacity(0.15), lineWidth: on ? 2 : 1))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.15), lineWidth: 0.5)).overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(on ? Color.accentColor : Color.clear, lineWidth: 2).padding(-3.5))
                             .onTapGesture { ed.edit { $0.look.wallpaper = u.path } }
                             .help(u.deletingPathExtension().lastPathComponent)
                     }
@@ -2767,7 +2783,7 @@ struct StylePanel: View {
                         let (c, name) = colors[k], on = cs.color == c
                         Button { ed.capStyle(\.color).wrappedValue = c } label: {
                             Circle().fill(c.color).frame(width: 18, height: 18)
-                                .overlay(Circle().stroke(on ? Color.accentColor : Color.secondary.opacity(0.4), lineWidth: on ? 2.5 : 1))
+                                .overlay(Circle().stroke(Color.secondary.opacity(0.35), lineWidth: 0.5)).overlay(Circle().stroke(on ? Color.accentColor : Color.clear, lineWidth: 2).padding(-3.5))
                         }.buttonStyle(.plain).help(name)
                     }
                     ColorPicker("", selection: Binding(get: { cs.color.color }, set: { ed.capStyle(\.color).wrappedValue = RGB($0) }), supportsOpacity: false).labelsHidden()
@@ -2779,7 +2795,11 @@ struct StylePanel: View {
                 Text(L("底色条", "Background bar")).font(.caption).foregroundStyle(.secondary)
                 chips(ed.capStyle(\.box), [(.none, L("无", "None")), (.dark, L("深色", "Dark")), (.light, L("浅色", "Light"))], columns: 3)
                 Text(L("位置", "Position")).font(.caption).foregroundStyle(.secondary)
-                chips(ed.capStyle(\.position), [(.bottom, L("底部", "Bottom")), (.top, L("顶部", "Top"))], columns: 2)
+                chips(Binding(get: { ed.project.captionStyle.position }, set: { v in ed.edit { $0.captionStyle.position = v; $0.captionStyle.cx = nil; $0.captionStyle.cy = nil } }),
+                      [(.bottom, L("底部", "Bottom")), (.top, L("顶部", "Top"))], columns: 2)   // 点了就回到上 / 下（取消在画面上拖过的位置）
+                if ed.project.captionStyle.cx != nil {
+                    Text(L("位置是在画面上拖的；点「底部 / 顶部」恢复", "Position set by dragging in the preview; pick Bottom / Top to reset")).font(.caption).foregroundStyle(.secondary)
+                }
                 capSlider(L("离边", "Margin"), \.margin, 0.02...0.25) { "\(Int(($0 * 100).rounded()))%" }
                 Text(L("一次只显示一行；竖屏时字自动大一号，放底部时让开抖音等 App 底部的按钮", "One line at a time; in vertical video the text is a size bigger and, at the bottom, kept clear of TikTok-style buttons"))
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
