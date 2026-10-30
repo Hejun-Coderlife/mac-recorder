@@ -327,7 +327,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         }
         w.center()
         w.setFrameAutosaveName("StudioEditor")
-        if ProcessInfo.processInfo.environment["EDITOR_LIVE"] != nil { NSApp.setActivationPolicy(.accessory); w.orderBack(nil); return }
+        if ProcessInfo.processInfo.environment["EDITOR_LIVE"] != nil || ProcessInfo.processInfo.environment["FLOWTEST"] != nil { NSApp.setActivationPolicy(.accessory); w.orderBack(nil); return }
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -3362,6 +3362,52 @@ enum StudioTests {
                 print("LIVE after", w.windowNumber); fflush(stdout)
                 try? await Task.sleep(for: .seconds(3))
                 exit(0)
+            }
+            return true
+        }
+        // FLOWTEST=素材夹（副本）→ 打开真剪辑窗口，按用户的操作顺序跑一遍：分割 / 加速 / 删除 / 恢复原速、跨剪刀拖动换算、改字时拖滑块、选中清除；打印 PASS/FAIL 后退出
+        if let p = ProcessInfo.processInfo.environment["FLOWTEST"] {
+            Task {
+                var ok = true
+                func check(_ n: String, _ c: Bool, _ info: String = "") { print(c ? "PASS" : "FAIL", n, info); ok = ok && c }
+                await StudioEditor.open(URL(fileURLWithPath: p))
+                guard let ed = StudioEditor.open.values.first else { print("FLOWTEST FAIL no editor"); exit(1) }
+                ed.window?.orderBack(nil)
+                ed.edit { $0.cuts = []; $0.splits = []; $0.trimStart = 0; $0.trimEnd = min(ed.duration, 14); $0.annotations = []; $0.keyMutes = [] }
+                // 分割出 2–8，整段 2×；再在 5 处分割、删掉 5–8
+                ed.split(at: 2); ed.split(at: 8)
+                if let pc = ed.pieces.first(where: { abs($0.start - 2) < 0.01 }) { ed.setPieceSpeed(pc, 2) }
+                ed.split(at: 5)
+                if let pc = ed.pieces.first(where: { abs($0.start - 5) < 0.01 }) { ed.deletePiece(pc) }
+                let cs = ed.project.cuts.sorted { $0.start < $1.start }
+                check("speed 2–5 kept, 5–8 removed", cs.count == 2 && abs(cs[0].start - 2) < 0.01 && abs(cs[0].end - 5) < 0.01 && cs[0].mode == .speed && abs(cs[1].start - 5) < 0.01 && abs(cs[1].end - 8) < 0.01 && cs[1].mode == .cut,
+                      cs.map { "\($0.mode)[\($0.start),\($0.end)]" }.joined(separator: " "))
+                check("no overlapping cuts", zip(cs, cs.dropFirst()).allSatisfy { $0.end <= $1.start + 1e-6 })
+                let m = ed.timeMap
+                check("export skips 5–8", abs(m.out(8) - m.out(5)) < 0.02, String(format: "out5=%.2f out8=%.2f", m.out(5), m.out(8)))
+                check("2–5 plays at 2×", abs((m.out(5) - m.out(2)) - 1.5) < 0.05, String(format: "%.2f", m.out(5) - m.out(2)))
+                check("no ghost piece", !ed.pieces.contains { $0.end - $0.start < 0.05 }, "\(ed.pieces.count) pieces")
+                if let pc = ed.pieces.first(where: { abs($0.start - 2) < 0.01 }) { ed.setPieceSpeed(pc, 1) }
+                check("back to 1×", !ed.project.cuts.contains { $0.mode == .speed })
+                // 跨过删掉的 5–8 往右拖 4 秒（可见时间）：从 3 出发应该到 10
+                let d1 = ed.srcDelta(4, anchor: 3); ed.dragEnd()
+                check("drag across removed part", abs(3 + d1 - 10) < 0.01, String(format: "%.2f", 3 + d1))
+                // 改字时拖字号滑块，字不能丢；之后还能接着打
+                ed.addAnnotation(.text, OverlayGeo(x: 0.3, y: 0.3, w: 0, h: 0))
+                guard let nid = ed.editingNote else { print("FLOWTEST FAIL no note"); exit(1) }
+                ed.typeNote(nid, "Hi")
+                ed.dragBegin(); ed.dragUpdate { p in if let i = p.annotations.firstIndex(where: { $0.id == nid }) { p.annotations[i].fontSize = 50 } }; ed.dragEnd()
+                ed.typeNote(nid, "Hi there")
+                ed.endNote()
+                let a = ed.project.annotations.first { $0.id == nid }
+                check("text kept after slider", a?.text == "Hi there" && a?.fontSize == 50, "\(a?.text ?? "nil") \(a?.fontSize ?? 0)")
+                ed.undo()
+                check("one undo reverts typing", ed.project.annotations.first { $0.id == nid }?.text != "Hi there")
+                // 选了片段再点空白：取消
+                ed.selectedPiece = ed.pieces.first?.start; ed.selected = UUID(); ed.selected = nil
+                check("blank click clears piece", ed.selectedPiece == nil)
+                print(ok ? "FLOWTEST OK" : "FLOWTEST FAIL")
+                exit(ok ? 0 : 1)
             }
             return true
         }
