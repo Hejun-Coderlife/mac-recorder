@@ -4,7 +4,7 @@ import AppKit
 import SwiftUI
 
 struct AIClient: Identifiable {
-    enum Kind { case json(path: String, key: String, vscode: Bool), toml(path: String), cli(cmd: String), manual(steps: String) }
+    enum Kind { case json(path: String, key: String, vscode: Bool), toml(path: String), cli(cmd: String, configDir: String? = nil), manual(steps: String) }
     let id: String
     let name: String
     let note: String
@@ -20,6 +20,9 @@ struct AIClient: Identifiable {
                      installedHint: ["/Applications/Claude.app", home + "/Applications/Claude.app"]),
             AIClient(id: "claude-code", name: "Claude Code", note: L("终端里的 Claude；接好后新开一个会话", "Start a new session afterwards"),
                      kind: .cli(cmd: "claude"), installedHint: []),
+            // 用 DeepSeek 跑的 Claude Code（clds）：用单独的配置目录 ~/.claude-ds，要单独接
+            AIClient(id: "clds", name: "DeepSeek（clds）", note: L("终端里的 clds：DeepSeek 模型跑的 Claude Code；接好后新开一个会话", "clds: Claude Code running DeepSeek; start a new session afterwards"),
+                     kind: .cli(cmd: "claude", configDir: home + "/.claude-ds"), installedHint: [home + "/.local/bin/clds"]),
             AIClient(id: "cursor", name: "Cursor", note: L("接好后在 Cursor 设置 → MCP 里打开", "Enable it in Cursor Settings → MCP"),
                      kind: .json(path: home + "/.cursor/mcp.json", key: "mcpServers", vscode: false),
                      installedHint: ["/Applications/Cursor.app", home + "/.cursor"]),
@@ -58,7 +61,7 @@ struct AIClient: Identifiable {
     }
     var installed: Bool {
         switch kind {
-        case .cli(let c): return Self.which(c) != nil
+        case .cli(let c, let dir): return Self.which(c) != nil && (dir == nil || installedHint.contains { FileManager.default.fileExists(atPath: $0) })
         case .manual: return true
         default: return installedHint.isEmpty || installedHint.contains { FileManager.default.fileExists(atPath: $0) }
         }
@@ -71,8 +74,8 @@ struct AIClient: Identifiable {
         case .toml(let p):
             return (try? String(contentsOfFile: p, encoding: .utf8))?.contains("[mcp_servers.recorder]") ?? false
         case .manual: return false
-        case .cli:
-            guard let d = FileManager.default.contents(atPath: Self.home + "/.claude.json"), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return false }
+        case .cli(_, let dir):
+            guard let d = FileManager.default.contents(atPath: (dir ?? Self.home) + "/.claude.json"), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return false }
             return (j["mcpServers"] as? [String: Any])?["recorder"] != nil
         }
     }
@@ -107,7 +110,7 @@ struct AIClient: Identifiable {
             try s.write(toFile: p, atomically: true, encoding: .utf8)
         case .manual:
             NSPasteboard.general.clearContents(); NSPasteboard.general.setString(Self.snippet, forType: .string)
-        case .cli(let c):
+        case .cli(let c, let dir):
             guard let bin = Self.which(c) else { throw NSError(domain: "录屏", code: 41, userInfo: [NSLocalizedDescriptionKey: L("没找到 \(c) 命令", "Couldn't find the \(c) command")]) }
             let p = Process(), pipe = Pipe()
             p.executableURL = URL(fileURLWithPath: bin)
@@ -115,6 +118,7 @@ struct AIClient: Identifiable {
             // npm / Homebrew 装的 claude 是 node 脚本：App 里 PATH 很短找不到 node，把常见目录加上
             var env = ProcessInfo.processInfo.environment
             env["PATH"] = (["/opt/homebrew/bin", "/usr/local/bin", Self.home + "/.local/bin", Self.home + "/.npm-global/bin", Self.home + "/.claude/local", "/usr/bin", "/bin"] + [env["PATH"] ?? ""]).joined(separator: ":")
+            if let dir { env["CLAUDE_CONFIG_DIR"] = dir }   // clds 那套单独的配置
             p.environment = env
             p.standardOutput = pipe; p.standardError = pipe
             try p.run()
@@ -145,7 +149,7 @@ struct AIConnectView: View {
                    "Once connected, ask the AI in plain words to record, edit, annotate and export. With the editor open you watch every change live and can undo with ⌘Z. Runs only on this Mac."))
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             VStack(spacing: 0) {
-                ForEach(AIClient.all) { c in
+                ForEach(AIClient.all.filter { $0.id != "clds" || $0.installed }) { c in
                     HStack(spacing: 10) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(c.name).font(.body.weight(.medium))
