@@ -59,7 +59,8 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     private var refreshPending = false
 
     @Published var project: StudioProject { didSet { if project != oldValue { replan(); scheduleSave() } } }
-    @Published var selected: UUID? { didSet { if let n = editingNote, selected != n { endNote() } } }   // 选了别的：正在改的字先收好
+    @Published var selectedPiece: Double?                // 剪辑轨上选中的那段（起点）
+    @Published var selected: UUID? { didSet { if selected != nil { selectedPiece = nil }; if let n = editingNote, selected != n { endNote() } } }   // 选了别的：正在改的字先收好
     @Published var time = 0.0
     @Published var playing = false { didSet { if !playing { musicPlayer.pauseAll() } } }
     @Published var picking = false             // 正在等用户在预览上点固定位置
@@ -333,6 +334,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         case 51, 117: deleteSelected(); return true
         case 6 where cmd: shift ? redo() : undo(); return true
         case 2 where cmd: duplicateOverlay(); return true
+        case 1 where !cmd, 11 where cmd: split(at: time); return true   // S / ⌘B 分割
         case 53: if picking { picking = false; return true }; if drawing != nil { drawing = nil; return true }; return false
         default: return false
         }
@@ -728,6 +730,8 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         selected = seg.id
     }
     func deleteSelected() {
+        if let p = currentPiece { deletePiece(p); return }
+        if let i = cutIndex(selected), project.cuts[i].mode == .cut { restoreCut(project.cuts[i].id); return }   // 选中小剪刀按 Delete = 恢复
         if let i = redactionIndex(selected) { edit { $0.redactions.remove(at: i) }; selected = nil; return }
         if let i = annotationIndex(selected) { edit { $0.annotations.remove(at: i) }; selected = nil; return }
         if let i = captionIndex(selected) { edit { $0.captions.remove(at: i) }; selected = nil; return }
@@ -1032,7 +1036,8 @@ struct EditorView: View {
                     controlBar.padding(.horizontal, 14).padding(.vertical, 8)
                     Divider()
                     VStack(alignment: .leading, spacing: 10) {
-                        if ed.redactionIndex(ed.selected) != nil { RedactionInspector(ed: ed).frame(height: 30) }   // 选中遮挡
+                        if ed.currentPiece != nil { PieceInspector(ed: ed).frame(height: 30) }   // 选中剪辑轨上的一段
+                        else if ed.redactionIndex(ed.selected) != nil { RedactionInspector(ed: ed).frame(height: 30) }   // 选中遮挡
                         else if ed.annotationIndex(ed.selected) != nil { AnnotationInspector(ed: ed).frame(height: 30) }   // 选中标注
                         else if ed.captionIndex(ed.selected) != nil { captionInspector.frame(height: 30) }   // 选中字幕
                         else if ed.cutIndex(ed.selected) != nil { cutInspector.frame(height: 30) }   // 选中剪辑段
@@ -1090,8 +1095,8 @@ struct EditorView: View {
             HStack(spacing: 10) {
                 Button { ed.addSegment(at: ed.time) } label: { Label(L("推近", "Zoom"), systemImage: "plus.magnifyingglass") }
                     .help(L("在播放头处新加一段推近（镜头放大凑近看）；也可以在时间轴空白处双击", "Add a zoom-in at the playhead; you can also double-click empty space on the timeline"))
-                Button { ed.addCut(at: ed.time) } label: { Label(L("剪掉", "Cut"), systemImage: "scissors") }
-                    .help(L("在播放头处放一段「剪掉」（红色），拖两头盖住不要的部分；选中后也能改成「加速」快放", "Mark a part to cut out at the playhead (red); drag its ends over what you don't want. Select it to switch to speed-up instead"))
+                Button { ed.split(at: ed.time) } label: { Label(L("分割", "Split"), systemImage: "scissors") }
+                    .help(L("在播放头处切一刀（S 或 ⌘B）：点选切出来的一段按 Delete 删掉，时间轴直接合拢；也能给那段改速度", "Split at the playhead (S or ⌘B): select a part and press Delete to remove it, the timeline closes up; you can also change its speed"))
                 voiceButton
                 captionButton
                 OverlayButtons(ed: ed)
@@ -1159,7 +1164,7 @@ struct EditorView: View {
             .onChange(of: ed.time) { _, t in
                 // 播放时播放头跑出可见区就翻一页
                 guard ed.playing, ed.timelineScale > 1.01 else { return }
-                let x = t / max(ed.duration, 0.01) * w * ed.timelineScale
+                let x = ed.visTime(t) / ed.visDuration * w * ed.timelineScale
                 if x < ed.timelineOffset || x > ed.timelineOffset + w - 20 { ed.panTimeline(x - w * 0.1 - ed.timelineOffset) }
             }
         }
@@ -1363,7 +1368,17 @@ extension EditorView {
     }
 
     @ViewBuilder var cutInspector: some View {
-        if let i = ed.cutIndex(ed.selected) {
+        if let i = ed.cutIndex(ed.selected), ed.project.cuts[i].mode == .cut {
+            // 删掉的段（剪辑轨上的小剪刀）：只能恢复
+            let c = ed.project.cuts[i]
+            HStack(spacing: 14) {
+                Image(systemName: "scissors").foregroundStyle(.red)
+                Text(L("这里删掉了 \(String(format: "%.1f", c.end - c.start)) 秒（素材 \(clock(c.start)) – \(clock(c.end))）", "\(String(format: "%.1f", c.end - c.start))s removed here (\(clock(c.start)) – \(clock(c.end)))"))
+                    .font(.callout).foregroundStyle(.secondary)
+                Spacer()
+                Button { ed.restoreCut(c.id) } label: { Label(L("恢复这段", "Restore"), systemImage: "arrow.uturn.backward") }
+            }.controlSize(.small)
+        } else if let i = ed.cutIndex(ed.selected) {
             let c = ed.project.cuts[i], len = c.end - c.start
             HStack(spacing: 14) {
                 Text(L("剪辑", "Edit")).font(.callout.weight(.semibold))
@@ -1504,15 +1519,16 @@ struct TimelineStrip: View {
 
     var body: some View {
         GeometryReader { g in
-            let w = g.size.width, d = max(ed.duration, 0.01)
-            let x = { (t: Double) in t / d * w }
-            let tAt = { (px: Double) in min(max(px / w * d, 0), d) }
+            // 删掉的段在时间轴上合拢：横坐标按「可见时间」排；d = 可见总长（拖动时 像素 → 秒 也按它换算）
+            let w = g.size.width, d = ed.visDuration
+            let x = { (t: Double) in ed.visTime(t) / d * w }
+            let tAt = { (px: Double) in ed.srcTime(vis: min(max(px / w * d, 0), d)) }
             ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(nsColor: .separatorColor)))
                     .gesture(SpatialTapGesture(count: 2).onEnded { ed.addSegment(at: tAt($0.location.x)) }
                         .exclusively(before: SpatialTapGesture().onEnded { ed.selected = nil; ed.picking = false; ed.seek(tAt($0.location.x)) }))
-                ruler(w: w, d: d, x: x)
+                ruler(w: w, d: d, x: { $0 / d * w })
                     .contentShape(Rectangle())
                     .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.space))
                         .onChanged { ed.scrubBegin(); ed.seek(tAt($0.location.x)) }
@@ -1524,9 +1540,12 @@ struct TimelineStrip: View {
                 // 剪辑轨：剪掉（红斜纹）/ 快放（蓝斜纹 + 倍数）
                 RoundedRectangle(cornerRadius: 5).fill(Color.secondary.opacity(0.07)).frame(width: w - 4, height: cutH)
                     .offset(x: 2, y: cutY).allowsHitTesting(false)
-                ForEach(ed.project.cuts) { c in
-                    CutBlock(ed: ed, cut: c, w: w, d: d).frame(width: max(6, x(c.end) - x(c.start)), height: cutH)
-                        .offset(x: x(c.start), y: cutY)
+                ForEach(ed.pieces, id: \.start) { p in
+                    PieceBlock(ed: ed, piece: p).frame(width: max(4, x(p.end) - x(p.start)), height: cutH)
+                        .offset(x: x(p.start), y: cutY)
+                }
+                ForEach(ed.removedCuts) { c in
+                    CutSeam(ed: ed, cut: c).offset(x: x(c.start) - 8, y: cutY + (cutH - 16) / 2)
                 }
                 // 建议加速：虚线半透明，块上直接点 ✓ 采纳 / ✕ 忽略
                 ForEach(ed.suggestions) { g in
@@ -1653,7 +1672,9 @@ struct TimelineStrip: View {
                     ed.dragBegin()
                     ed.dragUpdate { p in
                         // p 是按下那一刻的工程：起点值 + 拖了多远，不会越拖越歪
-                        let t = TimelineMath.trim(start: isStart, base: (p.trimStart, p.trimEnd), dx: v.translation.width, width: w, duration: d)
+                        // 时间轴按可见时间排（删掉的段合拢）：把拖动距离加在可见时间上，再换回素材时间
+                        let raw = ed.srcTime(vis: ed.visTime(isStart ? p.trimStart : p.trimEnd) + v.translation.width / w * d)
+                        let t = isStart ? min(max(0, raw), p.trimEnd - 0.5) : max(min(ed.duration, raw), p.trimStart + 0.5)
                         if isStart { p.trimStart = t } else { p.trimEnd = t }
                     }
                     ed.seek(isStart ? ed.project.trimStart : ed.project.trimEnd)
@@ -1986,7 +2007,7 @@ struct VoiceBlock: View {
                 let dt = v.translation.width / w * d
                 ed.dragUpdate { p in
                     guard let i = p.voiceovers.firstIndex(where: { $0.id == clip.id }) else { return }
-                    p.voiceovers[i].start = VoiceDrag.move(clip, dt: dt, duration: d)
+                    p.voiceovers[i].start = VoiceDrag.move(clip, dt: dt, duration: ed.duration)
                 }
             }
             .onEnded { _ in ed.dragEnd() })

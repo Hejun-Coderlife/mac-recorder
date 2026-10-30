@@ -494,11 +494,12 @@ struct StudioProject: Codable, Equatable {
     var redactions: [Redaction] = []    // 遮挡（模糊 / 马赛克 / 色块；原画面位置、素材时间；Windows 版还没有）
     var annotations: [Annotation] = []  // 标注（箭头 / 框 / 圈 / 高亮 / 文字；Windows 版还没有）
     var music = MusicTrack()            // 背景音乐（成片时间；Windows 版还没有）
+    var splits: [Double] = []           // 剪辑轨上的分割点（素材时间；只影响怎么切成一段段，不改成片）
 
     init(segments: [ZoomSegment] = [], trimStart: Double = 0, trimEnd: Double = 0, look: StudioLook = StudioLook()) {
         self.segments = segments; self.trimStart = trimStart; self.trimEnd = trimEnd; self.look = look
     }
-    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look, segmentsEdited, cuts, audio, voiceovers, captions, captionStyle, camera, layouts, redactions, annotations, music }
+    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look, segmentsEdited, cuts, audio, voiceovers, captions, captionStyle, camera, layouts, redactions, annotations, music, splits }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         segments = try c.decodeIfPresent([ZoomSegment].self, forKey: .segments) ?? []
@@ -516,6 +517,7 @@ struct StudioProject: Codable, Equatable {
         redactions = (try? c.decodeIfPresent([Redaction].self, forKey: .redactions)) ?? []
         annotations = (try? c.decodeIfPresent([Annotation].self, forKey: .annotations)) ?? []
         music = (try? c.decodeIfPresent(MusicTrack.self, forKey: .music)) ?? MusicTrack()
+        splits = (try? c.decodeIfPresent([Double].self, forKey: .splits)) ?? []
     }
 
     static func url(_ dir: URL) -> URL { dir.appendingPathComponent("project.json") }
