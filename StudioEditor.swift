@@ -105,6 +105,8 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     @Published var ttsVoice = UserDefaults.standard.string(forKey: "ttsVoice") ?? "" { didSet { UserDefaults.standard.set(ttsVoice, forKey: "ttsVoice") } }
     @Published var ttsRate = UserDefaults.standard.object(forKey: "ttsRate") as? Double ?? 1.0 { didSet { UserDefaults.standard.set(ttsRate, forKey: "ttsRate") } }
     let previewSynth = AVSpeechSynthesizer()
+    var previewPlayer: AVAudioPlayer?
+    @Published var previewing = false
     @Published var revealSection: String?                // 让样式面板展开并滚到某一节
     @Published var suggestNone = false                   // 点了「建议加速」但没找到：提示条显示几秒
     private var duckNow: Float = 1             // 预览里原声音现在压到多少（有讲解时 0.25）

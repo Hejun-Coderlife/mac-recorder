@@ -29,7 +29,7 @@ enum TTSEngine: String, CaseIterable, Identifiable {
         }
     }
     // 每家可选的声音：(值, 显示名)
-    var voices: [(String, String)] {
+    @MainActor var voices: [(String, String)] {
         switch self {
         case .local: LocalTTS.voices
         case .azure: [("zh-CN-YunxiNeural", L("云希（男，年轻）", "Yunxi (male)")), ("zh-CN-YunjianNeural", L("云健（男，浑厚）", "Yunjian (male)")),

@@ -7,7 +7,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -parse-as-library -swift-version 5 -target arm64-apple-macos15.0 \
   -framework ScreenCaptureKit -framework AVFoundation -framework Carbon -framework CoreImage -framework VideoToolbox -framework MediaToolbox -framework Speech -framework Metal \
-  Recorder.swift Studio.swift StudioEditor.swift Captions.swift Denoise.swift Keys.swift Recents.swift Camera.swift Overlays.swift OverlayEditor.swift Music.swift SpeedSuggest.swift EditorExtras.swift Pieces.swift Control.swift Speak.swift AIConnect.swift DTest.swift Updater.swift -o "$APP/Contents/MacOS/Recorder"
+  Recorder.swift Studio.swift StudioEditor.swift Captions.swift Denoise.swift Keys.swift Recents.swift Camera.swift Overlays.swift OverlayEditor.swift Music.swift SpeedSuggest.swift EditorExtras.swift Pieces.swift Control.swift Speak.swift AIConnect.swift TTSEngines.swift DTest.swift Updater.swift -o "$APP/Contents/MacOS/Recorder"
 cp AppIcon.icns "$APP/Contents/Resources/"
 # 本机 AI 配音（sherpa-onnx，Apache-2.0；onnxruntime，MIT）：程序打进 App，声音模型第一次用时再下载
 if [ ! -f vendor/sherpa/sherpa-onnx-offline-tts ]; then

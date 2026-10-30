@@ -14,6 +14,21 @@ enum Main {
     static func main() {
         if CommandLine.arguments.contains("--mcp") { MCPBridge.run() }
         if let i = CommandLine.arguments.firstIndex(of: "ctl") { ControlCLI.run(Array(CommandLine.arguments[(i + 1)...])) }
+        // 自测：TTSTEST=1 → 下载声音模型（没下过的话）、用本机 AI 声音念一句，打印结果后退出
+        if ProcessInfo.processInfo.environment["TTSTEST"] != nil {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                let t0 = Date()
+                do {
+                    try await LocalTTS.shared.ensureModel()
+                    let out = URL(fileURLWithPath: "/tmp/tts-test.wav")
+                    try await LocalTTS.synth("你好，这是本机 AI 配音的测试。", sid: "58", speed: 1, to: out)
+                    print("TTSTEST OK", String(format: "%.1fs", Date().timeIntervalSince(t0)), audioLength(out) ?? 0)
+                } catch { print("TTSTEST FAIL", error.localizedDescription) }
+                exit(0)
+            }
+            RunLoop.main.run()
+        }
         RecorderApp.main()
     }
 }
@@ -255,7 +270,10 @@ enum ControlTools {
 
     static func speak(_ a: [String: Any]) async throws -> [String: Any] {
         let e = try await editor(a)
-        if let v = a["voice"] as? String { e.ttsVoice = Speech.voices.first { $0.name.lowercased() == v.lowercased() || $0.identifier == v }?.identifier ?? e.ttsVoice }
+        if let v = a["voice"] as? String {
+            let en = TTSPrefs.engine
+            if let m = en.voices.first(where: { $0.0.lowercased() == v.lowercased() || $0.1.lowercased().contains(v.lowercased()) }) { TTSPrefs.setVoice(en, m.0) }
+        }
         if let r = a["rate"] as? Double { e.ttsRate = min(max(r, 0.5), 1.6) }
         let ids = (a["caption_ids"] as? [String])?.compactMap(UUID.init(uuidString:))
         let before = e.project.voiceovers.count
@@ -401,7 +419,7 @@ enum ControlDocs {
         tool("speak_captions", "Turn captions into a spoken voiceover with a macOS voice (on device). Write the captions first with update_project.", [
             "project": projectProp,
             "caption_ids": ["type": "array", "items": ["type": "string"], "description": "Only these captions (default: all with text)"],
-            "voice": ["type": "string", "description": "Voice name, e.g. Tingting, Meijia, Samantha (default: best for the language)"],
+            "voice": ["type": "string", "description": "Voice of the engine chosen in the app (e.g. 女声 1, 男声 2, zh-CN-YunxiNeural, alloy, Cherry). Default: the app's current choice"],
             "rate": ["type": "number", "description": "Speed 0.5–1.6, default 1"],
         ], required: ["project"]),
         tool("export_video", "Export the finished video. Returns the file path when done.", [
