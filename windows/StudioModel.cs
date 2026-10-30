@@ -24,12 +24,13 @@ namespace ScreenRecorder
     sealed class StudioLook
     {
         // 名字和 Mac 版 project.json 里的字一样
-        public static readonly string[] Aspects = { "original", "16:9", "9:16", "1:1", "4:3" };
+        public static readonly string[] Aspects = { "original", "16:9", "9:16", "1:1", "4:3", "custom" };
         public static readonly string[] Backgrounds = { "color", "gradient", "wallpaper", "image" };   // Mac 还有 transparent（Windows 当白色）
         public static readonly string[] Blurs = { "off", "light", "medium", "strong" };
         public static readonly string[] Clicks = { "soft", "mouse", "thock", "wood", "pop", "tick" };
 
         public string Aspect = "original";
+        public double AspectW = 21, AspectH = 9;   // 自定义比例（宽:高）
         public string Background = "color";
         public RGB Color = RGB.White;
         public RGB Gradient0 = new RGB(0.36, 0.40, 0.96), Gradient1 = new RGB(0.86, 0.43, 0.78);
@@ -69,7 +70,12 @@ namespace ScreenRecorder
         {
             get
             {
-                switch (Aspect) { case "16:9": return 16.0 / 9; case "9:16": return 9.0 / 16; case "1:1": return 1; case "4:3": return 4.0 / 3; default: return null; }
+                switch (Aspect)
+                {
+                    case "16:9": return 16.0 / 9; case "9:16": return 9.0 / 16; case "1:1": return 1; case "4:3": return 4.0 / 3;
+                    case "custom": return AspectW > 0 && AspectH > 0 ? Math.Min(Math.Max(AspectW / AspectH, 0.25), 4) : (double?)null;
+                    default: return null;
+                }
             }
         }
 
@@ -114,7 +120,7 @@ namespace ScreenRecorder
         {
             var w = new JsonW();
             w.Begin();
-            w.Str("aspect", Aspect); w.Str("background", MacTransparent && Background == "color" && Color.Same(RGB.White) ? "transparent" : Background);
+            w.Str("aspect", Aspect); w.Num("aspectH", AspectH); w.Num("aspectW", AspectW); w.Str("background", MacTransparent && Background == "color" && Color.Same(RGB.White) ? "transparent" : Background);
             w.Str("blur", Blur); w.Bool("clickSound", ClickSound); w.Str("clickStyle", ClickStyle);
             w.Rgb("color", Color); w.Num("cornerRadius", CornerRadius); w.Num("cursorScale", CursorScale);
             w.Rgb("gradient0", Gradient0); w.Rgb("gradient1", Gradient1); w.Num("gradientAngle", GradientAngle);
@@ -131,7 +137,7 @@ namespace ScreenRecorder
         }
 
         public static StudioLook FromJson(string json) => From(Json.Parse(json) as Dictionary<string, object>);
-        static readonly string[] Known = { "aspect", "background", "blur", "clickSound", "clickStyle", "color", "cornerRadius", "cursorScale", "gradient0", "gradient1", "gradientAngle",
+        static readonly string[] Known = { "aspect", "aspectW", "aspectH", "background", "blur", "clickSound", "clickStyle", "color", "cornerRadius", "cursorScale", "gradient0", "gradient1", "gradientAngle",
                                            "hideAfter", "hideIdleCursor", "imageBookmark", "imagePath", "padding", "ripple", "shadow", "shadowBlur", "smoothing", "wallpaper",
                                            "showKeys", "keysAt", "keysSize", "keysDark", "zoomSpeed", "cursorLoop", "cursorLoopSec", "loopZoomOut" };
 
@@ -141,6 +147,7 @@ namespace ScreenRecorder
             if (o == null) return z;
             var j = new JsonR(o);
             z.Aspect = j.Str("aspect", z.Aspect, Aspects);
+            z.AspectW = j.Num("aspectW", z.AspectW); z.AspectH = j.Num("aspectH", z.AspectH);
             var bg = j.Str("background", "color");
             z.Background = bg == "transparent" ? "color" : Backgrounds.Contains(bg) ? bg : "color";
             // Mac 的透明背景：Windows 上按白色画
@@ -235,9 +242,11 @@ namespace ScreenRecorder
         public List<Redaction> Redactions = new List<Redaction>();      // 遮挡（模糊 / 马赛克 / 色块；原画面位置、素材时间）
         public List<Annotation> Annotations = new List<Annotation>();   // 标注（箭头 / 框 / 圈 / 高亮 / 文字；原画面位置、素材时间）
         public MusicTrack Music = new MusicTrack();                     // 背景音乐（成片时间）
+        public List<double> Splits = new List<double>();                 // 剪辑轨上的分割点（素材时间；只决定怎么切成一段段）
+        public List<double[]> KeyMutes = new List<double[]>();          // 这些段（素材时间 [起, 止]）里不要打字声
         // Mac 版有、Windows 还没有的（摄像头、遮挡、标注、背景音乐……）：原样留着，存回去不丢
         public Dictionary<string, object> Extra = new Dictionary<string, object>();
-        static readonly string[] Known = { "look", "segments", "segmentsEdited", "trimEnd", "trimStart", "cuts", "audio", "voiceovers", "captions", "captionStyle", "camera", "layouts", "redactions", "annotations", "music" };
+        static readonly string[] Known = { "look", "segments", "segmentsEdited", "trimEnd", "trimStart", "cuts", "audio", "voiceovers", "captions", "captionStyle", "camera", "layouts", "redactions", "annotations", "music", "splits", "keyMutes" };
 
         public StudioProject Clone() => FromJson(ToJson());
         public bool Same(StudioProject o) => o != null && ToJson() == o.ToJson();
@@ -264,6 +273,8 @@ namespace ScreenRecorder
             w.BeginArray("redactions"); foreach (var r in Redactions) r.Write(w); w.EndArray();
             w.BeginArray("segments"); foreach (var s in Segments) WriteSeg(w, s); w.EndArray();
             w.Bool("segmentsEdited", SegmentsEdited);
+            if (KeyMutes.Count > 0) w.Raw("keyMutes", "[" + string.Join(",", KeyMutes.Select(m => "[" + JsonW.N(m[0]) + "," + JsonW.N(m[1]) + "]")) + "]");
+            if (Splits.Count > 0) w.Raw("splits", "[" + string.Join(",", Splits.Select(JsonW.N)) + "]");
             w.Num("trimEnd", TrimEnd); w.Num("trimStart", TrimStart);
             w.BeginArray("voiceovers"); foreach (var v in Voiceovers) v.Write(w); w.EndArray();
             w.Extra(Extra);
@@ -321,6 +332,9 @@ namespace ScreenRecorder
             if (o.TryGetValue("annotations", out var anv) && anv is List<object> ans) p.Annotations = ans.OfType<Dictionary<string, object>>().Select(Annotation.From).Where(x => x != null).ToList();
             p.Music = MusicTrack.From(o.TryGetValue("music", out var mv) ? mv as Dictionary<string, object> : null);
             if (o.TryGetValue("layouts", out var lv) && lv is List<object> ls) p.Layouts = ls.OfType<Dictionary<string, object>>().Select(CameraLayoutSeg.From).Where(x => x != null).OrderBy(x => x.Start).ToList();
+            if (o.TryGetValue("splits", out var spv) && spv is List<object> sps) p.Splits = sps.Select(x => Convert.ToDouble(x, CultureInfo.InvariantCulture)).OrderBy(x => x).ToList();
+            if (o.TryGetValue("keyMutes", out var kmv) && kmv is List<object> kms)
+                p.KeyMutes = kms.OfType<List<object>>().Where(x => x.Count == 2).Select(x => new[] { Convert.ToDouble(x[0], CultureInfo.InvariantCulture), Convert.ToDouble(x[1], CultureInfo.InvariantCulture) }).ToList();
             p.Extra = JsonR.Unknown(o, Known);
             return p;
         }

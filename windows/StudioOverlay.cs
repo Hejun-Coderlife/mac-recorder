@@ -12,7 +12,7 @@ namespace ScreenRecorder
     // 遮挡一块：x、y、w、h 是原画面里的比例（左上为原点）；字段名同 Mac 版
     sealed class Redaction
     {
-        public static readonly string[] Styles = { "blur", "mosaic", "solid" };
+        public static readonly string[] Styles = { "blur", "mosaic", "solid", "frosted", "spotlight", "focus" };   // 后三种是 Mac 新加的（W6 前：毛玻璃按模糊画，聚光灯 / 聚焦先不画）
         public string Id = Guid.NewGuid().ToString().ToUpperInvariant();
         public double Start, End;
         public double X, Y, W, H;
@@ -151,10 +151,11 @@ namespace ScreenRecorder
             var (x0, y0, x1, y1) = PixelRect(r, W, H);
             int rw = x1 - x0, rh = y1 - y0;
             if (rw < 2 || rh < 2) return;
+            if (r.Style == "spotlight" || r.Style == "focus") return;   // 处理的是框外面：W6 再做
             double k = Math.Min(Math.Max(r.Strength, 0), 1);
             // 效果图（只算这一块）：BGR 三个通道
             var eff = new float[rw * rh * 3];
-            if (r.Style == "blur")
+            if (r.Style == "blur" || r.Style == "frosted")
             {
                 double sigma = (3 + 22 * k) * unit;
                 int m = (int)Math.Ceiling(sigma * 3);

@@ -164,7 +164,7 @@ namespace ScreenRecorder
     sealed class CaptionStyle
     {
         public static readonly string[] Weights = { "regular", "medium", "semibold" };
-        public static readonly string[] Boxes = { "none", "dark", "light" };
+        public static readonly string[] Boxes = { "none", "dark", "light", "glass" };   // glass：Mac 的玻璃底（W6 前先按深色画）
         public static readonly string[] Positions = { "bottom", "top" };
         public bool Show = true;
         public string Weight = "semibold";
@@ -358,7 +358,7 @@ namespace ScreenRecorder
             bool box = st.Box != "none";
             int bold = st.Weight == "regular" ? 0 : 1;
             // 底色条：BorderStyle 3 = 不透明框（用 OutlineColour 当框的颜色）；不要底色条时 BorderStyle 1 = 描边 + 阴影
-            string outline = box ? (st.Box == "dark" ? "&H66000000" : "&H1FFFFFFF") : "&H26000000";
+            string outline = box ? (st.Box == "light" ? "&H1FFFFFFF" : "&H66000000") : "&H26000000";
             double ow = box ? px * 0.22 : st.Outline ? Math.Max(1, px * 0.06) : 0, sh = st.Shadow && !box ? Math.Max(1, px * 0.05) : 0;
             var sb = new StringBuilder();
             sb.Append("[Script Info]\nScriptType: v4.00+\nWrapStyle: 2\nScaledBorderAndShadow: yes\n");

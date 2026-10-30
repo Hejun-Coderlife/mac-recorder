@@ -55,6 +55,7 @@ if (args.Length > 0 && args[0] == "w3")
     { Console.Write(res); ok &= res.TrimEnd().EndsWith(" OK"); }
     return ok ? 0 : 1;
 }
+if (args.Length > 0 && args[0] == "w5") { var res = StudioTestsW5.Rules(); Console.Write(res); return res.TrimEnd().EndsWith(" OK") ? 0 : 1; }
 if (args.Length > 0 && args[0] == "w4")
 {
     bool ok = true;
