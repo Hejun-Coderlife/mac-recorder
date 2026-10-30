@@ -68,8 +68,9 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         x.annotations = []; y.annotations = []; x.redactions = []; y.redactions = []
         return x == y
     }
+    @Published var selectedBurst: Double?                // 音效轨上选中的那阵打字（起点）
     @Published var selectedPiece: Double?                // 剪辑轨上选中的那段（起点）
-    @Published var selected: UUID? { didSet { if selected != nil { selectedPiece = nil }; if let c = editingCaption, selected != c { editingCaption = nil }; if let c = editingCaptionOnPreview, selected != c { editingCaptionOnPreview = nil }   // 点了别处：字幕块收起编辑
+    @Published var selected: UUID? { didSet { if selected != nil { selectedPiece = nil; selectedBurst = nil }; if let c = editingCaption, selected != c { editingCaption = nil }; if let c = editingCaptionOnPreview, selected != c { editingCaptionOnPreview = nil }   // 点了别处：字幕块收起编辑
         ; if let n = editingNote, selected != n { endNote() } } }   // 选了别的：正在改的字先收好
     @Published var time = 0.0
     @Published var playing = false { didSet { box.playing = playing; if !playing { musicPlayer.pauseAll(); if oldValue { redrawPausedFrame() } } } }
@@ -870,6 +871,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         selected = seg.id
     }
     func deleteSelected() {
+        if let b = currentBurst { setBurstSound(b, !burstOn(b)); return }
         if let p = currentPiece { deletePiece(p); return }
         if let i = cutIndex(selected), project.cuts[i].mode == .cut { restoreCut(project.cuts[i].id); return }   // 选中小剪刀按 Delete = 恢复
         if let i = redactionIndex(selected) { edit { $0.redactions.remove(at: i) }; selected = nil; return }
@@ -1178,7 +1180,8 @@ struct EditorView: View {
                     controlBar.padding(.horizontal, 14).padding(.vertical, 8)
                     Divider()
                     VStack(alignment: .leading, spacing: 10) {
-                        if ed.currentPiece != nil { PieceInspector(ed: ed).frame(height: 30) }   // 选中剪辑轨上的一段
+                        if ed.currentBurst != nil { BurstInspector(ed: ed).frame(height: 30) }
+                        else if ed.currentPiece != nil { PieceInspector(ed: ed).frame(height: 30) }   // 选中剪辑轨上的一段
                         else if ed.redactionIndex(ed.selected) != nil { RedactionInspector(ed: ed).frame(height: 30) }   // 选中遮挡
                         else if ed.annotationIndex(ed.selected) != nil { AnnotationInspector(ed: ed).frame(height: 30) }   // 选中标注
                         else if ed.captionIndex(ed.selected) != nil { captionInspector.frame(height: 30) }   // 选中字幕
@@ -1684,7 +1687,8 @@ struct TimelineGestures: NSViewRepresentable {
 // 时间轴各条轨的纵向位置（遮挡 / 标注按叠了几层算高度）
 struct TimelineLanes {
     static let row = 20.0, gap = 2.0
-    let redY = 176.0, redH: Double, annY: Double, annH: Double, musY: Double, layY: Double, total: Double
+    static let sfxY = 176.0, sfxH = 20.0   // 音效轨（打字声）
+    let redY = 200.0, redH: Double, annY: Double, annH: Double, musY: Double, layY: Double, total: Double
     let redRows: Int, annRows: Int
     @MainActor init(_ ed: StudioEditor) {
         redRows = max(1, OverlayBlock.pack(ed.project.redactions.map { ($0.id, $0.start, $0.end) }).values.map { $0.1 }.max() ?? 1)
@@ -1704,6 +1708,7 @@ struct TrackHeaders: View {
         let items: [(Double, Double, String, String)] = [
             (38, 20, "scissors", L("片段", "Clips")), (64, 40, "plus.magnifyingglass", L("推近", "Zoom")),
             (112, 26, "mic", L("讲解", "Voice")), (144, 26, "captions.bubble", L("字幕", "Captions")),
+            (TimelineLanes.sfxY, TimelineLanes.sfxH, "keyboard", L("打字声", "Typing")),
             (ln.redY, ln.redH, "eye.slash", L("遮挡", "Redact")), (ln.annY, ln.annH, "pencil.tip.crop.circle", L("标注", "Notes")),
             (ln.musY, 22, "music.note", L("音乐", "Music")),
         ] + (ed.hasCamera ? [(ln.layY, 22, "person.crop.circle", L("小窗", "Camera"))] : [])
@@ -1811,6 +1816,14 @@ struct TimelineStrip: View {
                 ForEach(ed.project.captions) { c in
                     CaptionBlock(ed: ed, cap: c, w: w, d: d).frame(width: max(6, x(c.end) - x(c.start)), height: capH)
                         .offset(x: x(c.start), y: capY)
+                }
+                // 音效轨：每一阵打字一块（里面的竖线是每一下按键）；选中按 Delete 去掉这阵打字声，再按一次恢复
+                RoundedRectangle(cornerRadius: 5).fill(Color.secondary.opacity(0.07)).frame(width: w - 4, height: TimelineLanes.sfxH)
+                    .overlay(Text(ed.track.keys.isEmpty ? L("录制时没有打字", "No typing recorded") : "").font(.system(size: 9)).foregroundStyle(.secondary).padding(.leading, 8), alignment: .leading)
+                    .offset(x: 2, y: TimelineLanes.sfxY).allowsHitTesting(false)
+                ForEach(ed.keyBursts, id: \.start) { b in
+                    KeyBurstBlock(ed: ed, burst: b, x: x).frame(width: max(8, x(b.end) - x(b.start)), height: TimelineLanes.sfxH)
+                        .offset(x: x(b.start), y: TimelineLanes.sfxY)
                 }
                 // 遮挡轨、标注轨：每个一块，可以叠在一起
                 RoundedRectangle(cornerRadius: 5).fill(Color.secondary.opacity(0.07)).frame(width: w - 4, height: redH)

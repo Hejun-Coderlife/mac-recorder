@@ -184,3 +184,88 @@ struct PieceInspector: View {
         }
     }
 }
+
+// ---- 音效轨：打字声按「一阵一阵」显示（按键间隔不到 1.2 秒算同一阵）----
+struct KeyBurst: Equatable { let start: Double, end: Double, keys: [Double] }
+
+extension StudioEditor {
+    var keyBursts: [KeyBurst] {
+        let ks = track.keys.filter { $0 >= project.trimStart && $0 < project.trimEnd && !timeMap.inCut($0) }.sorted()
+        var out: [KeyBurst] = [], cur: [Double] = []
+        for k in ks {
+            if let l = cur.last, k - l > 1.2 { out.append(KeyBurst(start: cur[0] - 0.08, end: cur.last! + 0.2, keys: cur)); cur = [] }
+            cur.append(k)
+        }
+        if !cur.isEmpty { out.append(KeyBurst(start: cur[0] - 0.08, end: cur.last! + 0.2, keys: cur)) }
+        return out
+    }
+    var currentBurst: KeyBurst? { selectedBurst.flatMap { s in keyBursts.first { abs($0.start - s) < 1e-6 } } }
+    // 这阵打字有没有声音（有任何一下响就算有）
+    func burstOn(_ b: KeyBurst) -> Bool { b.keys.contains { project.keySounds(at: $0) } }
+    func setBurstSound(_ b: KeyBurst, _ on: Bool) {
+        edit { pr in
+            var out: [[Double]] = []
+            for m in pr.keyMutes where m.count == 2 {
+                if m[1] <= b.start || m[0] >= b.end { out.append(m); continue }
+                if m[0] < b.start { out.append([m[0], b.start]) }
+                if m[1] > b.end { out.append([b.end, m[1]]) }
+            }
+            if !on { out.append([b.start, b.end]) }
+            pr.keyMutes = out.sorted { $0[0] < $1[0] }
+            if on && !pr.look.typeSound { pr.look.typeSound = true }
+        }
+        selectedBurst = b.start
+        showToast(on ? L("这阵打字声恢复了", "Typing sound restored here") : L("这阵打字声去掉了 · 再按 Delete 恢复", "Typing sound removed here · press Delete again to restore"))
+    }
+}
+
+struct KeyBurstBlock: View {
+    @ObservedObject var ed: StudioEditor
+    let burst: KeyBurst
+    let x: (Double) -> Double
+    var body: some View {
+        let sel = ed.selectedBurst.map { abs($0 - burst.start) < 1e-6 } ?? false
+        let on = ed.burstOn(burst)
+        let tint = Color(red: 0.55, green: 0.42, blue: 0.95)
+        let x0 = x(burst.start)
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 5).fill(on ? tint.opacity(sel ? 0.95 : 0.75) : Color.secondary.opacity(sel ? 0.35 : 0.18))
+            RoundedRectangle(cornerRadius: 5).stroke(sel ? Color.white : Color.clear, lineWidth: 2)
+            // 每一下按键一根竖线
+            Canvas { ctx, size in
+                for k in burst.keys {
+                    let px = x(k) - x0
+                    let k_on = ed.project.keySounds(at: k)   // 这一下响不响（被静音的画淡）
+                    ctx.fill(Path(CGRect(x: px - 0.6, y: size.height * 0.25, width: 1.2, height: size.height * 0.5)), with: .color(.white.opacity(k_on ? 0.9 : 0.25)))
+                }
+            }
+            if !on {
+                Image(systemName: "speaker.slash.fill").font(.system(size: 8)).foregroundStyle(.secondary).padding(.leading, 4)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { ed.selected = nil; ed.selectedPiece = nil; ed.selectedBurst = burst.start; ed.picking = false }
+        .contextMenu {
+            Button(on ? L("去掉这阵打字声", "Remove Typing Sound") : L("恢复这阵打字声", "Restore Typing Sound")) { ed.setBurstSound(burst, !on) }
+        }
+        .help(L("打字声：\(burst.keys.count) 下。选中按 Delete 去掉 / 恢复", "Typing: \(burst.keys.count) keys. Select and press Delete to remove / restore"))
+    }
+}
+
+struct BurstInspector: View {
+    @ObservedObject var ed: StudioEditor
+    var body: some View {
+        if let b = ed.currentBurst {
+            let on = ed.burstOn(b)
+            HStack(spacing: 12) {
+                Label(L("打字声", "Typing sound"), systemImage: "keyboard").font(.callout.weight(.semibold))
+                Text(clock(max(0, b.start)) + " – " + clock(b.end)).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                Text(L("\(b.keys.count) 下", "\(b.keys.count) keys")).font(.callout).foregroundStyle(.secondary)
+                Spacer()
+                Button(role: on ? .destructive : nil) { ed.setBurstSound(b, !on) } label: {
+                    Label(on ? L("去掉这阵打字声", "Remove") : L("恢复", "Restore"), systemImage: on ? "speaker.slash" : "speaker.wave.2")
+                }
+            }.controlSize(.small)
+        }
+    }
+}
