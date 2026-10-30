@@ -148,26 +148,34 @@ final class OverlayLayer: @unchecked Sendable {
         guard R.width > 2, R.height > 2 else { return img }
         return lens(img, rect: R, radius: R.height / 2, strength: 1, dark: a.textLook == .glassDark, alpha: alpha)
     }
-    // 一块玻璃透镜：rect 里圆角 radius；strength 越大边缘放大越多（点击的玻璃波纹也用它）
+    // 一块玻璃透镜（像苹果 Liquid Glass）：中间清楚不糊；越靠边，越往外取背景——背景的线条到边上会顺着形状弯过去、挤在边缘。
+    // 每个点按离边多远、往哪个方向算该取哪儿（圆角矩形的距离场），strength 越大弯得越厉害
+    nonisolated(unsafe) static let lensKernel = CIWarpKernel(source: """
+    kernel vec2 lens(vec4 r, float rad, float edge, float depth) {
+      vec2 p = destCoord();
+      vec2 c = r.xy + r.zw * 0.5;
+      vec2 q = abs(p - c) - (r.zw * 0.5 - vec2(rad));
+      float d = -(length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - rad);
+      if (d <= 0.0) return p;
+      vec2 n = (q.x > 0.0 && q.y > 0.0) ? normalize(q) : (q.x > q.y ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
+      n = n * sign(p - c);
+      float t = clamp(1.0 - d / edge, 0.0, 1.0);
+      return p + n * depth * t * t;
+    }
+    """)
     static func lens(_ img: CIImage, rect R: CGRect, radius rad: Double, strength: Double, dark: Bool, alpha: Double) -> CIImage {
-        let src = img.clampedToExtent()
-        let tone: [String: Any] = [kCIInputSaturationKey: 1.35, kCIInputBrightnessKey: dark ? -0.05 : 0.035]
         let s = min(R.width, R.height)
-        let center = src.applyingGaussianBlur(sigma: max(0.6, s * 0.012)).applyingFilter("CIColorControls", parameters: tone).cropped(to: R)
-        let k = 1 + 0.32 * strength, cx = R.midX, cy = R.midY
-        let mag = src.transformed(by: CGAffineTransform(translationX: -cx, y: -cy).concatenating(CGAffineTransform(scaleX: k, y: k)).concatenating(CGAffineTransform(translationX: cx, y: cy)))
-            .applyingGaussianBlur(sigma: max(1, s * 0.03)).applyingFilter("CIColorControls", parameters: tone).cropped(to: R)
-        func shape(_ r: CGRect, _ rr: Double) -> CIImage {
-            CIFilter(name: "CIRoundedRectangleGenerator", parameters: ["inputExtent": CIVector(cgRect: r), "inputRadius": max(0, rr), "inputColor": CIColor.white])!.outputImage!
-        }
-        // 中间到边缘慢慢过渡（越靠边放大得越明显），不是一道硬边
-        let inset = s * 0.3
-        let inner = shape(R.insetBy(dx: inset, dy: inset), max(0, rad - inset)).applyingGaussianBlur(sigma: inset * 0.7).cropped(to: R)
-        var fx = center.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: mag, kCIInputMaskImageKey: inner.composited(over: CIImage(color: .black).cropped(to: R))])
+        guard s > 2 else { return img }
+        let edge = s * 0.5, depth = s * 0.4 * strength
+        let src = img.clampedToExtent()
+        var fx = (lensKernel?.apply(extent: R, roiCallback: { _, r in r.insetBy(dx: -depth - 2, dy: -depth - 2) }, image: src,
+                                    arguments: [CIVector(cgRect: R), min(rad, s / 2), edge, depth]) ?? src.cropped(to: R))
+            .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 1.15, kCIInputBrightnessKey: dark ? -0.06 : 0.035])
+            .cropped(to: R)
         if alpha < 0.998 { fx = fx.applyingFilter("CIColorMatrix", parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: alpha)]) }
-        // 外形边缘也柔一点（不是剪纸一样的硬边）
-        let outer = shape(R, rad).applyingGaussianBlur(sigma: max(0.5, s * 0.01)).cropped(to: R)
-        return fx.composited(over: img).applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: img, kCIInputMaskImageKey: outer.composited(over: CIImage(color: .black).cropped(to: img.extent))])
+        let shape = CIFilter(name: "CIRoundedRectangleGenerator", parameters: ["inputExtent": CIVector(cgRect: R), "inputRadius": max(0, min(rad, s / 2)), "inputColor": CIColor.white])!.outputImage!
+            .applyingGaussianBlur(sigma: max(0.4, s * 0.006)).cropped(to: R)
+        return fx.composited(over: img).applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: img, kCIInputMaskImageKey: shape.composited(over: CIImage(color: .black).cropped(to: img.extent))])
     }
 
     static func redact(_ img: CIImage, _ r: Redaction, space sp: Space, unit: Double) -> CIImage {
@@ -356,21 +364,21 @@ final class OverlayLayer: @unchecked Sendable {
                 c.setShadow(offset: CGSize(width: 0, height: -px * 0.06), blur: px * 0.35, color: soft)
                 c.setFillColor(CGColor(gray: 0.08, alpha: 0.78)); c.addPath(capsule); c.fillPath()
             case .glass, .glassDark:
-                // 像苹果 Liquid Glass：没有描边线；背后的画面在 apply 里已经做了（中间几乎透明、边缘放大折射）。
-                // 这里只加：浮起的柔和阴影、一点点色、左上一团柔光高光、右下一点反光
+                // 像苹果 Liquid Glass：背后的画面在 apply 里用透镜弯过（边缘折射）。这里只加体积感，不画描边线：
+                // 浮起的柔影、边缘一圈往里渐淡的内阴影、上沿一点柔光
                 let dark = look == .glassDark
-                c.setShadow(offset: CGSize(width: 0, height: -px * 0.14), blur: px * 0.9, color: CGColor(gray: 0, alpha: dark ? 0.3 : 0.16))
-                c.setFillColor(dark ? CGColor(gray: 0.06, alpha: 0.32) : CGColor(gray: 1, alpha: 0.07)); c.addPath(capsule); c.fillPath()
+                c.setShadow(offset: CGSize(width: 0, height: -px * 0.16), blur: px * 1.0, color: CGColor(gray: 0, alpha: dark ? 0.32 : 0.2))
+                c.setFillColor(dark ? CGColor(gray: 0.06, alpha: 0.3) : CGColor(gray: 1, alpha: 0.05)); c.addPath(capsule); c.fillPath()
                 c.setShadow(offset: .zero, blur: 0, color: nil)
-                let space = CGColorSpace(name: CGColorSpace.sRGB)!
-                c.saveGState(); c.addPath(capsule); c.clip()
-                let hi = CGGradient(colorsSpace: space, colors: [CGColor(gray: 1, alpha: dark ? 0.22 : 0.42), CGColor(gray: 1, alpha: 0)] as CFArray, locations: [0, 1])!
-                c.drawRadialGradient(hi, startCenter: CGPoint(x: body.minX + body.height * 0.55, y: body.maxY), startRadius: 0,
-                                     endCenter: CGPoint(x: body.minX + body.height * 0.55, y: body.maxY), endRadius: body.height * 0.95, options: [])
-                let lo = CGGradient(colorsSpace: space, colors: [CGColor(gray: 1, alpha: dark ? 0.1 : 0.2), CGColor(gray: 1, alpha: 0)] as CFArray, locations: [0, 1])!
-                c.drawRadialGradient(lo, startCenter: CGPoint(x: body.maxX - body.height * 0.5, y: body.minY), startRadius: 0,
-                                     endCenter: CGPoint(x: body.maxX - body.height * 0.5, y: body.minY), endRadius: body.height * 0.7, options: [])
-                c.restoreGState()
+                let outer = CGPath(rect: body.insetBy(dx: -px * 2, dy: -px * 2), transform: nil)
+                func inner(_ color: CGColor, offset: CGSize, blur: Double) {
+                    c.saveGState(); c.addPath(capsule); c.clip()
+                    c.setShadow(offset: offset, blur: blur, color: color)
+                    c.addPath(outer); c.addPath(capsule); c.setFillColor(CGColor(gray: 0, alpha: 1)); c.fillPath(using: .evenOdd)
+                    c.restoreGState()
+                }
+                inner(CGColor(gray: 0, alpha: dark ? 0.35 : 0.16), offset: CGSize(width: 0, height: -px * 0.04), blur: px * 0.35)   // 边缘内阴影
+                inner(CGColor(gray: 1, alpha: dark ? 0.35 : 0.75), offset: CGSize(width: 0, height: -px * 0.06), blur: px * 0.12)  // 上沿柔光
             case .gradient:
                 c.setShadow(offset: CGSize(width: 0, height: -px * 0.06), blur: px * 0.35, color: soft)
                 c.addPath(capsule); c.fillPath(); c.setShadow(offset: .zero, blur: 0, color: nil)

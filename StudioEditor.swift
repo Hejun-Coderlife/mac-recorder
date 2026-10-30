@@ -2147,9 +2147,14 @@ struct CaptionBlock: View {
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 5).fill(tint.opacity(sel ? 0.95 : 0.72))
             RoundedRectangle(cornerRadius: 5).stroke(sel ? Color.white : Color.clear, lineWidth: 2)
-            Text(cap.text.isEmpty ? L("双击写字幕", "Double-click to type") : cap.text)
-                .font(.system(size: 10.5, weight: .semibold)).foregroundStyle(.white.opacity(cap.text.isEmpty ? 0.7 : 1))
-                .lineLimit(1).truncationMode(.tail).padding(.horizontal, 9)
+            if ed.editingCaption == cap.id {
+                // 双击 / 新加：直接在黄色块里打字（像剪映），回车或点别处完成，Esc 收起
+                CaptionField(ed: ed, cap: cap, inBlock: true).padding(.horizontal, 9)
+            } else {
+                Text(cap.text.isEmpty ? L("双击写字幕", "Double-click to type") : cap.text)
+                    .font(.system(size: 10.5, weight: .semibold)).foregroundStyle(.white.opacity(cap.text.isEmpty ? 0.7 : 1))
+                    .lineLimit(1).truncationMode(.tail).padding(.horizontal, 9)
+            }
             HStack {
                 edge(isStart: true)
                 Spacer(minLength: 0)
@@ -3162,6 +3167,8 @@ enum StudioTests {
                 ed.addAnnotation(.arrow, OverlayGeo(x: 0.15, y: 0.8, w: 0.15, h: -0.2))
                 ed.addAnnotation(.text, OverlayGeo(x: 0.62, y: 0.7, w: 0, h: 0))
                 ed.typeNote(ed.editingNote!, "点这里")
+                ed.endNote()
+                ed.addCaption(at: 1.0)
                 try? await Task.sleep(for: .seconds(1.5))
                 print("LIVE after", w.windowNumber); fflush(stdout)
                 try? await Task.sleep(for: .seconds(3))
@@ -3384,20 +3391,29 @@ final class DenoiseProgress: @unchecked Sendable {
 struct CaptionField: View {
     @ObservedObject var ed: StudioEditor
     let cap: Caption
+    var inBlock = false          // true = 长在时间轴的黄色字幕块里（双击 / 新加时光标放这儿）
     @State private var text = ""
     @FocusState private var focused: Bool
     var body: some View {
         TextField(L("在这里写字幕（回车完成）", "Type the caption (Return to finish)"), text: $text)
-            .textFieldStyle(.roundedBorder).font(.callout)
+            .textFieldStyle(inBlock ? AnyTextFieldStyle(.plain) : AnyTextFieldStyle(.roundedBorder))
+            .font(inBlock ? .system(size: 10.5, weight: .semibold) : .callout)
+            .foregroundStyle(inBlock ? Color.white : Color.primary)
             .focused($focused)
-            .onAppear { text = cap.text; if ed.editingCaption == cap.id { DispatchQueue.main.async { focused = true } } }
+            .onAppear { text = cap.text; if inBlock && ed.editingCaption == cap.id { DispatchQueue.main.async { focused = true } } }
             .onChange(of: cap.id) { _, _ in text = cap.text }
-            .onChange(of: ed.editingCaption) { _, id in if id == cap.id { text = cap.text; focused = true } }
+            .onChange(of: cap.text) { _, v in if !focused { text = v } }   // 另一处改了：跟上
             .onChange(of: text) { _, v in
                 guard v != cap.text, let i = ed.captionIndex(cap.id) else { return }
                 ed.dragBegin(); ed.dragUpdate { $0.captions[i].text = v.replacingOccurrences(of: "\n", with: " ") }
             }
             .onSubmit { focused = false }
-            .onChange(of: focused) { _, f in if !f { ed.dragEnd(); ed.editingCaption = nil } }
+            .onChange(of: focused) { _, f in if !f { ed.dragEnd(); if inBlock { ed.editingCaption = nil } } }
+            .onExitCommand { focused = false }
     }
+}
+struct AnyTextFieldStyle: TextFieldStyle {
+    private let make: (TextField<_Label>) -> AnyView
+    init<S: TextFieldStyle>(_ s: S) { make = { AnyView($0.textFieldStyle(s)) } }
+    func _body(configuration: TextField<_Label>) -> some View { make(configuration) }
 }
