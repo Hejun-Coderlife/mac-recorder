@@ -218,6 +218,7 @@ struct StudioLook: Codable, Equatable {
     var clickStyle = Click.soft    // 哪种声音：轻点 / 鼠标咔哒 / 低沉 / 木头 / 气泡 / 清脆滴答
     var typeSound = false          // 打字时每按一下加一声键盘声
     var typeStyle = Typing.mechanical
+    var typeMuteFast = false        // 加速的片段不要打字声
     enum Typing: String, Codable, CaseIterable { case mechanical, laptop, clicky, thock }   // 都是真键盘录音（清脆 / 低沉由机械键盘升降调）
     var ripple = true              // 点击波纹
     var rippleStyle = Ripple.ring  // 波纹样子
@@ -237,7 +238,7 @@ struct StudioLook: Codable, Equatable {
     init() {}
     enum CodingKeys: String, CodingKey {
         case aspect, aspectW, aspectH, background, color, gradient0, gradient1, gradientAngle, wallpaper, imagePath, imageBookmark, padding, cornerRadius,
-             shadow, shadowBlur, cursorScale, smoothing, hideIdleCursor, hideAfter, clickSound, clickStyle, typeSound, typeStyle, ripple, rippleStyle, rippleWidth, blur,
+             shadow, shadowBlur, cursorScale, smoothing, hideIdleCursor, hideAfter, clickSound, clickStyle, typeSound, typeStyle, typeMuteFast, ripple, rippleStyle, rippleWidth, blur,
              showKeys, keysAt, keysSize, keysDark, zoomSpeed, cursorLoop, cursorLoopSec, loopZoomOut
     }
     init(from d: Decoder) throws {
@@ -249,7 +250,7 @@ struct StudioLook: Codable, Equatable {
         padding = v(.padding, z.padding); cornerRadius = v(.cornerRadius, z.cornerRadius); shadow = v(.shadow, z.shadow)
         shadowBlur = v(.shadowBlur, z.shadowBlur); cursorScale = v(.cursorScale, z.cursorScale); smoothing = v(.smoothing, z.smoothing)
         hideIdleCursor = v(.hideIdleCursor, z.hideIdleCursor); hideAfter = v(.hideAfter, z.hideAfter); clickSound = v(.clickSound, z.clickSound)
-        clickStyle = v(.clickStyle, z.clickStyle); typeSound = v(.typeSound, z.typeSound); typeStyle = v(.typeStyle, z.typeStyle)
+        clickStyle = v(.clickStyle, z.clickStyle); typeSound = v(.typeSound, z.typeSound); typeStyle = v(.typeStyle, z.typeStyle); typeMuteFast = v(.typeMuteFast, z.typeMuteFast)
         ripple = v(.ripple, z.ripple); rippleStyle = v(.rippleStyle, z.rippleStyle); rippleWidth = v(.rippleWidth, z.rippleWidth); blur = v(.blur, z.blur)
         showKeys = v(.showKeys, z.showKeys); keysAt = v(.keysAt, z.keysAt); keysSize = v(.keysSize, z.keysSize); keysDark = v(.keysDark, z.keysDark)
         zoomSpeed = v(.zoomSpeed, z.zoomSpeed); cursorLoop = v(.cursorLoop, z.cursorLoop); cursorLoopSec = v(.cursorLoopSec, z.cursorLoopSec)
@@ -481,6 +482,16 @@ struct VoiceClip: Codable, Equatable, Identifiable {
     }
 }
 
+extension StudioProject {
+    // 这一刻（素材时间）的按键要不要响：总开关开着、不在静音段里、（勾了的话）不在加速段里
+    func keySounds(at t: Double) -> Bool {
+        guard look.typeSound else { return false }
+        if keyMutes.contains(where: { $0.count == 2 && t >= $0[0] && t < $0[1] }) { return false }
+        if look.typeMuteFast && cuts.contains(where: { $0.mode == .speed && t >= $0.start && t < $0.end }) { return false }
+        return true
+    }
+}
+
 struct StudioProject: Codable, Equatable {
     var segments: [ZoomSegment] = []
     var trimStart = 0.0
@@ -498,11 +509,12 @@ struct StudioProject: Codable, Equatable {
     var annotations: [Annotation] = []  // 标注（箭头 / 框 / 圈 / 高亮 / 文字；Windows 版还没有）
     var music = MusicTrack()            // 背景音乐（成片时间；Windows 版还没有）
     var splits: [Double] = []           // 剪辑轨上的分割点（素材时间；只影响怎么切成一段段，不改成片）
+    var keyMutes: [[Double]] = []       // 这些段（素材时间 [起, 止]）里不要打字声
 
     init(segments: [ZoomSegment] = [], trimStart: Double = 0, trimEnd: Double = 0, look: StudioLook = StudioLook()) {
         self.segments = segments; self.trimStart = trimStart; self.trimEnd = trimEnd; self.look = look
     }
-    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look, segmentsEdited, cuts, audio, voiceovers, captions, captionStyle, camera, layouts, redactions, annotations, music, splits }
+    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look, segmentsEdited, cuts, audio, voiceovers, captions, captionStyle, camera, layouts, redactions, annotations, music, splits, keyMutes }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         segments = try c.decodeIfPresent([ZoomSegment].self, forKey: .segments) ?? []
@@ -521,6 +533,7 @@ struct StudioProject: Codable, Equatable {
         annotations = (try? c.decodeIfPresent([Annotation].self, forKey: .annotations)) ?? []
         music = (try? c.decodeIfPresent(MusicTrack.self, forKey: .music)) ?? MusicTrack()
         splits = (try? c.decodeIfPresent([Double].self, forKey: .splits)) ?? []
+        keyMutes = (try? c.decodeIfPresent([[Double]].self, forKey: .keyMutes)) ?? []
     }
 
     static func url(_ dir: URL) -> URL { dir.appendingPathComponent("project.json") }
@@ -1179,7 +1192,7 @@ final class StudioJob: @unchecked Sendable {
         last = max(first + 1, min(plan.count, Int((wp.trimEnd * fps).rounded())))
         srcEnd = p.trimEnd
         clickTimes = p.look.clickSound ? wTrack.clicks.map { $0[0] } : []
-        keyTimes = p.look.typeSound ? wTrack.keys : []
+        let km = TimeMap(p); keyTimes = track.keys.filter { p.keySounds(at: $0) && !km.inCut($0) }.map { km.out($0) }
         clickStyle = p.look.clickStyle
         typeStyle = p.look.typeStyle
         audio = p.audio

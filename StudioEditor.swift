@@ -657,8 +657,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         var times = map.pieces.flatMap { [$0.start, $0.end] }
         let clickAt = project.look.clickSound
             ? track.clicks.map { $0[0] }.filter { $0 >= project.trimStart && $0 < project.trimEnd && !map.inCut($0) } : []
-        let keyAt = project.look.typeSound
-            ? track.keys.filter { $0 >= project.trimStart && $0 < project.trimEnd && !map.inCut($0) } : []
+        let keyAt = track.keys.filter { $0 >= project.trimStart && $0 < project.trimEnd && !map.inCut($0) && project.keySounds(at: $0) }
         times += clickAt + keyAt
         guard !times.isEmpty else { return }
         let clicks = Set(clickAt.map { Int(($0 * 1000).rounded()) }), keys = keyAt
@@ -2707,6 +2706,8 @@ struct StylePanel: View {
                 .help(L("录制时每按一下键盘，成片里加一声键盘声，预览和导出都有；音量和点击声一起在「声音」里调",
                         "Adds a keyboard sound for every key you pressed while recording, in the preview and the export; volume is under Sound with the click sound"))
             if look.typeSound {
+                Toggle(L("加速的片段不要打字声", "No typing sound in sped-up parts"), isOn: ed.look(\.typeMuteFast))
+                    .help(L("快放的地方按键会挤在一起很吵：勾上就不响。某一段单独不要：在剪辑轨上选中那段，关掉「打字声」", "Sped-up typing gets noisy: check to mute it. To mute one part: select it on the clip lane and turn off Typing sound"))
                 HStack(spacing: 6) {
                     Picker("", selection: Binding(get: { look.typeStyle }, set: { v in ed.look(\.typeStyle).wrappedValue = v; ClickPreview.playTyping(v) })) {
                         ForEach(StudioLook.Typing.allCases, id: \.self) { Text(ClickSound.typingName($0)).tag($0) }

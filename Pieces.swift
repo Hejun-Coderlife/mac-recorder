@@ -75,6 +75,24 @@ extension StudioEditor {
         }
         selectedPiece = p.start
     }
+    // 这一段有没有打字声（被静音段整个盖住 = 没有）
+    func pieceKeySound(_ p: Piece) -> Bool {
+        !project.keyMutes.contains { $0.count == 2 && $0[0] <= p.start + 1e-6 && $0[1] >= p.end - 1e-6 }
+    }
+    func setPieceKeySound(_ p: Piece, _ on: Bool) {
+        edit { pr in
+            // 先去掉和这段重叠的静音部分（只裁掉这一段的范围），关的话再整段加上
+            var out: [[Double]] = []
+            for m in pr.keyMutes where m.count == 2 {
+                if m[1] <= p.start || m[0] >= p.end { out.append(m); continue }
+                if m[0] < p.start { out.append([m[0], p.start]) }
+                if m[1] > p.end { out.append([p.end, m[1]]) }
+            }
+            if !on { out.append([p.start, p.end]) }
+            pr.keyMutes = out.sorted { $0[0] < $1[0] }
+        }
+        selectedPiece = p.start
+    }
     // 恢复删掉的那段
     func restoreCut(_ id: UUID) {
         edit { $0.cuts.removeAll { $0.id == id } }
@@ -93,6 +111,11 @@ struct PieceBlock: View {
         ZStack {
             RoundedRectangle(cornerRadius: 5).fill(base.opacity(sel ? 0.95 : 0.55))
             RoundedRectangle(cornerRadius: 5).stroke(sel ? Color.white : Color.white.opacity(0.18), lineWidth: sel ? 2 : 0.5)
+            if ed.project.look.typeSound && !ed.pieceKeySound(piece) {
+                Image(systemName: "keyboard.badge.ellipsis").font(.system(size: 8)).foregroundStyle(.white.opacity(0.75))
+                    .frame(maxWidth: .infinity, alignment: .trailing).padding(.trailing, 6)
+                    .help(L("这段没有打字声", "No typing sound in this part"))
+            }
             if fast {
                 HStack(spacing: 3) {
                     Image(systemName: "forward.fill").font(.system(size: 9, weight: .bold))
@@ -108,6 +131,8 @@ struct PieceBlock: View {
             Menu(L("速度", "Speed")) {
                 ForEach([1.0, 1.5, 2, 4, 8], id: \.self) { r in Button(r.formatted() + "×" + (r == piece.rate ? " ✓" : "")) { ed.setPieceSpeed(piece, r) } }
             }
+            Button(ed.pieceKeySound(piece) ? L("这段不要打字声", "Mute Typing Sound Here") : L("这段恢复打字声", "Restore Typing Sound Here")) { ed.setPieceKeySound(piece, !ed.pieceKeySound(piece)) }
+                .disabled(!ed.project.look.typeSound)
             Divider()
             Button(L("删除这段", "Delete Part"), role: .destructive) { ed.deletePiece(piece) }
         }
@@ -145,6 +170,10 @@ struct PieceInspector: View {
                 Picker("", selection: Binding(get: { p.rate }, set: { ed.setPieceSpeed(p, $0) })) {
                     ForEach([1.0, 1.5, 2, 4, 8], id: \.self) { Text($0.formatted() + "×").tag($0) }
                 }.pickerStyle(.segmented).labelsHidden().fixedSize()
+                if ed.project.look.typeSound {
+                    Toggle(L("打字声", "Typing sound"), isOn: Binding(get: { ed.pieceKeySound(p) }, set: { ed.setPieceKeySound(p, $0) })).toggleStyle(.checkbox)
+                        .help(L("关掉：这一段里打字不出声", "Off: no typing sound in this part"))
+                }
                 Text(p.rate == 1 ? L("\(String(format: "%.1f", p.len)) 秒", "\(String(format: "%.1f", p.len))s")
                                  : L("\(String(format: "%.1f", p.len)) 秒 → \(String(format: "%.1f", p.len / p.rate)) 秒", "\(String(format: "%.1f", p.len))s → \(String(format: "%.1f", p.len / p.rate))s"))
                     .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
