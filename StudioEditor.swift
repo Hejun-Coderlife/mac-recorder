@@ -90,6 +90,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     var musicDuckCache: [Float] = []
     @Published var suggestions: [SpeedSuggestion] = []   // 「建议加速」找到的段（还没采纳）
     @Published var suggesting = false
+    var isRecordingVoice: Bool { voiceRec != nil }
     @Published var speaking: Double?                     // 字幕转配音进行中（0–1）
     @Published var ttsVoice = UserDefaults.standard.string(forKey: "ttsVoice") ?? "" { didSet { UserDefaults.standard.set(ttsVoice, forKey: "ttsVoice") } }
     @Published var ttsRate = UserDefaults.standard.object(forKey: "ttsRate") as? Double ?? 1.0 { didSet { UserDefaults.standard.set(ttsRate, forKey: "ttsRate") } }

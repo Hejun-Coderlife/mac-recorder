@@ -119,7 +119,8 @@ enum ControlTools {
         let r = ControlServer.shared.recorder
         return ["recording": r?.recording ?? false, "elapsed": r?.elapsed ?? 0, "studio_mode": r?.studio ?? false,
                 "recordings_folder": Recorder.studioFolder.path,
-                "open_projects": StudioEditor.open.keys.map(\.path)]
+                "open_projects": StudioEditor.open.keys.map(\.path),
+                "busy": (r?.busy ?? false) || StudioEditor.open.values.contains { $0.exportProgress != nil || $0.isRecordingVoice || $0.speaking != nil }]
     }
 
     static func list() async throws -> [String: Any] {
