@@ -90,6 +90,10 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     var musicDuckCache: [Float] = []
     @Published var suggestions: [SpeedSuggestion] = []   // 「建议加速」找到的段（还没采纳）
     @Published var suggesting = false
+    @Published var speaking: Double?                     // 字幕转配音进行中（0–1）
+    @Published var ttsVoice = UserDefaults.standard.string(forKey: "ttsVoice") ?? "" { didSet { UserDefaults.standard.set(ttsVoice, forKey: "ttsVoice") } }
+    @Published var ttsRate = UserDefaults.standard.object(forKey: "ttsRate") as? Double ?? 1.0 { didSet { UserDefaults.standard.set(ttsRate, forKey: "ttsRate") } }
+    let previewSynth = AVSpeechSynthesizer()
     @Published var revealSection: String?                // 让样式面板展开并滚到某一节
     @Published var suggestNone = false                   // 点了「建议加速」但没找到：提示条显示几秒
     private var duckNow: Float = 1             // 预览里原声音现在压到多少（有讲解时 0.25）
@@ -1063,7 +1067,16 @@ struct EditorView: View {
                         else if ed.musicIndex(ed.selected) != nil { MusicInspector(ed: ed).frame(height: 30) }   // 选中音乐
                         else if ed.selected != nil { inspector.frame(height: 30) }   // 选中推近段才出现
                         else if !ed.suggestions.isEmpty || ed.suggesting || ed.suggestNone { SuggestionBar(ed: ed).frame(height: 30) }   // 建议加速
-                        timeline.frame(height: ed.hasCamera ? 278 : 252)
+                        // 左边轨道名 + 时间轴；轨道多了（叠在一起的标注各占一行）就上下滚
+                        let total = TimelineLanes(ed).total
+                        ScrollView(.vertical) {
+                            HStack(spacing: 6) {
+                                TrackHeaders(ed: ed).frame(width: 62, height: total)
+                                timeline.frame(height: total)
+                            }
+                        }
+                        .scrollIndicators(total > 340 ? .visible : .hidden)
+                        .frame(height: min(total, 340))
                             .help(L("从上到下：剪掉 / 快放、推近、讲解、字幕、遮挡、标注、音乐；点选来调整，空白处双击新加推近（字幕那条双击新加字幕），两端黄条修剪",
                                    "Top to bottom: cut / speed-up, zooms, voiceovers, captions, redactions, annotations, music. Click to edit, double-click empty space to add a zoom (a caption on the caption lane), drag the yellow bars to trim"))
                     }
@@ -1297,7 +1310,7 @@ extension EditorView {
         } else {
             Button { showCaptionMenu.toggle() } label: { Label(L("字幕", "Captions"), systemImage: "captions.bubble") }
                 .help(L("把说的话自动变成字幕（在本机识别普通话），一次只显示一行；也能另存 .srt", "Turn speech into captions (Mandarin, on this Mac), one line at a time; you can also save an .srt"))
-                .popover(isPresented: $showCaptionMenu, arrowEdge: .bottom) { captionMenu.padding(14).frame(width: 290) }
+                .popover(isPresented: $showCaptionMenu, arrowEdge: .bottom) { captionMenu.padding(14).frame(width: 330) }
         }
     }
     @ViewBuilder private var captionMenu: some View {
@@ -1320,6 +1333,8 @@ extension EditorView {
                 Button(L("加一句", "Add")) { showCaptionMenu = false; ed.addCaption(at: ed.time) }
                 Button(L("存 .srt…", "Save .srt…")) { showCaptionMenu = false; ed.exportSRT() }.disabled(ed.project.captions.isEmpty)
             }
+            Divider()
+            SpeakBox(ed: ed)
         }
         .onAppear { if !hasRec && hasVoice { captionSource = .voice } else if hasRec && captionSource != .recorded && !hasVoice { captionSource = .recorded } }
     }
@@ -1341,6 +1356,9 @@ extension EditorView {
                     .help(L("在播放头处拆成两句", "Split into two at the playhead"))
                 Button { ed.mergeCaption(c.id) } label: { Label(L("合并", "Merge"), systemImage: "arrow.right.to.line") }
                     .help(L("和下一句合成一句", "Merge with the next caption"))
+                Button { ed.speakCaptions([c.id]) } label: { Label(L("念成配音", "Speak"), systemImage: "waveform") }
+                    .disabled(c.text.isEmpty || ed.speaking != nil)
+                    .help(L("用系统声音把这句念出来，放到讲解轨上（声音在「字幕」菜单里选）", "Speak this caption onto the voiceover lane (choose the voice in the Captions menu)"))
                 Button(role: .destructive) { ed.deleteSelected() } label: { Image(systemName: "trash") }.help(L("删除这句", "Delete this caption"))
             }
         }
@@ -1528,10 +1546,59 @@ struct TimelineGestures: NSViewRepresentable {
     func updateNSView(_ v: Catcher, context: Context) { v.ed = ed }
 }
 
+// 时间轴各条轨的纵向位置（遮挡 / 标注按叠了几层算高度）
+struct TimelineLanes {
+    static let row = 20.0, gap = 2.0
+    let redY = 176.0, redH: Double, annY: Double, annH: Double, musY: Double, layY: Double, total: Double
+    let redRows: Int, annRows: Int
+    @MainActor init(_ ed: StudioEditor) {
+        redRows = max(1, OverlayBlock.pack(ed.project.redactions.map { ($0.id, $0.start, $0.end) }).values.map { $0.1 }.max() ?? 1)
+        annRows = max(1, OverlayBlock.pack(ed.project.annotations.map { ($0.id, $0.start, $0.end) }).values.map { $0.1 }.max() ?? 1)
+        func h(_ n: Int) -> Double { Double(n) * Self.row + Double(n - 1) * Self.gap }
+        redH = h(redRows); annY = redY + redH + 4; annH = h(annRows)
+        musY = annY + annH + 6; layY = musY + 26
+        total = (ed.hasCamera ? layY + 22 : musY + 22) + 4
+    }
+}
+
+// 时间轴左边的轨道名（像剪映左边那列）
+struct TrackHeaders: View {
+    @ObservedObject var ed: StudioEditor
+    var body: some View {
+        let ln = TimelineLanes(ed)
+        let items: [(Double, Double, String, String)] = [
+            (38, 20, "scissors", L("片段", "Clips")), (64, 40, "plus.magnifyingglass", L("推近", "Zoom")),
+            (112, 26, "mic", L("讲解", "Voice")), (144, 26, "captions.bubble", L("字幕", "Captions")),
+            (ln.redY, ln.redH, "eye.slash", L("遮挡", "Redact")), (ln.annY, ln.annH, "pencil.tip.crop.circle", L("标注", "Notes")),
+            (ln.musY, 22, "music.note", L("音乐", "Music")),
+        ] + (ed.hasCamera ? [(ln.layY, 22, "person.crop.circle", L("小窗", "Camera"))] : [])
+        ZStack(alignment: .topLeading) {
+            Color.clear
+            ForEach(items, id: \.0) { y, h, icon, name in
+                HStack(spacing: 3) {
+                    Image(systemName: icon).font(.system(size: 9))
+                    Text(name).font(.system(size: 10)).lineLimit(1).minimumScaleFactor(0.7)
+                }
+                .foregroundStyle(.secondary)
+                .frame(width: 62, height: h, alignment: .leading)
+                .offset(y: y)
+            }
+        }
+    }
+}
+
 struct TimelineStrip: View {
     @ObservedObject var ed: StudioEditor
+    // 各条轨的位置：遮挡、标注叠在一起时各占一整行（像剪映 / Premiere），轨道跟着变高
+    private var lanes: TimelineLanes { TimelineLanes(ed) }
     private let rulerH = 22.0, cutY = 38.0, cutH = 20.0, segY = 64.0, segH = 40.0, voiceY = 112.0, voiceH = 26.0, capY = 144.0, capH = 26.0
-    private let redY = 176.0, redH = 20.0, annY = 200.0, annH = 20.0, musY = 226.0, musH = 22.0, layY = 252.0, layH = 22.0
+    private var redY: Double { lanes.redY }
+    private var redH: Double { lanes.redH }
+    private var annY: Double { lanes.annY }
+    private var annH: Double { lanes.annH }
+    private var musY: Double { lanes.musY }
+    private let musH = 22.0, layH = 22.0
+    private var layY: Double { lanes.layY }
     private let accent = Color(red: 0.42, green: 0.36, blue: 0.95)
 
     var body: some View {
@@ -1606,17 +1673,17 @@ struct TimelineStrip: View {
                     .offset(x: 2, y: redY).allowsHitTesting(false)
                 let rp = OverlayBlock.pack(ed.project.redactions.map { ($0.id, $0.start, $0.end) })
                 ForEach(ed.project.redactions) { r in
-                    let (row, rows) = rp[r.id] ?? (0, 1), rh = redH / Double(rows)
-                    OverlayBlock(ed: ed, id: r.id, lane: .redaction, w: w, d: d, compact: rows > 1).frame(width: max(6, x(r.end) - x(r.start)), height: rh - (rows > 1 ? 1 : 0))
-                        .offset(x: x(r.start), y: redY + Double(row) * rh)
+                    let row = rp[r.id]?.0 ?? 0
+                    OverlayBlock(ed: ed, id: r.id, lane: .redaction, w: w, d: d).frame(width: max(6, x(r.end) - x(r.start)), height: TimelineLanes.row)
+                        .offset(x: x(r.start), y: redY + Double(row) * (TimelineLanes.row + TimelineLanes.gap))
                 }
                 RoundedRectangle(cornerRadius: 5).fill(Color.secondary.opacity(0.07)).frame(width: w - 4, height: annH)
                     .offset(x: 2, y: annY).allowsHitTesting(false)
                 let ap = OverlayBlock.pack(ed.project.annotations.map { ($0.id, $0.start, $0.end) })
                 ForEach(ed.project.annotations) { a in
-                    let (row, rows) = ap[a.id] ?? (0, 1), ah = annH / Double(rows)
-                    OverlayBlock(ed: ed, id: a.id, lane: .annotation, w: w, d: d, compact: rows > 1).frame(width: max(6, x(a.end) - x(a.start)), height: ah - (rows > 1 ? 1 : 0))
-                        .offset(x: x(a.start), y: annY + Double(row) * ah)
+                    let row = ap[a.id]?.0 ?? 0
+                    OverlayBlock(ed: ed, id: a.id, lane: .annotation, w: w, d: d).frame(width: max(6, x(a.end) - x(a.start)), height: TimelineLanes.row)
+                        .offset(x: x(a.start), y: annY + Double(row) * (TimelineLanes.row + TimelineLanes.gap))
                 }
                 // 音乐轨：每段一块（带波形）；开了循环时最后一段之后淡色画出「一直重复到片尾」
                 RoundedRectangle(cornerRadius: 5).fill(Color.secondary.opacity(0.07)).frame(width: w - 4, height: musH)

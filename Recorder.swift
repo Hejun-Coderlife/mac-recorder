@@ -814,6 +814,8 @@ struct ContentView: View {
                     .font(.callout).foregroundStyle(rec.isError ? .red : .secondary)
                     .lineLimit(2)
                 Spacer()
+                Button { AIConnectView.show() } label: { Label(L("AI 控制", "AI Control"), systemImage: "sparkles") }
+                    .help(L("让 Claude、Cursor、Codex 等 AI 用一句话操作录屏", "Let Claude, Cursor, Codex and other AI apps drive the recorder"))
                 Button(L("打开 Studio 素材…", "Open Studio Footage…")) { openStudioFootage() }
                 Button(L("打开文件夹", "Open Folder")) { NSWorkspace.shared.open(Recorder.folder) }
             }

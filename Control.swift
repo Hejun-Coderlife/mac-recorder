@@ -6,12 +6,14 @@
 import AppKit
 import AVFoundation
 import Network
+import SwiftUI
 
 // ---- 程序入口：带 --mcp 就只当 MCP 服务，不开界面 ----
 @main
 enum Main {
     static func main() {
         if CommandLine.arguments.contains("--mcp") { MCPBridge.run() }
+        if let i = CommandLine.arguments.firstIndex(of: "ctl") { ControlCLI.run(Array(CommandLine.arguments[(i + 1)...])) }
         RecorderApp.main()
     }
 }
@@ -104,6 +106,7 @@ enum ControlTools {
             case "update_project": return try await updateProject(a)
             case "render_frame": return try await renderFrame(a)
             case "export_video": return try await export(a)
+            case "speak_captions": return try await speak(a)
             default: return ["error": "unknown tool \(name)"]
             }
         } catch {
@@ -249,6 +252,17 @@ enum ControlTools {
         return ["image_base64": png.base64EncodedString(), "time": t]
     }
 
+    static func speak(_ a: [String: Any]) async throws -> [String: Any] {
+        let e = try await editor(a)
+        if let v = a["voice"] as? String { e.ttsVoice = Speech.voices.first { $0.name.lowercased() == v.lowercased() || $0.identifier == v }?.identifier ?? e.ttsVoice }
+        if let r = a["rate"] as? Double { e.ttsRate = min(max(r, 0.5), 1.6) }
+        let ids = (a["caption_ids"] as? [String])?.compactMap(UUID.init(uuidString:))
+        let before = e.project.voiceovers.count
+        e.speakCaptions(ids)
+        try await Task.sleep(for: .milliseconds(100))
+        while e.speaking != nil { try await Task.sleep(for: .milliseconds(200)) }
+        return ["ok": true, "voiceovers": e.project.voiceovers.count, "added_or_replaced": max(0, e.project.voiceovers.count - before)]
+    }
     static func export(_ a: [String: Any]) async throws -> [String: Any] {
         let e = try await editor(a)
         var o = e.exportOptions
@@ -382,6 +396,12 @@ enum ControlDocs {
         tool("render_frame", "Render one finished frame (with zoom, background, annotations…) as an image, to check placement.", [
             "project": projectProp, "time": ["type": "number", "description": "Source time in seconds"],
             "max_width": ["type": "number", "description": "Image width limit, default 1280"],
+        ], required: ["project"]),
+        tool("speak_captions", "Turn captions into a spoken voiceover with a macOS voice (on device). Write the captions first with update_project.", [
+            "project": projectProp,
+            "caption_ids": ["type": "array", "items": ["type": "string"], "description": "Only these captions (default: all with text)"],
+            "voice": ["type": "string", "description": "Voice name, e.g. Tingting, Meijia, Samantha (default: best for the language)"],
+            "rate": ["type": "number", "description": "Speed 0.5–1.6, default 1"],
         ], required: ["project"]),
         tool("export_video", "Export the finished video. Returns the file path when done.", [
             "project": projectProp,

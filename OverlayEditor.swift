@@ -440,8 +440,7 @@ struct OverlayBlock: View {
         var ends: [Double] = [], row: [UUID: Int] = [:]
         for (id, s, e) in items.sorted(by: { $0.1 < $1.1 }) {
             if let k = ends.firstIndex(where: { $0 <= s + 1e-6 }) { ends[k] = e; row[id] = k }
-            else if ends.count < 3 { ends.append(e); row[id] = ends.count - 1 }
-            else { let k = ends.indices.min { ends[$0] < ends[$1] } ?? 0; ends[k] = max(ends[k], e); row[id] = k }
+            else { ends.append(e); row[id] = ends.count - 1 }   // 叠在一起的各占一行，轨道跟着变高
         }
         let n = max(1, ends.count)
         return row.mapValues { ($0, n) }
