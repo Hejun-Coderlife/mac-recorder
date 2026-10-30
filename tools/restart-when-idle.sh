@@ -4,8 +4,10 @@
 APP=/Applications/录屏.app
 BID=com.hejun.screenrecorder
 EXE="$APP/Contents/MacOS/Recorder"
+# 录屏本体在不在跑（不算 AI 用的 Recorder --mcp / ctl 小进程）
+app_running() { ps -axo args= | grep -F "$EXE" | grep -v -e "--mcp" -e " ctl " -e grep >/dev/null; }
 for i in $(seq 1 4320); do
-  if ! pgrep -f "$EXE" >/dev/null; then echo "not running, nothing to do"; exit 0; fi
+  if ! app_running; then echo "not running, nothing to do"; exit 0; fi
   idle=$(( $(ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print $NF; exit}') / 1000000000 ))
   front=$(osascript -e 'tell application "System Events" to get bundle identifier of first application process whose frontmost is true' 2>/dev/null)
   st=$("$EXE" ctl get_status 2>/dev/null)
@@ -21,7 +23,7 @@ try:
   [print(p) for p in json.load(sys.stdin).get("open_projects",[])]
 except Exception: pass')
     osascript -e "tell application id \"$BID\" to quit" 2>/dev/null
-    for k in $(seq 1 50); do pgrep -f "$EXE" >/dev/null || break; sleep 0.2; done
+    for k in $(seq 1 50); do app_running || break; sleep 0.2; done
     open -g "$APP"
     sleep 3
     echo "$projects" | while read -r p; do [[ -n "$p" ]] && "$EXE" ctl open_project "{\"project\": \"$p\"}" >/dev/null 2>&1; done

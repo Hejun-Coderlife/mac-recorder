@@ -50,13 +50,23 @@ extension StudioEditor {
         let lo = project.trimStart, hi = project.trimEnd > lo ? project.trimEnd : duration
         guard t > lo + 0.1, t < hi - 0.1, !pieces.contains(where: { abs($0.start - t) < 0.1 || abs($0.end - t) < 0.1 }) else { NSSound.beep(); return }
         edit { $0.splits.append(t); $0.splits.sort() }
-        selectedPiece = t
+        selectedBurst = nil; selectedPiece = t
         showToast(L("已在 \(clock(t)) 分割 · 点一段按 Delete 删掉", "Split at \(clock(t)) · select a part and press Delete to remove it"))
+    }
+    // 把和 [s, e) 重叠的快放段切掉这一截（两头留着）：一段快放跨了好几个片段时，只动选中的那段
+    static func carveSpeed(_ cuts: [CutSegment], _ s: Double, _ e: Double) -> [CutSegment] {
+        var out: [CutSegment] = []
+        for c in cuts {
+            guard c.mode == .speed, c.end > s + 1e-6, c.start < e - 1e-6 else { out.append(c); continue }
+            if c.start < s - 1e-6 { var x = c; x.id = UUID(); x.end = s; out.append(x) }
+            if c.end > e + 1e-6 { var x = c; x.id = UUID(); x.start = e; out.append(x) }
+        }
+        return out
     }
     // 删掉一段：变成剪掉段（和挨着的剪掉段并成一段），时间轴上合拢
     func deletePiece(_ p: Piece) {
         edit { pr in
-            pr.cuts.removeAll { $0.start >= p.start - 1e-6 && $0.end <= p.end + 1e-6 }   // 里面原来的快放段一起去掉
+            pr.cuts = Self.carveSpeed(pr.cuts, p.start, p.end)
             var s = p.start, e = p.end
             for c in pr.cuts where c.mode == .cut && (abs(c.end - s) < 1e-6 || abs(c.start - e) < 1e-6) { s = min(s, c.start); e = max(e, c.end) }
             pr.cuts.removeAll { $0.mode == .cut && $0.start >= s - 1e-6 && $0.end <= e + 1e-6 }
@@ -70,8 +80,9 @@ extension StudioEditor {
     // 一段改速度：1 = 原速
     func setPieceSpeed(_ p: Piece, _ rate: Double) {
         edit { pr in
-            pr.cuts.removeAll { $0.mode == .speed && $0.start >= p.start - 1e-6 && $0.end <= p.end + 1e-6 }
-            if rate != 1 { pr.cuts.append(CutSegment(start: p.start, end: p.end, mode: .speed, rate: rate)); pr.cuts.sort { $0.start < $1.start } }
+            pr.cuts = Self.carveSpeed(pr.cuts, p.start, p.end)
+            if rate != 1 { pr.cuts.append(CutSegment(start: p.start, end: p.end, mode: .speed, rate: rate)) }
+            pr.cuts.sort { $0.start < $1.start }
         }
         selectedPiece = p.start
     }
@@ -125,7 +136,7 @@ struct PieceBlock: View {
         }
         .padding(.horizontal, 1)
         .contentShape(Rectangle())
-        .onTapGesture { ed.selected = nil; ed.selectedPiece = piece.start; ed.picking = false }
+        .onTapGesture { ed.selected = nil; ed.selectedBurst = nil; ed.selectedPiece = piece.start; ed.picking = false }
         .contextMenu {
             Button(L("在播放头分割（S）", "Split at Playhead (S)")) { ed.split(at: ed.time) }
             Menu(L("速度", "Speed")) {
@@ -222,24 +233,19 @@ extension StudioEditor {
 extension StudioEditor {
     // 这阵打字的速度（这段视频的快放倍数；1 = 原速）
     func burstRate(_ b: KeyBurst) -> Double {
-        project.cuts.first { $0.mode == .speed && $0.start <= b.start + 0.01 && $0.end >= b.end - 0.01 }?.rate ?? 1
+        let s = max(b.start, project.trimStart), e = min(b.end, project.trimEnd)
+        return project.cuts.first { $0.mode == .speed && $0.start <= s + 0.01 && $0.end >= e - 0.01 }?.rate ?? 1
     }
     // 改这阵打字的速度：这段视频连同打字声一起快放（和剪辑轨上的快放段是同一种东西）
     func setBurstRate(_ b: KeyBurst, _ rate: Double) {
         let s = max(b.start, project.trimStart), e = min(b.end, project.trimEnd)
         guard e - s > 0.1 else { return }
         edit { pr in
-            // 和这段重叠的快放段：把重叠部分去掉（两头留着）
-            var out: [CutSegment] = []
-            for c in pr.cuts {
-                guard c.mode == .speed, c.end > s, c.start < e else { out.append(c); continue }
-                if c.start < s { var a = c; a.id = UUID(); a.end = s; out.append(a) }
-                if c.end > e { var a = c; a.id = UUID(); a.start = e; out.append(a) }
+            pr.cuts = Self.carveSpeed(pr.cuts, s, e)
+            if rate != 1 && !pr.cuts.contains(where: { $0.mode == .cut && $0.start < e && $0.end > s }) {
+                pr.cuts.append(CutSegment(start: s, end: e, mode: .speed, rate: rate))
             }
-            if rate != 1 && !out.contains(where: { $0.mode == .cut && $0.start < e && $0.end > s }) {
-                out.append(CutSegment(start: s, end: e, mode: .speed, rate: rate))
-            }
-            pr.cuts = out.sorted { $0.start < $1.start }
+            pr.cuts.sort { $0.start < $1.start }
         }
         selectedBurst = b.start
         showToast(rate == 1 ? L("这阵打字恢复原速", "Back to normal speed") : L("这阵打字 \(rate.formatted())× 快放（画面和打字声一起）· ⌘Z 撤销", "This typing plays \(rate.formatted())× (picture and sound) · ⌘Z to undo"))

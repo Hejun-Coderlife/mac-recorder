@@ -96,15 +96,17 @@ extension StudioEditor {
                 showToast(kind == .typing ? L("没找到连续打字的地方", "No long typing found") : L("没找到很久没动的空档", "No long idle stretches found")); return
             }
             let before = timeMap.out(project.trimEnd)
+            let use = found.filter { g in !project.cuts.contains(where: { $0.start < g.end && $0.end > g.start }) }
+            guard !use.isEmpty else { showToast(L("这些地方已经剪过 / 加速过了", "Those parts are already cut or sped up")); return }
             edit { p in
-                for g in found where !p.cuts.contains(where: { $0.start < g.end && $0.end > g.start }) {
+                for g in use {
                     p.cuts.append(CutSegment(start: max(g.start, p.trimStart), end: min(g.end, p.trimEnd), mode: .speed, rate: rate))
                 }
                 p.cuts.sort { $0.start < $1.start }
             }
             let saved = before - timeMap.out(project.trimEnd)
-            showToast(L("\(found.count) 处\(kind == .typing ? "打字" : "空档")已加速 \(rate.formatted())×，成片短了 \(String(format: "%.1f", saved)) 秒 · ⌘Z 撤销",
-                        "Sped up \(found.count) \(kind == .typing ? "typing" : "idle") parts \(rate.formatted())×, \(String(format: "%.1f", saved))s shorter · ⌘Z to undo"))
+            showToast(L("\(use.count) 处\(kind == .typing ? "打字" : "空档")已加速 \(rate.formatted())×，成片短了 \(String(format: "%.1f", saved)) 秒 · ⌘Z 撤销",
+                        "Sped up \(use.count) \(kind == .typing ? "typing" : "idle") parts \(rate.formatted())×, \(String(format: "%.1f", saved))s shorter · ⌘Z to undo"))
         }
     }
     // 采纳：变成正式的快放段（能撤销）；和已有剪辑段重叠的跳过

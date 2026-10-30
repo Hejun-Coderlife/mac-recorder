@@ -80,7 +80,8 @@ struct AIClient: Identifiable {
     // 接上：先备份原文件（同目录 *.录屏备份），再只加 / 改 recorder 这一条
     func connect() throws {
         let fm = FileManager.default
-        func backup(_ p: String) { if fm.fileExists(atPath: p) { _ = try? fm.removeItem(atPath: p + ".录屏备份"); try? fm.copyItem(atPath: p, toPath: p + ".录屏备份") } }
+        // 只在第一次改时备份（之后再接不覆盖，留的是用户最初的原件）
+        func backup(_ p: String) { if fm.fileExists(atPath: p) && !fm.fileExists(atPath: p + ".录屏备份") { try? fm.copyItem(atPath: p, toPath: p + ".录屏备份") } }
         switch kind {
         case .json(let p, let key, let vscode):
             var j: [String: Any] = [:]
@@ -95,7 +96,7 @@ struct AIClient: Identifiable {
             servers["recorder"] = vscode ? ["type": "stdio", "command": Self.exe, "args": ["--mcp"]] : ["command": Self.exe, "args": ["--mcp"]]
             j[key] = servers
             try fm.createDirectory(atPath: (p as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-            try JSONSerialization.data(withJSONObject: j, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]).write(to: URL(fileURLWithPath: p))
+            try JSONSerialization.data(withJSONObject: j, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]).write(to: URL(fileURLWithPath: p), options: .atomic)
         case .toml(let p):
             var s = (try? String(contentsOfFile: p, encoding: .utf8)) ?? ""
             guard !s.contains("[mcp_servers.recorder]") else { return }
@@ -111,9 +112,14 @@ struct AIClient: Identifiable {
             let p = Process(), pipe = Pipe()
             p.executableURL = URL(fileURLWithPath: bin)
             p.arguments = ["mcp", "add", "-s", "user", "recorder", "--", Self.exe, "--mcp"]
+            // npm / Homebrew 装的 claude 是 node 脚本：App 里 PATH 很短找不到 node，把常见目录加上
+            var env = ProcessInfo.processInfo.environment
+            env["PATH"] = (["/opt/homebrew/bin", "/usr/local/bin", Self.home + "/.local/bin", Self.home + "/.npm-global/bin", Self.home + "/.claude/local", "/usr/bin", "/bin"] + [env["PATH"] ?? ""]).joined(separator: ":")
+            p.environment = env
             p.standardOutput = pipe; p.standardError = pipe
-            try p.run(); p.waitUntilExit()
+            try p.run()
             let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            p.waitUntilExit()
             if p.terminationStatus != 0 && !out.contains("already exists") {
                 throw NSError(domain: "录屏", code: 42, userInfo: [NSLocalizedDescriptionKey: out.trimmingCharacters(in: .whitespacesAndNewlines)])
             }

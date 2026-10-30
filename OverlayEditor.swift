@@ -125,20 +125,26 @@ extension StudioEditor {
         selected = nil
     }
     // 文字标注直接在预览上改：打字时实时进工程（整次改字算一步撤销），回车 / 点别处收好，Esc 退回原来的字；改完是空的就删掉
-    func beginNote(_ id: UUID) { dragBegin(); editingNote = id }
+    // 改字时不占用拖动的快照（中途拖滑块、换颜色都不会把打的字冲掉）：打字直接写进工程，结束时整次改字记一步撤销
+    func beginNote(_ id: UUID) {
+        if editingNote != nil && editingNote != id { endNote() }
+        textBase = project; noteOrig = project.annotations.first { $0.id == id }?.text
+        editingNote = id
+    }
     func typeNote(_ id: UUID, _ text: String) {
-        guard dragBase != nil else { return }
-        dragUpdate { p in if let i = p.annotations.firstIndex(where: { $0.id == id }) { p.annotations[i].text = text.replacingOccurrences(of: "\n", with: " ") } }
+        guard let i = annotationIndex(id) else { return }
+        project.annotations[i].text = text.replacingOccurrences(of: "\n", with: " ")
     }
     func endNote(cancel: Bool = false) {
         guard let id = editingNote else { return }
         editingNote = nil
-        if cancel, let base = dragBase { project = base }
+        if cancel, let o = noteOrig, let i = annotationIndex(id) { project.annotations[i].text = o }   // Esc：只把字改回去
         if let i = annotationIndex(id), project.annotations[i].text.trimmingCharacters(in: .whitespaces).isEmpty {
-            dragUpdate { $0.annotations.removeAll { $0.id == id } }
-            selected = nil
+            project.annotations.remove(at: i)
+            if selected == id { selected = nil }
         }
-        dragEnd()
+        commitTextEdit()
+        noteOrig = nil
     }
     func setNoteText(_ id: UUID, _ text: String) {
         guard let i = annotationIndex(id) else { return }
@@ -180,6 +186,9 @@ extension StudioEditor {
         }
     }
     // 时间轴上拖：move = 整段挪，否则改开头 / 结尾
+    func overlayRange(_ id: UUID) -> (Double, Double) {
+        project.redactions.first { $0.id == id }.map { ($0.start, $0.end) } ?? project.annotations.first { $0.id == id }.map { ($0.start, $0.end) } ?? (0, 0)
+    }
     // 整段挪到从 t 开始（长度不变）
     func moveOverlay(_ id: UUID, to t: Double) {
         edit { p in
@@ -480,7 +489,7 @@ struct OverlayBlock: View {
         .gesture(TapGesture(count: 2).onEnded { if info.isText { ed.selectOverlay(id); ed.beginNote(id) } }
             .exclusively(before: TapGesture().onEnded { ed.selectOverlay(id) }))
         .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .named(TimelineStrip.space))
-            .onChanged { v in if ed.selected != id { ed.selected = id }; ed.dragOverlayTime(id, edge: 0, dt: v.translation.width / w * d) }
+            .onChanged { v in if ed.selected != id { ed.selected = id }; ed.dragOverlayTime(id, edge: 0, dt: ed.srcDelta(v.translation.width / w * d, anchor: ed.overlayRange(id).0)) }
             .onEnded { _ in ed.dragEnd() })
         .contextMenu {
             if info.isText { Button(L("改字", "Edit Text")) { ed.selectOverlay(id); ed.beginNote(id) } }
@@ -511,7 +520,7 @@ struct OverlayBlock: View {
             .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
             .onTapGesture { ed.selectOverlay(id) }
             .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named(TimelineStrip.space))
-                .onChanged { v in if ed.selected != id { ed.selected = id }; ed.dragOverlayTime(id, edge: e, dt: v.translation.width / w * d) }
+                .onChanged { v in if ed.selected != id { ed.selected = id }; ed.dragOverlayTime(id, edge: e, dt: ed.srcDelta(v.translation.width / w * d, anchor: e < 0 ? ed.overlayRange(id).0 : ed.overlayRange(id).1)) }
                 .onEnded { _ in ed.dragEnd() })
     }
 }

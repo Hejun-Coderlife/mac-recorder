@@ -97,7 +97,16 @@ final class LocalTTS: ObservableObject {
     nonisolated static var helper: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/tts/sherpa-onnx-offline-tts") }
 
     // 第一次用：下载声音模型。国内先走 hf-mirror 国内镜像，其他地方先走 GitHub；一个不通换另一个
+    private var inFlight: Task<Void, Error>?
     func ensureModel() async throws {
+        if Self.ready { return }
+        if let t = inFlight { return try await t.value }   // 已经在下了：等同一个
+        let t = Task { try await self.downloadModel() }
+        inFlight = t
+        defer { inFlight = nil }
+        try await t.value
+    }
+    private func downloadModel() async throws {
         if Self.ready { return }
         error = nil; progress = 0
         defer { progress = nil }
@@ -114,11 +123,18 @@ final class LocalTTS: ObservableObject {
     private func githubTarball() async throws {
         let url = URL(string: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/\(Self.modelName).tar.bz2")!
         let tmp = try await download(url, size: 364_855_331)
-        try FileManager.default.createDirectory(at: Self.root, withIntermediateDirectories: true)
-        let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/tar"); p.arguments = ["xjf", tmp.path, "-C", Self.root.path]
-        try p.run(); p.waitUntilExit()
-        try? FileManager.default.removeItem(at: tmp)
-        guard p.terminationStatus == 0 else { throw NSError(domain: "录屏", code: 51, userInfo: [NSLocalizedDescriptionKey: "unpack failed"]) }
+        // 先解到临时文件夹、全解完再挪过去：解到一半被打断不会留下「看着齐了其实缺文件」的模型
+        let stage = Self.root.appendingPathComponent(".unpack-\(UUID().uuidString.prefix(6))")
+        try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stage); try? FileManager.default.removeItem(at: tmp) }
+        let ok = try await Task.detached { () -> Bool in
+            let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/tar"); p.arguments = ["xjf", tmp.path, "-C", stage.path]
+            try p.run(); p.waitUntilExit(); return p.terminationStatus == 0
+        }.value
+        let got = stage.appendingPathComponent(Self.modelName)
+        guard ok, FileManager.default.fileExists(atPath: got.appendingPathComponent("voices.bin").path) else { throw NSError(domain: "录屏", code: 51, userInfo: [NSLocalizedDescriptionKey: "unpack failed"]) }
+        try? FileManager.default.removeItem(at: Self.modelDir)
+        try FileManager.default.moveItem(at: got, to: Self.modelDir)
     }
     // 国内镜像：按文件一个个下（同时下 6 个），先下到临时文件夹，全齐了再挪过去
     private func mirrorFiles() async throws {
@@ -179,10 +195,11 @@ final class LocalTTS: ObservableObject {
                            "--kokoro-lexicon=\(m)/lexicon-us-en.txt,\(m)/lexicon-zh.txt",
                            "--tts-rule-fsts=\(m)/date-zh.fst,\(m)/number-zh.fst",
                            "--kokoro-length-scale=\(String(format: "%.2f", 1 / min(max(speed, 0.5), 2)))",
-                           "--sid=\(sid)", "--output-filename=\(out.path)", text]
+                           "--sid=\(sid)", "--output-filename=\(out.path)", text.hasPrefix("-") ? " " + text : text]   // 以 - 开头的字会被当成参数
             p.standardOutput = pipe; p.standardError = pipe
-            try p.run(); p.waitUntilExit()
-            let log = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            try p.run()
+            let log = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)   // 先读完输出再等它结束（输出多时不卡死）
+            p.waitUntilExit()
             guard p.terminationStatus == 0, FileManager.default.fileExists(atPath: out.path) else {
                 throw NSError(domain: "录屏", code: 52, userInfo: [NSLocalizedDescriptionKey: L("本机配音出错：", "On-device voice failed: ") + String(log.suffix(300))])
             }
@@ -234,7 +251,7 @@ enum CloudTTS {
             req = URLRequest(url: URL(string: "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation")!)
             req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.httpBody = try JSONSerialization.data(withJSONObject: ["model": "qwen-tts", "input": ["text": text, "voice": voice]])
+            req.httpBody = try JSONSerialization.data(withJSONObject: ["model": "qwen-tts-latest", "input": ["text": text, "voice": voice]])   // latest 才有方言声音
         default: throw fail("bad engine")
         }
         req.httpMethod = "POST"; req.timeoutInterval = 60

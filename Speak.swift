@@ -77,9 +77,8 @@ enum Speech {
 extension StudioEditor {
     // 念一句：按选的声音来源，存到 voice/tts-xxxx.(wav|m4a)，返回（文件名, 时长）
     func synthLine(_ text: String, id: UUID) async throws -> (String, Double) {
-        let e = TTSPrefs.engine, v = TTSPrefs.voice(e), stem = "voice/tts-" + id.uuidString.prefix(8).lowercased()
-        // 同一句以前念过（可能是别的格式）：先删
-        for ext in ["wav", "m4a", "mp3"] { try? FileManager.default.removeItem(at: dir.appendingPathComponent(stem + "." + ext)) }
+        // 每次念都用新文件名：念失败时原来那段配音还在（旧文件留着，撤销也要用）
+        let e = TTSPrefs.engine, v = TTSPrefs.voice(e), stem = "voice/tts-" + id.uuidString.prefix(8).lowercased() + "-" + UUID().uuidString.prefix(4).lowercased()
         switch e {
         case .system:
             let name = stem + ".m4a"
@@ -121,9 +120,10 @@ extension StudioEditor {
             speaking = nil
             guard !made.isEmpty else { return }
             // 一次放进去（一步撤销）；同一句以前念过的那段换掉
-            let stems = Set(made.map { ($0.file as NSString).deletingPathExtension })
+            // 同一句以前念过的那段换掉（文件名前缀 voice/tts-字幕id前8位）
+            let keys = Set(made.map { String($0.file.prefix("voice/tts-".count + 8)) })
             edit { p in
-                p.voiceovers.removeAll { stems.contains(($0.file as NSString).deletingPathExtension) }
+                p.voiceovers.removeAll { keys.contains(String($0.file.prefix("voice/tts-".count + 8))) }
                 for v in made { p.voiceovers = VoiceClip.place(v, into: p.voiceovers, map: TimeMap(p)) }
             }
             for v in made { loadPeaks(v.file) }

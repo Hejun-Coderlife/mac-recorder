@@ -44,7 +44,7 @@ enum ControlInfo {
 @MainActor
 final class ControlServer {
     static let shared = ControlServer()
-    private var listener: NWListener?
+    fileprivate var listener: NWListener?
     private let token = UUID().uuidString
     weak var recorder: Recorder?
 
@@ -56,8 +56,17 @@ final class ControlServer {
         guard let l = try? NWListener(using: params) else { return }
         l.newConnectionHandler = { c in Task { @MainActor in ControlServer.shared.serve(c) } }
         l.stateUpdateHandler = { s in
-            if case .ready = s, let port = l.port?.rawValue {
-                Task { @MainActor in ControlServer.shared.writeInfo(port: Int(port)) }
+            switch s {
+            case .ready:
+                if let port = l.port?.rawValue { Task { @MainActor in ControlServer.shared.writeInfo(port: Int(port)) } }
+            case .failed, .cancelled:
+                // 控制口断了：一秒后重开（换个新端口，control.json 跟着更新）
+                Task { @MainActor in
+                    ControlServer.shared.listener = nil
+                    try? await Task.sleep(for: .seconds(1))
+                    if let r = ControlServer.shared.recorder { ControlServer.shared.start(r) }
+                }
+            default: break
             }
         }
         l.start(queue: .main)
@@ -349,7 +358,11 @@ enum MCPBridge {
         var launched = false
         let deadline = Date().addingTimeInterval(20)
         while true {
-            if let r = post(name, args) { return r }
+            switch post(name, args) {
+            case .ok(let r): return r
+            case .failed(let e): return ["error": e]   // 已经发出去了（App 可能做了一半）：别再发一次
+            case .noApp: break
+            }
             if !launched {
                 launched = true
                 let app = Bundle.main.bundleURL
@@ -360,17 +373,20 @@ enum MCPBridge {
             Thread.sleep(forTimeInterval: 0.5)
         }
     }
-    static func post(_ name: String, _ args: [String: Any]) -> [String: Any]? {
+    enum PostResult { case ok([String: Any]), noApp, failed(String) }
+    static func post(_ name: String, _ args: [String: Any]) -> PostResult {
         guard let d = try? Data(contentsOf: ControlInfo.file), let info = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
               let port = info["port"] as? Int, let token = info["token"] as? String,
-              let pid = info["pid"] as? Int, kill(pid_t(pid), 0) == 0 else { return nil }
+              let pid = info["pid"] as? Int, kill(pid_t(pid), 0) == 0 else { return .noApp }
         var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/call")!)
         req.httpMethod = "POST"; req.setValue(token, forHTTPHeaderField: "X-Token"); req.timeoutInterval = 3700
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["name": name, "arguments": args])
         let sem = DispatchSemaphore(value: 0)
-        var out: [String: Any]?
-        URLSession.shared.dataTask(with: req) { data, _, _ in
-            out = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        var out: PostResult = .noApp
+        URLSession.shared.dataTask(with: req) { data, _, err in
+            if let j = data.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) { out = .ok(j) }
+            else if let e = err as? URLError, [.cannotConnectToHost, .cannotFindHost, .networkConnectionLost].contains(e.code), data == nil, e.code != .networkConnectionLost { out = .noApp }   // 连都没连上
+            else { out = .failed(err?.localizedDescription ?? "录屏 App 没有回应") }
             sem.signal()
         }.resume()
         sem.wait()

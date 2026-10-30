@@ -70,10 +70,10 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     }
     @Published var selectedBurst: Double?                // 音效轨上选中的那阵打字（起点）
     @Published var selectedPiece: Double?                // 剪辑轨上选中的那段（起点）
-    @Published var selected: UUID? { didSet { if selected != nil { selectedPiece = nil; selectedBurst = nil }; if let c = editingCaption, selected != c { editingCaption = nil }; if let c = editingCaptionOnPreview, selected != c { editingCaptionOnPreview = nil }   // 点了别处：字幕块收起编辑
+    @Published var selected: UUID? { didSet { if selected != oldValue { selectedPiece = nil; selectedBurst = nil }; if let c = editingCaption, selected != c { editingCaption = nil }; if let c = editingCaptionOnPreview, selected != c { editingCaptionOnPreview = nil }   // 点了别处：字幕块收起编辑
         ; if let n = editingNote, selected != n { endNote() } } }   // 选了别的：正在改的字先收好
     @Published var time = 0.0
-    @Published var playing = false { didSet { box.playing = playing; if !playing { musicPlayer.pauseAll(); if oldValue { redrawPausedFrame() } } } }
+    @Published var playing = false { didSet { box.playing = playing; if playing { dragFrame = nil }; if !playing { musicPlayer.pauseAll(); if oldValue { redrawPausedFrame() } } } }
     @Published var picking = false             // 正在等用户在预览上点固定位置
     @Published var exportProgress: Double?
     @Published var exported: URL?
@@ -128,6 +128,13 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     private var denoiseTask: Task<Void, Never>?
     private var previewKey = "off"             // 预览现在用的是哪一版声音
     private var undoStack: [StudioProject] = [], redoStack: [StudioProject] = []
+    // 打字改文字 / 字幕：开始那一刻的工程，结束时和现在不一样就记一步撤销
+    var textBase: StudioProject?
+    var noteOrig: String?
+    func commitTextEdit() {
+        if let b = textBase, b != project { undoStack.append(b); redoStack.removeAll() }
+        textBase = nil
+    }
     private(set) var dragBase: StudioProject?
     private var scrubber = Scrubber()          // 拖动时的 seek 排队：同时只有一个在路上，只留最新目标；拖动中不让播放器回调改播放头
 
@@ -486,7 +493,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     func stillPNG(at t: Double, maxWidth: Double) async -> Data? {
         let g = AVAssetImageGenerator(asset: asset)
         g.requestedTimeToleranceBefore = .zero; g.requestedTimeToleranceAfter = .zero
-        guard let (cg, _) = try? await g.image(at: CMTime(seconds: t, preferredTimescale: 600)) else { return nil }
+        guard let (cg, _) = try? await g.image(at: CMTime(seconds: t, preferredTimescale: 600)), !box.both.1.isEmpty else { return nil }
         let (r, plan) = box.both, i = min(max(Int((t * fps).rounded()), 0), plan.count - 1)
         let lay = r.lay
         var fr = r.frame(i, plan: plan, source: CIImage(cgImage: cg), overlay: box.overlay, srcTime: t)
@@ -552,6 +559,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
             cachedSource = (t, CIImage(cgImage: cg))
         }
         guard let src = cachedSource?.img, dragBase != nil else { return }
+        guard !box.both.1.isEmpty else { return }
         let (r, plan) = box.both, i = min(max(Int((t * fps).rounded()), 0), plan.count - 1)
         let lay = r.lay
         var fr = r.frame(i, plan: plan, source: src, overlay: box.overlay, srcTime: t, motionBlur: false)
@@ -816,7 +824,15 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         if p.segments != base.segments { p.segmentsEdited = true }
         project = p
     }
+    // 时间轴上拖了多远（可见时间，删掉的段已合拢）→ 素材时间要挪多少：按拖动开始时那一点换算，跨过剪刀记号也跟手
+    private var dragAnchorT: Double?
+    func srcDelta(_ dtVis: Double, anchor t: @autoclosure () -> Double) -> Double {
+        if dragAnchorT == nil { dragAnchorT = t() }
+        let a = dragAnchorT!
+        return srcTime(vis: visTime(a) + dtVis) - a
+    }
     func dragEnd() {
+        dragAnchorT = nil
         if let base = dragBase, base != project { undoStack.append(base); redoStack.removeAll() }
         dragBase = nil
         scrubEnd()
@@ -1597,11 +1613,13 @@ final class PlayerNSView: NSView {
         super.init(frame: frame)
         wantsLayer = true
         layer = CALayer()
+        layer?.masksToBounds = true   // 预览放大后画面层比视图大：裁掉，别画到时间轴上
         layerP.videoGravity = .resizeAspect
         layer?.addSublayer(layerP)
     }
     required init?(coder: NSCoder) { fatalError() }
-    var zoom = 1.0, pan = CGSize.zero
+    var zoom = 1.0 { didSet { window?.invalidateCursorRects(for: self) } }
+    var pan = CGSize.zero { didSet { window?.invalidateCursorRects(for: self) } }
     // 画面在本视图里的位置（放大后画面层比视图大，要换算过来）
     private var videoRectInView: CGRect { layer.map { $0.convert(layerP.videoRect, from: layerP) } ?? layerP.videoRect }
     override func layout() {
@@ -2029,7 +2047,7 @@ struct LayoutBlock: View {
         .onTapGesture { ed.selected = seg.id; ed.picking = false }
         .contextMenu { Button(L("删除这段布局", "Delete Layout Part"), role: .destructive) { ed.selected = seg.id; ed.deleteSelected() } }
         .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .named(TimelineStrip.space))
-            .onChanged { v in ed.selected = seg.id; ed.dragBegin(); moveBy(v.translation.width / w * d) }
+            .onChanged { v in ed.selected = seg.id; ed.dragBegin(); moveBy(ed.srcDelta(v.translation.width / w * d, anchor: seg.start)) }
             .onEnded { _ in ed.dragEnd() })
         .help(L("这段时间摄像头的摆法；选中后在上面改", "How the camera is laid out here; select it to change"))
     }
@@ -2056,7 +2074,7 @@ struct LayoutBlock: View {
             .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
             .onTapGesture { ed.selected = seg.id; ed.picking = false }
             .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named(TimelineStrip.space))
-                .onChanged { v in ed.selected = seg.id; ed.dragBegin(); resize(isStart, v.translation.width / w * d) }
+                .onChanged { v in ed.selected = seg.id; ed.dragBegin(); resize(isStart, ed.srcDelta(v.translation.width / w * d, anchor: isStart ? seg.start : seg.end)) }
                 .onEnded { _ in ed.dragEnd() })
     }
 }
@@ -2098,7 +2116,7 @@ struct CutBlock: View {
             .onChanged { v in
                 ed.selected = cut.id
                 ed.dragBegin()
-                let dt = v.translation.width / w * d
+                let dt = ed.srcDelta(v.translation.width / w * d, anchor: cut.start)
                 ed.dragUpdate { p in
                     guard let i = p.cuts.firstIndex(where: { $0.id == cut.id }) else { return }
                     let b = p.cuts[i], r = ed.cutRoom(for: cut.id, in: p), len = b.end - b.start
@@ -2121,7 +2139,7 @@ struct CutBlock: View {
                 .onChanged { v in
                     ed.selected = cut.id
                     ed.dragBegin()
-                    let dt = v.translation.width / w * d
+                    let dt = ed.srcDelta(v.translation.width / w * d, anchor: isStart ? cut.start : cut.end)
                     ed.dragUpdate { p in
                         guard let i = p.cuts.firstIndex(where: { $0.id == cut.id }) else { return }
                         let r = ed.cutRoom(for: cut.id, in: p)
@@ -2174,7 +2192,7 @@ struct SegmentBlock: View {
             .onChanged { v in
                 ed.selected = seg.id
                 ed.dragBegin()
-                let dt = v.translation.width / w * d
+                let dt = ed.srcDelta(v.translation.width / w * d, anchor: seg.start)
                 ed.dragUpdate { p in
                     guard let i = p.segments.firstIndex(where: { $0.id == seg.id }) else { return }
                     let base = p.segments[i], r = ed.room(for: seg.id, in: p), len = base.end - base.start
@@ -2195,7 +2213,7 @@ struct SegmentBlock: View {
                 .onChanged { v in
                     ed.selected = seg.id
                     ed.dragBegin()
-                    let dt = v.translation.width / w * d
+                    let dt = ed.srcDelta(v.translation.width / w * d, anchor: isStart ? seg.start : seg.end)
                     ed.dragUpdate { p in
                         guard let i = p.segments.firstIndex(where: { $0.id == seg.id }) else { return }
                         let r = ed.room(for: seg.id, in: p)
@@ -2258,7 +2276,7 @@ struct VoiceBlock: View {
             .onChanged { v in
                 ed.selected = clip.id
                 ed.dragBegin()
-                let dt = v.translation.width / w * d
+                let dt = ed.srcDelta(v.translation.width / w * d, anchor: clip.start)
                 ed.dragUpdate { p in
                     guard let i = p.voiceovers.firstIndex(where: { $0.id == clip.id }) else { return }
                     p.voiceovers[i].start = VoiceDrag.move(clip, dt: dt, duration: ed.duration)
@@ -2281,7 +2299,7 @@ struct VoiceBlock: View {
                 .onChanged { v in
                     ed.selected = clip.id
                     ed.dragBegin()
-                    let dt = v.translation.width / w * d
+                    let dt = ed.srcDelta(v.translation.width / w * d, anchor: clip.start)
                     ed.dragUpdate { p in
                         guard let i = p.voiceovers.firstIndex(where: { $0.id == clip.id }) else { return }
                         p.voiceovers[i] = VoiceDrag.trim(p.voiceovers[i], isStart: isStart, dt: dt, map: TimeMap(p), minLen: minLen)
@@ -2336,7 +2354,7 @@ struct CaptionBlock: View {
             .onChanged { v in
                 ed.selected = cap.id
                 ed.dragBegin()
-                let dt = v.translation.width / w * d
+                let dt = ed.srcDelta(v.translation.width / w * d, anchor: cap.start)
                 ed.dragUpdate { p in
                     guard let i = p.captions.firstIndex(where: { $0.id == cap.id }) else { return }
                     let b = p.captions[i], r = ed.captionRoom(for: cap.id, in: p), len = b.end - b.start
@@ -2358,7 +2376,7 @@ struct CaptionBlock: View {
                 .onChanged { v in
                     ed.selected = cap.id
                     ed.dragBegin()
-                    let dt = v.translation.width / w * d
+                    let dt = ed.srcDelta(v.translation.width / w * d, anchor: isStart ? cap.start : cap.end)
                     ed.dragUpdate { p in
                         guard let i = p.captions.firstIndex(where: { $0.id == cap.id }) else { return }
                         p.captions[i] = CaptionDrag.resize(p.captions[i], isStart: isStart, dt: dt, room: ed.captionRoom(for: cap.id, in: p), minLen: minLen)
@@ -3581,10 +3599,12 @@ struct CaptionField: View {
             .onChange(of: cap.text) { _, v in if !focused { text = v } }   // 另一处改了：跟上
             .onChange(of: text) { _, v in
                 guard v != cap.text, let i = ed.captionIndex(cap.id) else { return }
-                ed.dragBegin(); ed.dragUpdate { $0.captions[i].text = v.replacingOccurrences(of: "\n", with: " ") }
+                if ed.textBase == nil { ed.textBase = ed.project }
+                ed.project.captions[i].text = v.replacingOccurrences(of: "\n", with: " ")
             }
+            .onDisappear { ed.commitTextEdit() }   // 输入框被收起（点了别处）也要记撤销
             .onSubmit { focused = false }
-            .onChange(of: focused) { _, f in if !f { ed.dragEnd(); if inBlock { ed.editingCaption = nil }; if previewFont != nil { ed.editingCaptionOnPreview = nil } } }
+            .onChange(of: focused) { _, f in if !f { ed.commitTextEdit(); if inBlock { ed.editingCaption = nil }; if previewFont != nil { ed.editingCaptionOnPreview = nil } } }
             .onExitCommand { focused = false }
     }
 }
