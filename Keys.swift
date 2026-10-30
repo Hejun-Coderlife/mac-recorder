@@ -43,15 +43,32 @@ final class KeyCapture: @unchecked Sendable {
         return k
     }
     // 按当前键盘布局把键位换成字（不带修饰键，大写）
+    // 键盘布局：TIS / TSM 那套接口 macOS 26 起只能在主线程调（在后台线程调会被系统直接终止程序）。
+    // 所以在主线程读好存起来，切换输入法时再在主线程更新；按键识别（在后台线程）只用存好的这份
+    nonisolated(unsafe) private static var layout: (data: Data, kbd: UInt32)?
+    private static let layoutLock = NSLock()
+    private static var layoutObserver: Any?
+    static func refreshLayout() {
+        guard Thread.isMainThread else { DispatchQueue.main.async { refreshLayout() }; return }
+        var got: (Data, UInt32)?
+        if let src = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+           let ptr = TISGetInputSourceProperty(src, kTISPropertyUnicodeKeyLayoutData) {
+            got = (Unmanaged<CFData>.fromOpaque(ptr).takeUnretainedValue() as Data, UInt32(LMGetKbdType()))
+        }
+        layoutLock.lock(); layout = got; layoutLock.unlock()
+        if layoutObserver == nil {
+            layoutObserver = DistributedNotificationCenter.default().addObserver(forName: NSNotification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String), object: nil, queue: .main) { _ in refreshLayout() }
+        }
+    }
     static func char(_ code: Int) -> String? {
-        guard let src = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
-              let ptr = TISGetInputSourceProperty(src, kTISPropertyUnicodeKeyLayoutData) else { return nil }
-        let data = Unmanaged<CFData>.fromOpaque(ptr).takeUnretainedValue() as Data
+        if Thread.isMainThread && layout == nil { refreshLayout() }
+        layoutLock.lock(); let l = layout; layoutLock.unlock()
+        guard let (data, kbd) = l else { return nil }
         var dead: UInt32 = 0, len = 0
         var chars = [UniChar](repeating: 0, count: 4)
         let ok = data.withUnsafeBytes { raw -> OSStatus in
             UCKeyTranslate(raw.bindMemory(to: UCKeyboardLayout.self).baseAddress!, UInt16(code), UInt16(kUCKeyActionDisplay), 0,
-                           UInt32(LMGetKbdType()), OptionBits(kUCKeyTranslateNoDeadKeysBit), &dead, 4, &len, &chars)
+                           kbd, OptionBits(kUCKeyTranslateNoDeadKeysBit), &dead, 4, &len, &chars)
         }
         guard ok == noErr, len > 0 else { return nil }
         let s = String(utf16CodeUnits: chars, count: len).uppercased()
@@ -64,6 +81,7 @@ final class KeyCapture: @unchecked Sendable {
     }
 
     func start() {
+        Self.refreshLayout()   // 主线程上先把键盘布局读好（start 在主线程调）
         guard Self.hasPermission else { return }   // 没权限：靠 poll() 查按键状态
         let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
         let me = Unmanaged.passUnretained(self).toOpaque()
@@ -188,6 +206,7 @@ extension StudioTests {
     @MainActor static func batchATest() -> Bool {
         let env = ProcessInfo.processInfo.environment
         guard env["BATCHATEST"] != nil else { return false }
+        KeyCapture.refreshLayout()   // 和录制时一样：先在主线程读好键盘布局，后台线程只用存好的
         Task.detached {
             var fails = 0
             func check(_ ok: Bool, _ msg: String) { print(ok ? "PASS" : "FAIL", msg); if !ok { fails += 1 } }
