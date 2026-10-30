@@ -19,7 +19,7 @@ struct Caption: Codable, Equatable, Identifiable {
 // 字幕样式：苹方、粗细、字号（占画布短边）、颜色、描边、阴影、底色条、位置
 struct CaptionStyle: Codable, Equatable {
     enum Weight: String, Codable, CaseIterable { case regular, medium, semibold }
-    enum Box: String, Codable, CaseIterable { case none, dark, light }
+    enum Box: String, Codable, CaseIterable { case none, dark, light, glass }
     enum Position: String, Codable, CaseIterable { case bottom, top }
     var show = true
     var weight = Weight.semibold
@@ -111,6 +111,18 @@ final class CaptionLayer: @unchecked Sendable {
         return CGRect(x: o.x, y: o.y, width: w, height: h)
     }
     func image(atSource t: Double) -> CIImage? { map.inCut(t) ? nil : image(atOut: map.out(t)) }
+    // 叠到画面上（玻璃底要先把字幕后面那块画面做成透镜，所以要拿到画面）
+    func compose(_ img: CIImage, atOut t: Double) -> CIImage {
+        guard let c = image(atOut: t) else { return img }
+        var base = img
+        if style.box == .glass, let s = text(atOut: t), let cg = Self.render(s, style: style, cw: cw, ch: ch) {
+            let w = Double(cg.width), h = Double(cg.height), o = place(w: w, h: h)
+            let px = style.fontPx(canvas: cw, ch)
+            base = OverlayLayer.lens(img, rect: CGRect(x: o.x, y: o.y, width: w, height: h), radius: px * 0.45, strength: 0.9, dark: true, alpha: 1)
+        }
+        return c.composited(over: base)
+    }
+    func compose(_ img: CIImage, atSource t: Double) -> CIImage { map.inCut(t) ? (keys?.image(atOut: map.out(t)).map { $0.composited(over: img) } ?? img) : compose(img, atOut: map.out(t)) }
 
     private static let lock = NSLock()
     nonisolated(unsafe) private static var cache: [String: CGImage] = [:]
@@ -127,27 +139,35 @@ final class CaptionLayer: @unchecked Sendable {
             return CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: a))
         }
         // 连左右留白一起不超过画布宽的 90%
-        let padK = style.box == .none ? 0.25 : 0.55
+        // 有底时（深色 / 浅色 / 玻璃）照宣传片的字幕条：左右留白宽、圆角大、字上不描黑边
+        let padK = style.box == .none ? 0.25 : 0.8
         var w = CTLineGetTypographicBounds(line(px, stroke: false), nil, nil, nil)
         let maxW = cw * 0.9
         if w + 2 * padK * px > maxW { px *= maxW / (w + 2 * padK * px) }
         let fill = line(px, stroke: false)
         var asc: CGFloat = 0, desc: CGFloat = 0
         w = CTLineGetTypographicBounds(fill, &asc, &desc, nil)
-        let padX = px * padK, padY = style.box == .none ? px * 0.22 : px * 0.28
+        let padX = px * padK, padY = style.box == .none ? px * 0.22 : px * 0.34
         let W = Int((w + padX * 2).rounded(.up)), H = Int((asc + desc + padY * 2).rounded(.up))
         guard W > 0, H > 0, let c = CGContext(data: nil, width: W, height: H, bitsPerComponent: 8, bytesPerRow: 0,
                                              space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return nil }
         if style.box != .none {
-            let r = CGRect(x: 0, y: 0, width: W, height: H), rad = px * 0.28
-            c.addPath(CGPath(roundedRect: r, cornerWidth: rad, cornerHeight: rad, transform: nil))
-            c.setFillColor(style.box == .dark ? CGColor(gray: 0, alpha: 0.6) : CGColor(gray: 1, alpha: 0.88)); c.fillPath()
+            let r = CGRect(x: 0, y: 0, width: W, height: H), rad = px * 0.45
+            let path = CGPath(roundedRect: r, cornerWidth: rad, cornerHeight: rad, transform: nil)
+            switch style.box {
+            case .dark: c.addPath(path); c.setFillColor(CGColor(srgbRed: 18 / 255, green: 18 / 255, blue: 22 / 255, alpha: 0.74)); c.fillPath()
+            case .light: c.addPath(path); c.setFillColor(CGColor(gray: 1, alpha: 0.88)); c.fillPath()
+            case .glass:   // 后面的画面在 compose 里做成透镜；这里压一层很淡的暗色，白字才看得清
+                c.addPath(path); c.setFillColor(CGColor(gray: 0.05, alpha: 0.28)); c.fillPath()
+            case .none: break
+            }
         }
+        let plainText = style.box != .none   // 有底就不描黑边、不加阴影（宣传片那种干净的字幕条）
         let origin = CGPoint(x: padX, y: padY + desc)
         c.setLineJoin(.round)
-        if style.shadow { c.setShadow(offset: CGSize(width: 0, height: -px * 0.04), blur: px * 0.16, color: CGColor(gray: 0, alpha: 0.55)) }
-        if style.outline {
+        if style.shadow && !plainText { c.setShadow(offset: CGSize(width: 0, height: -px * 0.04), blur: px * 0.16, color: CGColor(gray: 0, alpha: 0.55)) }
+        if style.outline && !plainText {
             c.textPosition = origin; CTLineDraw(line(px, stroke: true), c)
             c.setShadow(offset: .zero, blur: 0, color: nil)   // 描边已经带了阴影，正文不再叠一层
         }

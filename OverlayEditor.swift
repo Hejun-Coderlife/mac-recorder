@@ -685,9 +685,17 @@ struct CaptionHandle: View {
                        width: r.width / hit.cw * fit.width, height: r.height / hit.ch * fit.height)
         let sel = ed.selected == hit.id
         let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        let editing = ed.editingCaptionOnPreview == hit.id
         ZStack {
             shape.fill(Color.white.opacity(0.001))
-            if sel {
+            if editing, let c = ed.project.captions.first(where: { $0.id == hit.id }) {
+                // 就地改字：盖在画面上的字幕上，字号跟画面上一样
+                CaptionField(ed: ed, cap: c, previewFont: max(10, ed.project.captionStyle.fontPx(canvas: hit.cw, hit.ch) / hit.cw * fit.width))
+                    .padding(.horizontal, 8)
+                    .frame(minWidth: v.width + 40)
+                    .background(shape.fill(Color.black.opacity(0.55)))
+            }
+            if sel || editing {
                 shape.stroke(Color.white.opacity(0.7), lineWidth: 3).blur(radius: 1).padding(-4)
                 shape.stroke(Color.accentColor, lineWidth: 1).padding(-4)
             }
@@ -705,7 +713,7 @@ struct CaptionHandle: View {
                 ed.dragCaption(by: CGSize(width: g.translation.width / fit.width, height: g.translation.height / fit.height), from: start!)
             }
             .onEnded { _ in start = nil; ed.dragEnd() })
-        .simultaneousGesture(TapGesture(count: 2).onEnded { ed.selected = hit.id; ed.editingCaption = hit.id })
+        .simultaneousGesture(TapGesture(count: 2).onEnded { ed.selected = hit.id; ed.editingCaptionOnPreview = hit.id })
         .simultaneousGesture(TapGesture().onEnded { ed.selected = hit.id })
         .help(L("字幕：单击选中，拖动挪位置（所有字幕一起），双击改字", "Caption: click to select, drag to move (all captions), double-click to edit"))
     }

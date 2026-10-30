@@ -69,7 +69,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         return x == y
     }
     @Published var selectedPiece: Double?                // 剪辑轨上选中的那段（起点）
-    @Published var selected: UUID? { didSet { if selected != nil { selectedPiece = nil }; if let c = editingCaption, selected != c { editingCaption = nil }   // 点了别处：字幕块收起编辑
+    @Published var selected: UUID? { didSet { if selected != nil { selectedPiece = nil }; if let c = editingCaption, selected != c { editingCaption = nil }; if let c = editingCaptionOnPreview, selected != c { editingCaptionOnPreview = nil }   // 点了别处：字幕块收起编辑
         ; if let n = editingNote, selected != n { endNote() } } }   // 选了别的：正在改的字先收好
     @Published var time = 0.0
     @Published var playing = false { didSet { box.playing = playing; if !playing { musicPlayer.pauseAll(); if oldValue { redrawPausedFrame() } } } }
@@ -114,6 +114,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     struct CaptionJob: Equatable { var message: String; var progress: Double? }
     @Published var captionJob: CaptionJob?     // 正在识别：说明 + 进度（nil = 还不知道多少）
     @Published var captionError: String?
+    @Published var editingCaptionOnPreview: UUID?   // 在预览画面上双击字幕：就地改字
     @Published var editingCaption: UUID?       // 要把光标放进字幕输入框的那句（双击 / 新加）
     @Published var drawing: OverlayTool?       // 正在等用户在预览上拖出遮挡 / 标注
     @Published var editingNote: UUID?          // 正在预览上直接改字的文字标注
@@ -424,7 +425,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
             let kk = min(1, 1600 / max(r.lay.cw, r.lay.ch))   // 样式刚改、合成还没换时按新画布缩放
             var img = r.frame(i, plan: plan, source: req.sourceImage, overlay: box.overlay, srcTime: req.compositionTime.seconds, motionBlur: box.playing)
             if let cam = box.camera { img = cam.compose(img, srcTime: req.compositionTime.seconds) }
-            if let c = box.captions?.image(atSource: req.compositionTime.seconds) { img = c.composited(over: img) }
+            if let c = box.captions { img = c.compose(img, atSource: req.compositionTime.seconds) }
             img = img.transformed(by: CGAffineTransform(scaleX: kk, y: kk))
             req.finish(with: img.composited(over: bg).cropped(to: bg.extent), context: nil)
         }
@@ -487,7 +488,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         let lay = r.lay
         var fr = r.frame(i, plan: plan, source: CIImage(cgImage: cg), overlay: box.overlay, srcTime: t)
         if let cam = box.camera { fr = cam.compose(fr, srcTime: t) }
-        if let c = box.captions?.image(atSource: t) { fr = c.composited(over: fr) }
+        if let c = box.captions { fr = c.compose(fr, atSource: t) }
         let k = min(1, maxWidth / lay.cw)
         let img = fr.composited(over: CIImage(color: CIColor(red: 0.86, green: 0.86, blue: 0.88)).cropped(to: lay.canvas))
             .transformed(by: CGAffineTransform(scaleX: k, y: k))
@@ -552,7 +553,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         let lay = r.lay
         var fr = r.frame(i, plan: plan, source: src, overlay: box.overlay, srcTime: t, motionBlur: false)
         if let cam = box.camera { fr = cam.compose(fr, srcTime: t) }
-        if let c = box.captions?.image(atSource: t) { fr = c.composited(over: fr) }
+        if let c = box.captions { fr = c.compose(fr, atSource: t) }
         let k = min(1, 1600 / lay.cw)
         let img = fr.cropped(to: lay.canvas).transformed(by: CGAffineTransform(scaleX: k, y: k))
         guard let out = dragCtx.createCGImage(img, from: img.extent.integral) else { return }
@@ -589,7 +590,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         let lay = r.lay
         var fr = r.frame(i, plan: plan, source: CIImage(cgImage: cg), overlay: box.overlay, srcTime: t)
         if let cam = box.camera { fr = cam.compose(fr, srcTime: t) }
-        if let c = box.captions?.image(atSource: t) { fr = c.composited(over: fr) }
+        if let c = box.captions { fr = c.compose(fr, atSource: t) }
         let img = fr.composited(over: CIImage(color: CIColor(red: 0.86, green: 0.86, blue: 0.88)).cropped(to: lay.canvas))
         let ctx = CIContext()
         if let out = ctx.createCGImage(img, from: lay.canvas) { still = NSImage(cgImage: out, size: CGSize(width: lay.cw, height: lay.ch)) }
@@ -2793,7 +2794,7 @@ struct StylePanel: View {
                     Toggle(L("阴影", "Shadow"), isOn: ed.capStyle(\.shadow))
                 }
                 Text(L("底色条", "Background bar")).font(.caption).foregroundStyle(.secondary)
-                chips(ed.capStyle(\.box), [(.none, L("无", "None")), (.dark, L("深色", "Dark")), (.light, L("浅色", "Light"))], columns: 3)
+                chips(ed.capStyle(\.box), [(.none, L("无", "None")), (.dark, L("深色", "Dark")), (.light, L("浅色", "Light")), (.glass, L("玻璃", "Glass"))], columns: 4)
                 Text(L("位置", "Position")).font(.caption).foregroundStyle(.secondary)
                 chips(Binding(get: { ed.project.captionStyle.position }, set: { v in ed.edit { $0.captionStyle.position = v; $0.captionStyle.cx = nil; $0.captionStyle.cy = nil } }),
                       [(.bottom, L("底部", "Bottom")), (.top, L("顶部", "Top"))], columns: 2)   // 点了就回到上 / 下（取消在画面上拖过的位置）
@@ -3531,15 +3532,20 @@ struct CaptionField: View {
     @ObservedObject var ed: StudioEditor
     let cap: Caption
     var inBlock = false          // true = 长在时间轴的黄色字幕块里（双击 / 新加时光标放这儿）
+    var previewFont: Double?     // 有值 = 在预览画面上就地改（字号按画面上字幕的大小）
     @State private var text = ""
     @FocusState private var focused: Bool
     var body: some View {
         TextField(L("在这里写字幕（回车完成）", "Type the caption (Return to finish)"), text: $text)
-            .textFieldStyle(inBlock ? AnyTextFieldStyle(.plain) : AnyTextFieldStyle(.roundedBorder))
-            .font(inBlock ? .system(size: 10.5, weight: .semibold) : .callout)
-            .foregroundStyle(inBlock ? Color.white : Color.primary)
+            .textFieldStyle(inBlock || previewFont != nil ? AnyTextFieldStyle(.plain) : AnyTextFieldStyle(.roundedBorder))
+            .font(previewFont.map { .custom("PingFangSC-Semibold", size: $0) } ?? (inBlock ? .system(size: 10.5, weight: .semibold) : .callout))
+            .multilineTextAlignment(previewFont != nil ? .center : .leading)
+            .foregroundStyle(inBlock || previewFont != nil ? Color.white : Color.primary)
             .focused($focused)
-            .onAppear { text = cap.text; if inBlock && ed.editingCaption == cap.id { DispatchQueue.main.async { focused = true } } }
+            .onAppear {
+                text = cap.text
+                if (inBlock && ed.editingCaption == cap.id) || (previewFont != nil && ed.editingCaptionOnPreview == cap.id) { DispatchQueue.main.async { focused = true } }
+            }
             .onChange(of: cap.id) { _, _ in text = cap.text }
             .onChange(of: cap.text) { _, v in if !focused { text = v } }   // 另一处改了：跟上
             .onChange(of: text) { _, v in
@@ -3547,7 +3553,7 @@ struct CaptionField: View {
                 ed.dragBegin(); ed.dragUpdate { $0.captions[i].text = v.replacingOccurrences(of: "\n", with: " ") }
             }
             .onSubmit { focused = false }
-            .onChange(of: focused) { _, f in if !f { ed.dragEnd(); if inBlock { ed.editingCaption = nil } } }
+            .onChange(of: focused) { _, f in if !f { ed.dragEnd(); if inBlock { ed.editingCaption = nil }; if previewFont != nil { ed.editingCaptionOnPreview = nil } } }
             .onExitCommand { focused = false }
     }
 }

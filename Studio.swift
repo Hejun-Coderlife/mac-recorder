@@ -1205,8 +1205,7 @@ final class StudioJob: @unchecked Sendable {
         let o = Double(i) / Double(r.st.fps)
         var img = img
         if let camLayer { img = camLayer.compose(img, srcTime: map.isIdentity ? o : map.src(o)) }
-        guard let c = captions.image(atOut: o) else { return img }
-        return c.composited(over: img)
+        return captions.compose(img, atOut: o)
     }
 
     private let lock = NSLock()
