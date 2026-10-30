@@ -103,7 +103,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     struct CaptionJob: Equatable { var message: String; var progress: Double? }
     @Published var captionJob: CaptionJob?     // 正在识别：说明 + 进度（nil = 还不知道多少）
     @Published var captionError: String?
-    @Published var editingCaption: UUID?       // 双击字幕：弹出改字
+    @Published var editingCaption: UUID?       // 要把光标放进字幕输入框的那句（双击 / 新加）
     @Published var drawing: OverlayTool?       // 正在等用户在预览上拖出遮挡 / 标注
     @Published var editingNote: UUID?          // 正在预览上直接改字的文字标注
     private var captionTask: Task<Void, Never>?
@@ -1088,14 +1088,7 @@ struct EditorView: View {
         }
         .frame(minWidth: 1000, minHeight: 640)
         .background(Color(nsColor: .windowBackgroundColor))
-        .alert(L("字幕", "Caption"), isPresented: Binding(get: { ed.editingCaption != nil }, set: { if !$0 { ed.editingCaption = nil } })) {
-            TextField(L("这句字幕", "Caption text"), text: $captionText)
-            Button(L("好", "OK")) { if let id = ed.editingCaption { ed.setCaptionText(id, captionText) }; ed.editingCaption = nil }
-            Button(L("取消", "Cancel"), role: .cancel) { ed.editingCaption = nil }
-        } message: { Text(L("一次只显示一行，太长会自动缩小字", "Shown on one line; long text is scaled down to fit")) }
-        .onChange(of: ed.editingCaption) { _, id in captionText = id.flatMap { i in ed.project.captions.first { $0.id == i }?.text } ?? "" }
     }
-    @State private var captionText = ""
 
     // 顶部只留文件名和「导出」
     private var toolbar: some View {
@@ -1347,9 +1340,7 @@ extension EditorView {
                 Text(L("字幕", "Caption")).font(.callout.weight(.semibold))
                 Text(clock(c.start) + " – " + clock(c.end)).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                 Divider().frame(height: 16)
-                Text(c.text.isEmpty ? L("（空白）", "(empty)") : c.text).font(.callout).lineLimit(1).truncationMode(.tail)
-                    .foregroundStyle(c.text.isEmpty ? .secondary : .primary)
-                Button(L("改字…", "Edit…")) { ed.editingCaption = c.id }
+                CaptionField(ed: ed, cap: c).frame(minWidth: 180, maxWidth: 420)
                 Spacer(minLength: 6)
                 Button { ed.splitCaption(c.id, at: ed.time) } label: { Label(L("拆分", "Split"), systemImage: "scissors") }
                     .disabled(!(ed.time > c.start + 0.15 && ed.time < c.end - 0.15))
@@ -1612,6 +1603,15 @@ struct TimelineStrip: View {
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(nsColor: .separatorColor)))
                     .gesture(SpatialTapGesture(count: 2).onEnded { ed.addSegment(at: tAt($0.location.x)) }
                         .exclusively(before: SpatialTapGesture().onEnded { ed.selected = nil; ed.picking = false; ed.seek(tAt($0.location.x)) }))
+                    .contextMenu {
+                        Button(L("在播放头分割（S）", "Split at Playhead (S)")) { ed.split(at: ed.time) }
+                        Button(L("在播放头加推近", "Add Zoom at Playhead")) { ed.addSegment(at: ed.time) }
+                        Button(L("在播放头加字幕", "Add Caption at Playhead")) { ed.addCaption(at: ed.time) }
+                        Divider()
+                        Button(L("全部字幕念成配音", "Speak All Captions")) { ed.speakCaptions() }.disabled(ed.project.captions.isEmpty || ed.speaking != nil)
+                        Button(L("建议加速", "Suggest Speed-ups")) { ed.suggestSpeed() }
+                        Button(L("重新自动生成推近", "Regenerate Zooms")) { ed.regenerate() }
+                    }
                 ruler(w: w, d: d, x: { $0 / d * w })
                     .contentShape(Rectangle())
                     .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.space))
@@ -1870,6 +1870,7 @@ struct LayoutBlock: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { ed.selected = seg.id; ed.picking = false }
+        .contextMenu { Button(L("删除这段布局", "Delete Layout Part"), role: .destructive) { ed.selected = seg.id; ed.deleteSelected() } }
         .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .named(TimelineStrip.space))
             .onChanged { v in ed.selected = seg.id; ed.dragBegin(); moveBy(v.translation.width / w * d) }
             .onEnded { _ in ed.dragEnd() })
@@ -2000,6 +2001,18 @@ struct SegmentBlock: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { ed.selected = seg.id; ed.picking = false }
+        .contextMenu {
+            Menu(L("放大", "Zoom")) {
+                ForEach([1.5, 2.0, 2.5, 3.0], id: \.self) { z in
+                    Button(String(format: "%.1f×", z)) { if let i = ed.index(seg.id) { ed.edit { $0.segments[i].zoom = z } } }
+                }
+            }
+            Button(seg.mode == .follow ? L("改成固定位置", "Fixed Position") : L("改成跟着鼠标", "Follow Cursor")) {
+                if let i = ed.index(seg.id) { ed.edit { $0.segments[i].mode = seg.mode == .follow ? .fixed : .follow } }
+            }
+            Divider()
+            Button(L("删除这段推近", "Delete Zoom"), role: .destructive) { ed.selected = seg.id; ed.deleteSelected() }
+        }
         .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .named(TimelineStrip.space))
             .onChanged { v in
                 ed.selected = seg.id
@@ -2096,6 +2109,9 @@ struct VoiceBlock: View {
             }
             .onEnded { _ in ed.dragEnd() })
         .help(L("讲解：拖动挪位置，拖两头剪掉不要的开头结尾", "Voiceover: drag to move, drag the ends to trim"))
+        .contextMenu {
+            Button(L("删除这段讲解", "Delete Voiceover"), role: .destructive) { ed.selected = clip.id; ed.deleteSelected() }
+        }
     }
 
     private func edge(isStart: Bool) -> some View {
@@ -2144,6 +2160,16 @@ struct CaptionBlock: View {
         .contentShape(Rectangle())
         .gesture(TapGesture(count: 2).onEnded { ed.selected = cap.id; ed.editingCaption = cap.id }
             .exclusively(before: TapGesture().onEnded { ed.selected = cap.id; ed.picking = false }))
+        .contextMenu {
+            Button(L("改字", "Edit Text")) { ed.selected = cap.id; ed.editingCaption = cap.id }
+            Button(L("念成配音", "Speak as Voiceover")) { ed.speakCaptions([cap.id]) }.disabled(cap.text.isEmpty || ed.speaking != nil)
+            Button(L("全部字幕念成配音", "Speak All Captions")) { ed.speakCaptions() }.disabled(ed.speaking != nil)
+            Divider()
+            Button(L("在播放头拆分", "Split at Playhead")) { ed.splitCaption(cap.id, at: ed.time) }.disabled(!(ed.time > cap.start + 0.15 && ed.time < cap.end - 0.15))
+            Button(L("和下一句合并", "Merge with Next")) { ed.mergeCaption(cap.id) }
+            Divider()
+            Button(L("删除", "Delete"), role: .destructive) { ed.selected = cap.id; ed.deleteSelected() }
+        }
         .simultaneousGesture(DragGesture(minimumDistance: 2, coordinateSpace: .named(TimelineStrip.space))
             .onChanged { v in
                 ed.selected = cap.id
@@ -2511,7 +2537,7 @@ struct StylePanel: View {
                 .help(L("每次点击时在鼠标处冒一下，让观众看清点了哪里", "A little effect at each click so viewers see where you clicked"))
             if look.ripple {
                 chips(ed.look(\.rippleStyle), [(.ring, L("圆圈", "Ring")), (.double, L("双圈", "Double")), (.pulse, L("圆点", "Dot")),
-                                               (.glow, L("光晕", "Glow")), (.burst, L("放射", "Burst")), (.focus, L("对焦", "Focus"))], columns: 3)
+                                               (.glow, L("光晕", "Glow")), (.glass, L("玻璃", "Glass")), (.focus, L("对焦", "Focus"))], columns: 3)
             }
             Toggle(L("点击音效", "Click sound"), isOn: ed.look(\.clickSound))
                 .help(L("每次点击处加一声轻响，预览和导出都有；音量在「声音」里调", "Adds a soft click at each click, in the preview and the export; set its volume under Sound"))
@@ -3352,4 +3378,26 @@ final class DenoiseProgress: @unchecked Sendable {
     private weak var ed: StudioEditor?
     @MainActor init(_ e: StudioEditor) { ed = e }
     @Sendable func report(_ v: Double) { DispatchQueue.main.async { MainActor.assumeIsolated { self.ed?.setDenoiseProgress(v) } } }
+}
+
+// 选中字幕时上面那条里的输入框：直接打字，预览马上变（整次改字算一步撤销）；双击字幕块 / 新加一句时光标自动放进来
+struct CaptionField: View {
+    @ObservedObject var ed: StudioEditor
+    let cap: Caption
+    @State private var text = ""
+    @FocusState private var focused: Bool
+    var body: some View {
+        TextField(L("在这里写字幕（回车完成）", "Type the caption (Return to finish)"), text: $text)
+            .textFieldStyle(.roundedBorder).font(.callout)
+            .focused($focused)
+            .onAppear { text = cap.text; if ed.editingCaption == cap.id { DispatchQueue.main.async { focused = true } } }
+            .onChange(of: cap.id) { _, _ in text = cap.text }
+            .onChange(of: ed.editingCaption) { _, id in if id == cap.id { text = cap.text; focused = true } }
+            .onChange(of: text) { _, v in
+                guard v != cap.text, let i = ed.captionIndex(cap.id) else { return }
+                ed.dragBegin(); ed.dragUpdate { $0.captions[i].text = v.replacingOccurrences(of: "\n", with: " ") }
+            }
+            .onSubmit { focused = false }
+            .onChange(of: focused) { _, f in if !f { ed.dragEnd(); ed.editingCaption = nil } }
+    }
 }

@@ -180,6 +180,14 @@ extension StudioEditor {
         }
     }
     // 时间轴上拖：move = 整段挪，否则改开头 / 结尾
+    // 整段挪到从 t 开始（长度不变）
+    func moveOverlay(_ id: UUID, to t: Double) {
+        edit { p in
+            if let i = p.redactions.firstIndex(where: { $0.id == id }) { let l = p.redactions[i].end - p.redactions[i].start; p.redactions[i].start = min(t, duration - l); p.redactions[i].end = p.redactions[i].start + l }
+            if let i = p.annotations.firstIndex(where: { $0.id == id }) { let l = p.annotations[i].end - p.annotations[i].start; p.annotations[i].start = min(t, duration - l); p.annotations[i].end = p.annotations[i].start + l }
+        }
+        selectOverlay(id)
+    }
     // 拖文字的角：字号 = 拖之前的 × k（12–160）
     func dragNoteScale(_ id: UUID, _ k: Double) {
         dragBegin()
@@ -465,6 +473,13 @@ struct OverlayBlock: View {
         .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .named(TimelineStrip.space))
             .onChanged { v in if ed.selected != id { ed.selected = id }; ed.dragOverlayTime(id, edge: 0, dt: v.translation.width / w * d) }
             .onEnded { _ in ed.dragEnd() })
+        .contextMenu {
+            if info.isText { Button(L("改字", "Edit Text")) { ed.selectOverlay(id); ed.beginNote(id) } }
+            Button(L("复制一份", "Duplicate")) { ed.selectOverlay(id); ed.duplicateOverlay() }
+            Button(L("移到播放头", "Move to Playhead")) { ed.moveOverlay(id, to: ed.time) }
+            Divider()
+            Button(L("删除", "Delete"), role: .destructive) { ed.selected = id; ed.deleteSelected() }
+        }
         .help(lane == .redaction ? L("遮挡：这段时间画面上这一块被遮住；选中后在预览上改位置大小", "Redaction: hides part of the picture here; select it to move or resize it in the preview")
                                  : L("标注：这段时间画面上显示；选中后在预览上改位置，双击文字改内容", "Annotation shown during this time; select it to move it in the preview, double-click text to edit"))
     }

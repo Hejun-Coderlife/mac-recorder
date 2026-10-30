@@ -221,7 +221,7 @@ struct StudioLook: Codable, Equatable {
     enum Typing: String, Codable, CaseIterable { case mechanical, laptop, clicky, thock }   // 都是真键盘录音（清脆 / 低沉由机械键盘升降调）
     var ripple = true              // 点击波纹
     var rippleStyle = Ripple.ring  // 波纹样子
-    enum Ripple: String, Codable, CaseIterable { case ring, double, pulse, glow, burst, focus }
+    enum Ripple: String, Codable, CaseIterable { case ring, double, pulse, glow, glass, focus }
     var blur = Blur.light          // 运动模糊：只在镜头快速移动时有
     enum KeysAt: String, Codable, CaseIterable { case bottom, bottomLeft, bottomRight }
     var showKeys = false           // 画面上显示按的快捷键（⌘ ⇧ C 这种键帽）
@@ -985,7 +985,8 @@ final class StudioRenderer: @unchecked Sendable {
                 // 每种：(从多大扩到多大（点）, 透明度)；double 是两圈错开 0.15 秒
                 var layers: [(r: Double, a: Double)] = []
                 switch style {
-                case .ring, .burst: layers = [(6 + 22 * e, 1 - u)]
+                case .ring: layers = [(6 + 22 * e, 1 - u)]
+                case .glass: layers = []
                 case .double:
                     layers = [(6 + 24 * e, 1 - u)]
                     let u2 = max(0, (t - c.t - 0.15) / (dur - 0.15)), e2 = 1 - pow(1 - u2, 3)
@@ -993,6 +994,22 @@ final class StudioRenderer: @unchecked Sendable {
                 case .pulse: layers = [(10 + 14 * e, (1 - u) * 0.9)]
                 case .glow: layers = [(14 + 16 * e, (1 - u) * 0.85)]
                 case .focus: layers = [(46 - 30 * e, min(1, u * 4) * (1 - u))]   // 从大往点击处收
+                }
+                if style == .glass {
+                    // 玻璃波纹：点击处一块圆形玻璃透镜鼓出来再淡掉（没有边线），透镜下的画面被放大
+                    let rad = (10 + 26 * e) * ppp * look.cursorScale / 1.5
+                    let p = CGPoint(x: c.x, y: c.y).applying(lay.toScene)
+                    let s = rad * lay.s
+                    let R = CGRect(x: p.x - s, y: p.y - s, width: s * 2, height: s * 2)
+                    scene = OverlayLayer.lens(scene, rect: R, radius: s, strength: 1.2 * (1 - u), dark: false, alpha: 1 - u * u)
+                    // 底下一圈很淡的影子：白底上也看得出有块玻璃鼓起来（没有边线）
+                    let sh = CIFilter(name: "CIRadialGradient", parameters: ["inputCenter": CIVector(x: p.x, y: p.y - s * 0.06), "inputRadius0": s * 0.97, "inputRadius1": s * 1.35,
+                                                                           "inputColor0": CIColor(red: 0, green: 0, blue: 0, alpha: 0.16 * (1 - u)), "inputColor1": CIColor(red: 0, green: 0, blue: 0, alpha: 0)])!.outputImage!
+                        .cropped(to: R.insetBy(dx: -s * 0.5, dy: -s * 0.5))
+                    // 只留透镜外面那一圈影子（渐变里面是实色，用圆形遮罩把透镜里面换回来）
+                    let disc = CIFilter(name: "CIRadialGradient", parameters: ["inputCenter": CIVector(x: p.x, y: p.y), "inputRadius0": s * 0.98, "inputRadius1": s,
+                                                                             "inputColor0": CIColor.white, "inputColor1": CIColor.black])!.outputImage!
+                    scene = scene.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: sh.composited(over: scene), kCIInputMaskImageKey: disc])
                 }
                 let art = rippleArt[style] ?? ring
                 for (rad, al) in layers {
@@ -1089,13 +1106,8 @@ final class StudioRenderer: @unchecked Sendable {
         case .glow:    // 柔和的光晕
             let g = CGGradient(colorsSpace: sp, colors: [CGColor(srgbRed: 1, green: 0.95, blue: 0.6, alpha: 0.9), CGColor(srgbRed: 1, green: 0.85, blue: 0.3, alpha: 0)] as CFArray, locations: [0, 1])!
             c.drawRadialGradient(g, startCenter: CGPoint(x: 64, y: 64), startRadius: 0, endCenter: CGPoint(x: 64, y: 64), endRadius: 62, options: [])
-        case .burst:   // 一圈放射的短线
-            c.setLineCap(.round)
-            for k in 0..<8 {
-                let a = Double(k) * .pi / 4, p0 = CGPoint(x: 64 + cos(a) * 34, y: 64 + sin(a) * 34), p1 = CGPoint(x: 64 + cos(a) * 56, y: 64 + sin(a) * 56)
-                c.setStrokeColor(CGColor(gray: 0, alpha: 0.25)); c.setLineWidth(10); c.move(to: p0); c.addLine(to: p1); c.strokePath()
-                c.setStrokeColor(CGColor(gray: 1, alpha: 0.95)); c.setLineWidth(6); c.move(to: p0); c.addLine(to: p1); c.strokePath()
-            }
+        case .glass:   // 玻璃波纹直接在画面上做透镜，不用底图
+            break
         case .focus:   // 往里收的细圈（像对焦）
             c.setStrokeColor(CGColor(gray: 0, alpha: 0.3)); c.setLineWidth(7); c.strokeEllipse(in: r)
             c.setStrokeColor(CGColor(srgbRed: 0.2, green: 0.6, blue: 1, alpha: 1)); c.setLineWidth(4); c.strokeEllipse(in: r)

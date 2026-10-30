@@ -103,6 +103,14 @@ struct PieceBlock: View {
         .padding(.horizontal, 1)
         .contentShape(Rectangle())
         .onTapGesture { ed.selected = nil; ed.selectedPiece = piece.start; ed.picking = false }
+        .contextMenu {
+            Button(L("在播放头分割（S）", "Split at Playhead (S)")) { ed.split(at: ed.time) }
+            Menu(L("速度", "Speed")) {
+                ForEach([1.0, 1.5, 2, 4, 8], id: \.self) { r in Button(r.formatted() + "×" + (r == piece.rate ? " ✓" : "")) { ed.setPieceSpeed(piece, r) } }
+            }
+            Divider()
+            Button(L("删除这段", "Delete Part"), role: .destructive) { ed.deletePiece(piece) }
+        }
         .help(L("一段素材：点选后按 Delete 删掉（时间轴直接合拢），或在下面改速度；在播放头处按 S（⌘B）分割",
                 "A part of the clip: select it and press Delete to remove it (the timeline closes up), or change its speed below; press S (⌘B) to split at the playhead"))
     }
