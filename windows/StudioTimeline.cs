@@ -485,6 +485,7 @@ namespace ScreenRecorder
             var h = HitTest(e.Location, out var id);
             if (h == Hit.CapBody || h == Hit.CapStart || h == Hit.CapEnd) { ed.Select("cap", id); ed.EditCaptionText(); justAdded = true; return; }
             if (h == Hit.AnnBody && ed.Project.Annotations.FirstOrDefault(a => a.Id == id)?.Kind == "text") { ed.Select("ann", id); ed.EditAnnotationText(); justAdded = true; return; }
+            if (h == Hit.Piece) { ed.Split(T(e.X)); justAdded = true; return; }   // 片段上双击 = 在这里分割
             if (h == Hit.Empty && e.Y >= RedY && e.Y < MusY + MusH) return;   // 遮挡 / 标注 / 音乐轨上双击不加推近段
             if (h == Hit.Empty)
             {
