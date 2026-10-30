@@ -59,7 +59,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     private var refreshPending = false
 
     @Published var project: StudioProject { didSet { if project != oldValue { replan(); scheduleSave() } } }
-    @Published var selected: UUID?
+    @Published var selected: UUID? { didSet { if let n = editingNote, selected != n { endNote() } } }   // 选了别的：正在改的字先收好
     @Published var time = 0.0
     @Published var playing = false { didSet { if !playing { musicPlayer.pauseAll() } } }
     @Published var picking = false             // 正在等用户在预览上点固定位置
@@ -323,7 +323,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     private func key(_ e: NSEvent) -> Bool {
         let cmd = e.modifierFlags.contains(.command), shift = e.modifierFlags.contains(.shift)
         // 正在输入框里打字（预览上改文字标注等）：按键都交给输入框
-        if editingNote != nil || window?.firstResponder is NSTextView { return false }
+        if window?.firstResponder is NSTextView { return false }
         // 录讲解 / 倒数中：空格或 Esc 停下
         if (voiceRec != nil || countdown != nil) && (e.keyCode == 49 || e.keyCode == 53) { toggleVoice(); return true }
         switch e.keyCode {
@@ -528,7 +528,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
                 if clicks.contains(where: { abs(Double($0) / 1000 - t) < 0.06 }) {
                     ClickPreview.play(self.project.look.clickStyle, volume: self.project.audio.clicks)
                 }
-                if keys.contains(where: { abs($0 - t) < 0.03 }) { ClickPreview.playKey(volume: self.project.audio.clicks) }
+                if keys.contains(where: { abs($0 - t) < 0.03 }) { ClickPreview.playKey(self.project.look.typeStyle, volume: self.project.audio.clicks) }
                 self.syncPlayback()
             }
         }
@@ -1072,6 +1072,7 @@ struct EditorView: View {
     }
 
     // 预览和时间轴之间的一条（像 Screen Studio）：左边编辑工具，正中播放和时间，右边时间轴缩放
+    @State private var barW = 2000.0
     private var controlBar: some View {
         ZStack {
             HStack(spacing: 10) {
@@ -1096,7 +1097,9 @@ struct EditorView: View {
                 Group {
                     Button { ed.setTimelineScale(ed.timelineScale / 1.5) } label: { Image(systemName: "minus.magnifyingglass") }
                         .disabled(ed.timelineScale <= 1)
-                    Slider(value: Binding(get: { ed.timelineScale }, set: { ed.setTimelineScale($0) }), in: TimelineMath.scaleRange).frame(width: 90)
+                    if barW >= 1180 {   // 窄窗口只留 ± 两个按钮
+                        Slider(value: Binding(get: { ed.timelineScale }, set: { ed.setTimelineScale($0) }), in: TimelineMath.scaleRange).frame(width: 90)
+                    }
                     Text(String(format: "%.1f×", ed.timelineScale)).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 30, alignment: .leading)
                     Button { ed.setTimelineScale(ed.timelineScale * 1.5) } label: { Image(systemName: "plus.magnifyingglass") }
                         .disabled(ed.timelineScale >= 8)
@@ -1116,6 +1119,9 @@ struct EditorView: View {
                     .font(.callout.monospacedDigit()).foregroundStyle(.secondary).frame(width: 130, alignment: .leading)
             }
         }
+        // 窗口窄了（左边带字的按钮会碰到正中的播放键）：左边只留图标，鼠标停上去有说明
+        .labelStyle(BarLabel(compact: barW < 1180))
+        .background(GeometryReader { g in Color.clear.onAppear { barW = g.size.width }.onChange(of: g.size.width) { _, w in barW = w } })
     }
 
     // 时间轴放大后能左右滚；播放时跟着播放头翻页。捏合 / ⌘+滚轮缩放、滚轮平移由 TimelineGestures 接住
@@ -1153,7 +1159,7 @@ struct EditorView: View {
             if let img = ed.still {
                 Image(nsImage: img).resizable().aspectRatio(contentMode: .fit)
             } else {
-                PlayerPane(player: ed.player, picking: ed.picking, camRect: ed.cameraPipRect, onPick: { ed.pick($0) },
+                PlayerPane(player: ed.player, picking: ed.picking, camRect: ed.cameraPipRect, onPick: { ed.pick($0) }, onTap: { ed.tapPreview($0) },
                            onCamMove: { d, ph in ed.moveCamera(by: d, phase: ph) })
             }
             // 遮挡、标注：选中的那个出编辑框，「遮挡 / 标注」按下后在画面上拖出来
@@ -1376,14 +1382,16 @@ struct PlayerPane: NSViewRepresentable {
     var picking: Bool
     var camRect: CGRect? = nil                       // 摄像头小窗在画面里的位置（比例，左上为原点），能拖
     let onPick: (CGPoint) -> Void
+    var onTap: ((CGPoint?) -> Void)? = nil
     var onCamMove: ((CGSize, Int) -> Void)? = nil   // 拖了多远（画面比例）；0 开始 / 1 拖动中 / 2 松手
-    func makeNSView(context: Context) -> PlayerNSView { let v = PlayerNSView(); v.layerP.player = player; v.onPick = onPick; return v }
-    func updateNSView(_ v: PlayerNSView, context: Context) { v.picking = picking; v.onPick = onPick; v.camRect = camRect; v.onCamMove = onCamMove }
+    func makeNSView(context: Context) -> PlayerNSView { let v = PlayerNSView(); v.layerP.player = player; v.onPick = onPick; v.onTap = onTap; return v }
+    func updateNSView(_ v: PlayerNSView, context: Context) { v.picking = picking; v.onPick = onPick; v.onTap = onTap; v.camRect = camRect; v.onCamMove = onCamMove }
 }
 final class PlayerNSView: NSView {
     let layerP = AVPlayerLayer()
     var picking = false { didSet { window?.invalidateCursorRects(for: self) } }
     var onPick: ((CGPoint) -> Void)?
+    var onTap: ((CGPoint?) -> Void)?         // 普通点一下：画面里的比例（左上原点），点在画面外 = nil
     var camRect: CGRect? { didSet { if camRect != oldValue { window?.invalidateCursorRects(for: self) } } }
     var onCamMove: ((CGSize, Int) -> Void)?
     private var camDragFrom: CGPoint?
@@ -1411,7 +1419,10 @@ final class PlayerNSView: NSView {
         if !picking, let c = camRect, let v = viewRect(c), v.contains(p) {
             camDragFrom = p; onCamMove?(.zero, 0); NSCursor.closedHand.push(); return
         }
-        guard picking else { return }
+        guard picking else {
+            onTap?(r.width > 0 && r.contains(p) ? CGPoint(x: (p.x - r.minX) / r.width, y: 1 - (p.y - r.minY) / r.height) : nil)
+            return
+        }
         guard r.width > 0, r.contains(p) else { return }
         onPick?(CGPoint(x: (p.x - r.minX) / r.width, y: 1 - (p.y - r.minY) / r.height))
     }
@@ -2089,6 +2100,13 @@ struct LevelMeter: View {
     }
 }
 
+struct BarLabel: LabelStyle {
+    let compact: Bool
+    func makeBody(configuration: Configuration) -> some View {
+        if compact { configuration.icon } else { HStack(spacing: 5) { configuration.icon; configuration.title } }
+    }
+}
+
 // ---- 右边的「样式」面板：预设、画面比例、背景、画面、鼠标、运动模糊 ----
 struct StylePanel: View {
     @ObservedObject var ed: StudioEditor
@@ -2360,14 +2378,17 @@ struct StylePanel: View {
                         .help(L("试听", "Preview sound"))
                 }.controlSize(.small)
             }
-            HStack(spacing: 6) {
-                Toggle(L("打字声", "Typing sound"), isOn: Binding(get: { look.typeSound }, set: { v in ed.look(\.typeSound).wrappedValue = v; if v { ClickPreview.playTyping() } }))
-                if look.typeSound {
-                    Button { ClickPreview.playTyping() } label: { Image(systemName: "speaker.wave.2.fill") }.controlSize(.small).help(L("试听", "Preview sound"))
-                }
+            Toggle(L("打字声", "Typing sound"), isOn: Binding(get: { look.typeSound }, set: { v in ed.look(\.typeSound).wrappedValue = v; if v { ClickPreview.playTyping(look.typeStyle) } }))
+                .help(L("录制时每按一下键盘，成片里加一声键盘声，预览和导出都有；音量和点击声一起在「声音」里调",
+                        "Adds a keyboard sound for every key you pressed while recording, in the preview and the export; volume is under Sound with the click sound"))
+            if look.typeSound {
+                HStack(spacing: 6) {
+                    Picker("", selection: Binding(get: { look.typeStyle }, set: { v in ed.look(\.typeStyle).wrappedValue = v; ClickPreview.playTyping(v) })) {
+                        ForEach(StudioLook.Typing.allCases, id: \.self) { Text(ClickSound.typingName($0)).tag($0) }
+                    }.labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
+                    Button { ClickPreview.playTyping(look.typeStyle) } label: { Image(systemName: "speaker.wave.2.fill") }.help(L("试听", "Preview sound"))
+                }.controlSize(.small)
             }
-            .help(L("录制时每按一下键盘，成片里加一声机械键盘的「嗒」，预览和导出都有；音量和点击声一起在「声音」里调",
-                    "Adds a mechanical keyboard tap for every key you pressed while recording, in the preview and the export; volume is under Sound with the click sound"))
             Toggle(L("结尾鼠标回到起点", "Return cursor to start at the end"), isOn: ed.look(\.cursorLoop))
                 .help(L("最后一小段鼠标慢慢走回第一帧的位置，首尾接得上，适合做循环播放的视频", "In the last moment the cursor glides back to where it started, so the video loops seamlessly"))
             if look.cursorLoop {
@@ -2990,19 +3011,20 @@ enum StudioTests {
 @MainActor enum ClickPreview {
     private static var player: AVAudioPlayer?
     private static var keyPlayers: [AVAudioPlayer] = []
+    private static var keyPlayersStyle: StudioLook.Typing?
     private static var keyN = 0
     // 一声按键（连打时几个播放器轮着用，前一声还没放完也不会被掐断）
-    static func playKey(volume: Double = 1) {
+    static func playKey(_ style: StudioLook.Typing, volume: Double = 1) {
         guard StudioEditor.testShot == nil else { return }
-        if keyPlayers.isEmpty { keyPlayers = (0..<8).compactMap { try? AVAudioPlayer(data: ClickSound.keyWav($0 % 4)) } }
+        if keyPlayersStyle != style { keyPlayers = (0..<8).compactMap { try? AVAudioPlayer(data: ClickSound.keyWav(style, $0 % 4)) }; keyPlayersStyle = style }
         guard !keyPlayers.isEmpty else { return }
         let p = keyPlayers[keyN % keyPlayers.count]; keyN += 1
         p.volume = Float(min(max(volume, 0), 1)); p.currentTime = 0; p.play()
     }
     // 试听：像打了一小串字
-    static func playTyping() {
-        for (i, d) in [0, 0.13, 0.24, 0.41, 0.52, 0.66].enumerated() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + d) { MainActor.assumeIsolated { _ = i; playKey() } }
+    static func playTyping(_ style: StudioLook.Typing) {
+        for d in [0, 0.13, 0.24, 0.41, 0.52, 0.66] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + d) { MainActor.assumeIsolated { playKey(style) } }
         }
     }
     static func name(_ c: StudioLook.Click) -> String {

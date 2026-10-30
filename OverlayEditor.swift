@@ -79,6 +79,37 @@ extension StudioEditor {
         selectOverlay(a.id)
         if kind == .text { beginNote(a.id) }
     }
+    // 在预览上点一下：点中正在显示的标注 / 遮挡就选中它（上面的优先），点空白处取消选中。p = 画布里的比例（左上原点）
+    func tapPreview(_ p: CGPoint?) {
+        guard let p else { selected = nil; return }
+        let m = overlayMapping()
+        let n = m.norm(canvas: CGPoint(x: p.x * m.lay.cw, y: (1 - p.y) * m.lay.ch))
+        let ptsW = Double(track.width) / max(track.pixelsPerPoint, 0.01), ptsH = Double(track.height) / max(track.pixelsPerPoint, 0.01)
+        let tol = 0.012 / (m.f?.z ?? 1)
+        func near(_ a: CGPoint, _ b: CGPoint) -> Double {   // 点到线段的距离（原画面比例）
+            let dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy
+            let k = l2 > 0 ? min(max(((n.x - a.x) * dx + (n.y - a.y) * dy) / l2, 0), 1) : 0
+            return hypot(n.x - (a.x + dx * k), n.y - (a.y + dy * k))
+        }
+        for a in project.annotations.reversed() where time >= a.start && time < a.end {
+            let hit: Bool
+            switch a.kind {
+            case .arrow:
+                let a0 = CGPoint(x: a.x, y: a.y), a1 = CGPoint(x: a.x + a.w, y: a.y + a.h)
+                hit = near(a0, a1) < tol * 2 + (a.arrow == .curved ? hypot(a.w, a.h) * 0.22 : 0)
+            case .text:
+                let sz = OverlayLayer.textBox(a, unit: 1)
+                hit = CGRect(x: a.x, y: a.y, width: sz.width / ptsW, height: sz.height / ptsH).insetBy(dx: -tol, dy: -tol).contains(n)
+            default:
+                hit = CGRect(x: a.x, y: a.y, width: a.w, height: a.h).standardized.insetBy(dx: -tol, dy: -tol).contains(n)
+            }
+            if hit { selected = a.id; return }
+        }
+        for r in project.redactions.reversed() where time >= r.start && time < r.end && r.rect.insetBy(dx: -tol, dy: -tol).contains(n) {
+            selected = r.id; return
+        }
+        selected = nil
+    }
     // 文字标注直接在预览上改：打字时实时进工程（整次改字算一步撤销），回车 / 点别处收好，Esc 退回原来的字；改完是空的就删掉
     func beginNote(_ id: UUID) { dragBegin(); editingNote = id }
     func typeNote(_ id: UUID, _ text: String) {
@@ -464,10 +495,19 @@ struct AnnotationInspector: View {
                 case .highlight:
                     EmptyView()
                 default:
+                    if a.kind == .arrow {
+                        Picker("", selection: Binding(get: { a.arrow ?? .plain }, set: { v in ed.edit { $0.annotations[i].arrow = v == .plain ? nil : v } })) {
+                            ForEach(Annotation.ArrowStyle.allCases, id: \.self) { Text(Annotation.arrowName($0)).tag($0) }
+                        }.labelsHidden().fixedSize()
+                    }
                     Text(L("线宽", "Width")).font(.callout)
-                    Slider(value: ed.noteSlider(\.width), in: 1...16, onEditingChanged: { if !$0 { ed.dragEnd() } }).frame(width: 80)
+                    Slider(value: ed.noteSlider(\.width), in: 1...16, onEditingChanged: { if !$0 { ed.dragEnd() } }).frame(width: 70)
                     if a.kind == .arrow { Toggle(L("画出来", "Draw on"), isOn: ed.note(\.drawOn)).toggleStyle(.checkbox).help(L("出现时像笔画出来一样", "Animate the arrow being drawn")) }
                 }
+                Text(L("不透明度", "Opacity")).font(.callout)
+                Slider(value: Binding(get: { a.alpha }, set: { v in ed.dragBegin(); ed.dragUpdate { $0.annotations[i].opacity = v } }), in: 0.1...1,
+                       onEditingChanged: { if !$0 { ed.dragEnd() } }).frame(width: 70)
+                Text("\(Int((a.alpha * 100).rounded()))%").font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 32, alignment: .leading)
                 Spacer()
                 OverlayActions(ed: ed)
             }.controlSize(.small)

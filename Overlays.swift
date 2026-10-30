@@ -36,6 +36,16 @@ struct Annotation: Codable, Equatable, Identifiable {
     var fontSize = 28.0              // 字号（原画面的点）
     var pill = true                  // 文字带底色胶囊
     var drawOn = true                // 箭头像笔画出来那样出现
+    var arrow: ArrowStyle?           // 箭头样式（没有 = 普通）；可选字段，旧工程照样能读
+    var opacity: Double?             // 不透明度 0.1–1（没有 = 高亮 35%、其他 100%）
+    enum ArrowStyle: String, Codable, CaseIterable { case plain, double, curved, thick, dashed }
+    var alpha: Double { min(max(opacity ?? (kind == .highlight ? 0.35 : 1), 0.05), 1) }
+    static func arrowName(_ s: ArrowStyle) -> String {
+        switch s {
+        case .plain: L("普通", "Plain"); case .double: L("双向", "Double"); case .curved: L("弧形", "Curved")
+        case .thick: L("粗箭头", "Bold"); case .dashed: L("虚线", "Dashed")
+        }
+    }
 
     static func name(_ k: Kind) -> String {
         switch k {
@@ -165,7 +175,11 @@ final class OverlayLayer: @unchecked Sendable {
         switch a.kind {
         case .arrow:
             let p0 = sp.point(CGPoint(x: a.x, y: a.y)), p1 = sp.point(CGPoint(x: a.x + a.w, y: a.y + a.h))
-            box = CGRect(x: min(p0.x, p1.x), y: min(p0.y, p1.y), width: abs(p1.x - p0.x), height: abs(p1.y - p0.y)).insetBy(dx: -lw * 4, dy: -lw * 4)
+            box = CGRect(x: min(p0.x, p1.x), y: min(p0.y, p1.y), width: abs(p1.x - p0.x), height: abs(p1.y - p0.y)).insetBy(dx: -lw * 6, dy: -lw * 6)
+            if a.arrow == .curved {   // 弧形往外鼓：把控制点也框进来
+                let len = hypot(p1.x - p0.x, p1.y - p0.y), m = CGPoint(x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2)
+                if len > 0 { box = box.union(CGRect(x: m.x - (p1.y - p0.y) * 0.22, y: m.y + (p1.x - p0.x) * 0.22, width: 0, height: 0).insetBy(dx: -lw * 6, dy: -lw * 6)) }
+            }
         case .text:
             let sz = textBox(a, unit: unit), tl = sp.point(CGPoint(x: a.x, y: a.y))
             box = CGRect(x: tl.x, y: tl.y - sz.height, width: sz.width, height: sz.height).insetBy(dx: -lw * 2, dy: -lw * 2)
@@ -178,6 +192,7 @@ final class OverlayLayer: @unchecked Sendable {
         guard let c = CGContext(data: nil, width: pw, height: ph, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         c.scaleBy(x: k, y: k); c.translateBy(x: -box.minX, y: -box.minY)
+        if a.kind != .highlight { c.setAlpha(a.alpha) }   // 高亮自己按透明度填色
         c.setLineCap(.round); c.setLineJoin(.round)
         let col = CGColor(srgbRed: a.color.r, green: a.color.g, blue: a.color.b, alpha: 1)
         let shadow = CGColor(gray: 0, alpha: 0.35)
@@ -187,19 +202,46 @@ final class OverlayLayer: @unchecked Sendable {
             let u = a.drawOn ? OverlayAnim.drawProgress(t, a.start) : 1
             let len = hypot(p1.x - p0.x, p1.y - p0.y)
             guard len > 1 else { return nil }
-            let dx = (p1.x - p0.x) / len, dy = (p1.y - p0.y) / len
-            let head = min(len * 0.45, lw * 4.2)
-            let tip = CGPoint(x: p0.x + (p1.x - p0.x) * u, y: p0.y + (p1.y - p0.y) * u)
+            let style = a.arrow ?? .plain
+            // 杆子先取成一串点（弧形是二次曲线，往左边鼓 22%），画出来时只画到第 u 处
+            let nx = -(p1.y - p0.y) / len, ny = (p1.x - p0.x) / len
+            let ctl = CGPoint(x: (p0.x + p1.x) / 2 + nx * len * 0.22, y: (p0.y + p1.y) / 2 + ny * len * 0.22)
+            func at(_ v: Double) -> CGPoint {
+                if style != .curved { return CGPoint(x: p0.x + (p1.x - p0.x) * v, y: p0.y + (p1.y - p0.y) * v) }
+                let w = 1 - v
+                return CGPoint(x: w * w * p0.x + 2 * w * v * ctl.x + v * v * p1.x, y: w * w * p0.y + 2 * w * v * ctl.y + v * v * p1.y)
+            }
+            let steps = style == .curved ? 48 : 1
+            let pts = (0...steps).map { at(Double($0) / Double(steps) * u) }
+            let thick = style == .thick
+            let head = min(len * 0.45, lw * (thick ? 6.0 : 4.2))
+            let hs = head * min(1, max(0, (u - 0.6) / 0.4))     // 箭头头部在画到最后 25% 时长出来
             c.setShadow(offset: CGSize(width: 0, height: -lw * 0.4), blur: lw * 1.2, color: shadow)
-            c.setStrokeColor(col); c.setFillColor(col); c.setLineWidth(lw)
-            // 杆子画到箭头根部，箭头头部在画到最后 25% 时长出来
-            let shaftEnd = len * u > head ? CGPoint(x: tip.x - dx * head * 0.6, y: tip.y - dy * head * 0.6) : tip
-            c.move(to: p0); c.addLine(to: shaftEnd); c.strokePath()
-            let hs = head * min(1, max(0, (u - 0.6) / 0.4))
-            if hs > 0.5 {
-                let bx = tip.x - dx * hs, by = tip.y - dy * hs, wx = -dy * hs * 0.55, wy = dx * hs * 0.55
+            c.setStrokeColor(col); c.setFillColor(col); c.setLineWidth(thick ? lw * 2.4 : lw)
+            if style == .dashed { c.setLineDash(phase: 0, lengths: [lw * 2.2, lw * 1.8]) }
+            if thick { c.setLineCap(.butt) }
+            // 头部朝向：杆子最后一小段的方向；杆子收到头部根部
+            func headAt(_ tip: CGPoint, from prev: CGPoint, size: Double) {
+                let d = hypot(tip.x - prev.x, tip.y - prev.y)
+                guard size > 0.5, d > 0 else { return }
+                let dx = (tip.x - prev.x) / d, dy = (tip.y - prev.y) / d
+                let bx = tip.x - dx * size, by = tip.y - dy * size, wx = -dy * size * (thick ? 0.7 : 0.55), wy = dx * size * (thick ? 0.7 : 0.55)
+                c.setLineDash(phase: 0, lengths: [])
                 c.move(to: tip); c.addLine(to: CGPoint(x: bx + wx, y: by + wy)); c.addLine(to: CGPoint(x: bx - wx, y: by - wy)); c.closePath(); c.fillPath()
             }
+            var shaft = pts
+            let tip = pts.last!, prev = pts.count > 2 ? pts[pts.count - 3] : pts.first!
+            if hs > 0.5, hypot(tip.x - pts.first!.x, tip.y - pts.first!.y) > head {
+                let d = hypot(tip.x - prev.x, tip.y - prev.y)
+                if d > 0 { shaft[shaft.count - 1] = CGPoint(x: tip.x - (tip.x - prev.x) / d * head * 0.6, y: tip.y - (tip.y - prev.y) / d * head * 0.6) }
+            }
+            if style == .double && hs > 0.5, shaft.count > 1 {
+                let q = shaft[1], d = hypot(q.x - p0.x, q.y - p0.y)
+                if d > 0 { shaft[0] = CGPoint(x: p0.x + (q.x - p0.x) / d * head * 0.6, y: p0.y + (q.y - p0.y) / d * head * 0.6) }
+            }
+            c.addLines(between: shaft); c.strokePath()
+            headAt(tip, from: prev, size: hs)
+            if style == .double, pts.count > 1 { headAt(p0, from: pts[min(2, pts.count - 1)], size: hs) }
         case .rect, .ellipse:
             let r = sp.rect(CGRect(x: a.x, y: a.y, width: a.w, height: a.h).standardized)
             c.setShadow(offset: CGSize(width: 0, height: -lw * 0.3), blur: lw, color: shadow)
@@ -209,7 +251,7 @@ final class OverlayLayer: @unchecked Sendable {
             c.strokePath()
         case .highlight:
             let r = sp.rect(CGRect(x: a.x, y: a.y, width: a.w, height: a.h).standardized)
-            c.setFillColor(CGColor(srgbRed: a.color.r, green: a.color.g, blue: a.color.b, alpha: 0.32))
+            c.setFillColor(CGColor(srgbRed: a.color.r, green: a.color.g, blue: a.color.b, alpha: a.alpha))
             c.addPath(CGPath(roundedRect: r, cornerWidth: min(6 * unit, r.width / 2), cornerHeight: min(6 * unit, r.height / 2), transform: nil)); c.fillPath()
         case .text:
             let sz = textBox(a, unit: unit), tl = sp.point(CGPoint(x: a.x, y: a.y))

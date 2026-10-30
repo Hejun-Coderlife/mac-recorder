@@ -216,6 +216,8 @@ struct StudioLook: Codable, Equatable {
     var clickSound = false         // 点击时加一声轻响
     var clickStyle = Click.soft    // 哪种声音：轻点 / 鼠标咔哒 / 低沉 / 木头 / 气泡 / 清脆滴答
     var typeSound = false          // 打字时每按一下加一声键盘声
+    var typeStyle = Typing.mechanical
+    enum Typing: String, Codable, CaseIterable { case mechanical, clicky, thock, laptop, typewriter }
     var ripple = true              // 点击波纹
     var blur = Blur.light          // 运动模糊：只在镜头快速移动时有
     enum KeysAt: String, Codable, CaseIterable { case bottom, bottomLeft, bottomRight }
@@ -231,7 +233,7 @@ struct StudioLook: Codable, Equatable {
     init() {}
     enum CodingKeys: String, CodingKey {
         case aspect, background, color, gradient0, gradient1, gradientAngle, wallpaper, imagePath, imageBookmark, padding, cornerRadius,
-             shadow, shadowBlur, cursorScale, smoothing, hideIdleCursor, hideAfter, clickSound, clickStyle, typeSound, ripple, blur,
+             shadow, shadowBlur, cursorScale, smoothing, hideIdleCursor, hideAfter, clickSound, clickStyle, typeSound, typeStyle, ripple, blur,
              showKeys, keysAt, keysSize, keysDark, zoomSpeed, cursorLoop, cursorLoopSec, loopZoomOut
     }
     init(from d: Decoder) throws {
@@ -243,7 +245,7 @@ struct StudioLook: Codable, Equatable {
         padding = v(.padding, z.padding); cornerRadius = v(.cornerRadius, z.cornerRadius); shadow = v(.shadow, z.shadow)
         shadowBlur = v(.shadowBlur, z.shadowBlur); cursorScale = v(.cursorScale, z.cursorScale); smoothing = v(.smoothing, z.smoothing)
         hideIdleCursor = v(.hideIdleCursor, z.hideIdleCursor); hideAfter = v(.hideAfter, z.hideAfter); clickSound = v(.clickSound, z.clickSound)
-        clickStyle = v(.clickStyle, z.clickStyle); typeSound = v(.typeSound, z.typeSound)
+        clickStyle = v(.clickStyle, z.clickStyle); typeSound = v(.typeSound, z.typeSound); typeStyle = v(.typeStyle, z.typeStyle)
         ripple = v(.ripple, z.ripple); blur = v(.blur, z.blur)
         showKeys = v(.showKeys, z.showKeys); keysAt = v(.keysAt, z.keysAt); keysSize = v(.keysSize, z.keysSize); keysDark = v(.keysDark, z.keysDark)
         zoomSpeed = v(.zoomSpeed, z.zoomSpeed); cursorLoop = v(.cursorLoop, z.cursorLoop); cursorLoopSec = v(.cursorLoopSec, z.cursorLoopSec)
@@ -1069,6 +1071,7 @@ final class StudioJob: @unchecked Sendable {
     private let first: Int, last: Int          // 导出第 first..<last 帧（成片时间）
     private let clickTimes: [Double]           // 要加点击声的时刻（秒，成片时间）；不加就是空的
     private let keyTimes: [Double]             // 要加打字声的时刻（同上）
+    private let typeStyle: StudioLook.Typing
     private let clickStyle: StudioLook.Click
     private let map: TimeMap                   // 剪掉 / 快放：成片第 i 帧取素材哪个时刻
     private let srcEnd: Double                 // 素材里读到哪（修剪终点，素材时间）
@@ -1110,6 +1113,7 @@ final class StudioJob: @unchecked Sendable {
         clickTimes = p.look.clickSound ? wTrack.clicks.map { $0[0] } : []
         keyTimes = p.look.typeSound ? wTrack.keys : []
         clickStyle = p.look.clickStyle
+        typeStyle = p.look.typeStyle
         audio = p.audio
         var vols: [Double] = []
         for t in audioTracks {
@@ -1288,7 +1292,7 @@ final class StudioJob: @unchecked Sendable {
         if let aIn {
             group.enter()
             var audioDone = false
-            let clicks = ClickSound(times: clickTimes, style: clickStyle, volume: audio.clicks, keyTimes: keyTimes)
+            let clicks = ClickSound(times: clickTimes, style: clickStyle, volume: audio.clicks, keyTimes: keyTimes, keyStyle: typeStyle)
             let warp = AudioWarp(map: map, gain: Float(maxVol), clicks: clicks, voice: voice, music: music)
             // 没有原声音（或原声音先读完了）：自己按 0.1 秒一块生成静音 + 点击 + 讲解，一直到成片结尾
             var genAt = Int64((range.start.seconds * 48000).rounded()), genEnd = Int64((range.end.seconds * 48000).rounded())
@@ -1375,31 +1379,52 @@ final class ClickSound: @unchecked Sendable {
     private var format: CMAudioFormatDescription?
     var isEmpty: Bool { starts.isEmpty }
 
-    init(times: [Double], style: StudioLook.Click = .soft, volume: Double = 1, keyTimes: [Double] = []) {
+    init(times: [Double], style: StudioLook.Click = .soft, volume: Double = 1, keyTimes: [Double] = [], keyStyle: StudioLook.Typing = .mechanical) {
         let v = Float(max(0, volume))
-        waves = [Self.wave(style).map { $0 * v }] + (0..<4).map { k in Self.keyWave(k).map { $0 * v } }
+        waves = [Self.wave(style).map { $0 * v }] + (0..<4).map { k in Self.keyWave(keyStyle, k).map { $0 * v } }
         starts = (times.map { (Int64(($0 * 48000).rounded()), 0) } + keyTimes.enumerated().map { (Int64(($0.element * 48000).rounded()), 1 + ($0.offset * 3 + $0.offset / 2) % 4) })
             .sorted { $0.0 < $1.0 }
     }
 
-    // 打字声：机械键盘的「嗒」——一下短促的噪声咔 + 一点低沉的键帽回弹；k 换一点音高和长短
-    static func keyWave(_ k: Int) -> [Float] {
+    // 打字声（几种键盘）：k 换一点音高和长短，连打时轮着用，听着不机械
+    static func keyWave(_ style: StudioLook.Typing, _ k: Int) -> [Float] {
         var g = SystemRandomNumberGenerator()
-        let pitch = [1.0, 0.92, 1.08, 0.97][k % 4], n = 2400
-        var lp = 0.0
-        return (0..<n).map { i in
-            let t = Double(i) / 48000
-            let noise = Double.random(in: -1...1, using: &g)
-            lp += 0.35 * (noise - lp)                               // 轻低通，去掉刺耳的高频
-            let click = exp(-t / 0.0022) * lp * 0.55
-            let body = exp(-t / 0.009) * sin(2 * .pi * 420 * pitch * t) * 0.16
-            let top = t > 0.012 ? exp(-(t - 0.012) / 0.003) * lp * 0.12 : 0   // 松开时的一下轻响
-            return Float((click + body + top) * 0.75)
+        let pitch = [1.0, 0.92, 1.08, 0.97][k % 4]
+        var lp = 0.0, lp2 = 0.0
+        func noise(_ a: Double) -> Double { let x = Double.random(in: -1...1, using: &g); lp += a * (x - lp); return lp }
+        func dec(_ t: Double, _ tau: Double) -> Double { t < 0 ? 0 : exp(-t / tau) }
+        let n: Int, f: (Double) -> Double
+        switch style {
+        case .mechanical:   // 机械键盘（茶轴）：短促的「嗒」+ 一点键帽回弹
+            n = 2400
+            f = { t in dec(t, 0.0022) * noise(0.35) * 0.55 + dec(t, 0.009) * sin(2 * .pi * 420 * pitch * t) * 0.16 + dec(t - 0.012, 0.003) * lp * 0.12 }
+        case .clicky:       // 青轴：清脆的「咔哒」，按下和回弹两声都亮
+            n = 2880
+            f = { t in dec(t, 0.0012) * noise(0.8) * 0.6 + dec(t, 0.004) * sin(2 * .pi * 3400 * pitch * t) * 0.14
+                     + dec(t - 0.028, 0.0015) * lp * 0.4 + dec(t - 0.028, 0.004) * sin(2 * .pi * 3000 * pitch * t) * 0.08 }
+        case .thock:        // 客制化「thock」：低沉厚实
+            n = 3360
+            f = { t in lp2 += 0.08 * (Double.random(in: -1...1, using: &g) - lp2)
+                return dec(t, 0.004) * lp2 * 1.1 + dec(t, 0.016) * sin(2 * .pi * 190 * pitch * t) * 0.32 + dec(t, 0.008) * sin(2 * .pi * 520 * pitch * t) * 0.1 }
+        case .laptop:       // 笔记本键盘：轻、薄、闷
+            n = 1680
+            f = { t in dec(t, 0.0018) * noise(0.22) * 0.42 + dec(t, 0.005) * sin(2 * .pi * 900 * pitch * t) * 0.07 }
+        case .typewriter:   // 打字机：金属字锤敲下去的「啪」+ 一点余震
+            n = 5280
+            f = { t in dec(t, 0.0016) * noise(0.9) * 0.7 + dec(t, 0.03) * (sin(2 * .pi * 1850 * pitch * t) * 0.07 + sin(2 * .pi * 2730 * pitch * t) * 0.04)
+                     + dec(t - 0.006, 0.006) * sin(2 * .pi * 150 * t) * 0.18 }
+        }
+        return (0..<n).map { Float(f(Double($0) / 48000) * 0.75) }
+    }
+    static func typingName(_ s: StudioLook.Typing) -> String {
+        switch s {
+        case .mechanical: L("机械键盘", "Mechanical"); case .clicky: L("青轴（清脆）", "Clicky"); case .thock: L("低沉 thock", "Thocky")
+        case .laptop: L("笔记本键盘", "Laptop"); case .typewriter: L("打字机", "Typewriter")
         }
     }
 
     // 试听 / 预览用：一声按键包成 WAV
-    static func keyWav(_ k: Int) -> Data { wavData(keyWave(k)) }
+    static func keyWav(_ s: StudioLook.Typing, _ k: Int) -> Data { wavData(keyWave(s, k)) }
 
     // 超过 ±0.8 的部分柔和地压到 ±0.95 以内（音量调大、和点击声叠加时不爆音；留点余量，AAC 编码后也不会超过 1）
     @inline(__always) static func softLimit(_ x: Float) -> Float {
