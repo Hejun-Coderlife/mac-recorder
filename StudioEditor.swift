@@ -2441,6 +2441,11 @@ struct StylePanel: View {
                 slider(L("隐藏前", "After"), \.hideAfter, 1...5) { String(format: L("%.1f 秒", "%.1fs"), $0) }
             }
             Toggle(L("点击波纹", "Click ripple"), isOn: ed.look(\.ripple))
+                .help(L("每次点击时在鼠标处冒一下，让观众看清点了哪里", "A little effect at each click so viewers see where you clicked"))
+            if look.ripple {
+                chips(ed.look(\.rippleStyle), [(.ring, L("圆圈", "Ring")), (.double, L("双圈", "Double")), (.pulse, L("圆点", "Dot")),
+                                               (.glow, L("光晕", "Glow")), (.burst, L("放射", "Burst")), (.focus, L("对焦", "Focus"))], columns: 3)
+            }
             Toggle(L("点击音效", "Click sound"), isOn: ed.look(\.clickSound))
                 .help(L("每次点击处加一声轻响，预览和导出都有；音量在「声音」里调", "Adds a soft click at each click, in the preview and the export; set its volume under Sound"))
             if look.clickSound {
@@ -2870,7 +2875,9 @@ enum StudioTests {
                 ], trimStart: 1, trimEnd: 13)
                 let plan = r.plan(p, duration: duration), fps = Double(st.fps)
                 let f = { (t: Double) in plan[Int(t * fps)] }
-                check("zoom inside follow segment", abs(f(4.5).z - 3.0) < 0.05, String(format: "z=%.3f", f(4.5).z))
+                // 跟随段里镜头远距离移动时会故意先退一点再推回去（见 StudioPlan「边移边往后退」），所以看段内最高能到 3 倍、且不超过
+                let zs = stride(from: 2.0, through: 4.9, by: 0.1).map { f($0).z }
+                check("zoom inside follow segment", abs((zs.max() ?? 0) - 3.0) < 0.05 && zs.allSatisfy { $0 <= 3.05 }, String(format: "max z=%.3f", zs.max() ?? 0))
                 check("zoomed out between segments", f(7.5).z < 1.08, String(format: "z=%.3f", f(7.5).z))
                 // 期望值按计划里的规则算：目标先在原画面里夹住（推近后的视野不出画面），再换到画布
                 let tf = f(11.5), hw = lay.cw / (2 * 2.0 * lay.s), hh = lay.ch / (2 * 2.0 * lay.s)

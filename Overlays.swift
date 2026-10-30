@@ -51,12 +51,14 @@ struct Annotation: Codable, Equatable, Identifiable {
     var arrow: ArrowStyle?           // 箭头样式（没有 = 普通）；可选字段，旧工程照样能读
     var oval: Bool?                  // 圈：true = 椭圆（随便拉）；没有 = 正圆
     var textStyle: TextLook?         // 文字标签样式（没有 = 看 pill：胶囊 / 只有字）
-    enum TextLook: String, Codable, CaseIterable { case pill, glass, dark, outline, bubble, plain }
+    enum TextLook: String, Codable, CaseIterable { case pill, glass, glassDark, dark, gradient, outline, sticker, bubble, neon, marker, plain }
     var textLook: TextLook { textStyle ?? (pill ? .pill : .plain) }
     static func textLookName(_ t: TextLook) -> String {
         switch t {
-        case .pill: L("彩色胶囊", "Pill"); case .glass: L("玻璃", "Glass"); case .dark: L("深色", "Dark")
-        case .outline: L("描边", "Outline"); case .bubble: L("对话气泡", "Bubble"); case .plain: L("只有字", "Plain")
+        case .pill: L("彩色胶囊", "Pill"); case .glass: L("玻璃（浅）", "Glass"); case .glassDark: L("玻璃（深）", "Dark glass")
+        case .dark: L("深色", "Dark"); case .gradient: L("渐变", "Gradient"); case .outline: L("描边", "Outline")
+        case .sticker: L("贴纸", "Sticker"); case .bubble: L("对话气泡", "Bubble"); case .neon: L("霓虹", "Neon")
+        case .marker: L("荧光笔", "Marker"); case .plain: L("只有字", "Plain")
         }
     }
     var opacity: Double?             // 不透明度 0.1–1（没有 = 高亮 35%、其他 100%）
@@ -130,7 +132,7 @@ final class OverlayLayer: @unchecked Sendable {
         for a in annotations {
             let al = OverlayAnim.alpha(t, a.start, a.end)
             guard al > 0.002, let (pic, origin) = Self.draw(a, t: t, space: sp, unit: unit, scale: min(4, max(0.5, scale))) else { continue }
-            if a.kind == .text && a.textLook == .glass { img = Self.glass(img, a, space: sp, unit: unit, alpha: al) }
+            if a.kind == .text && (a.textLook == .glass || a.textLook == .glassDark) { img = Self.glass(img, a, space: sp, unit: unit, alpha: al) }
             var ci = CIImage(cgImage: pic.image).transformed(by: CGAffineTransform(scaleX: 1 / pic.scale, y: 1 / pic.scale)
                 .concatenating(CGAffineTransform(translationX: origin.x, y: origin.y)))
             if al < 0.998 { ci = ci.applyingFilter("CIColorMatrix", parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: al)]) }
@@ -139,16 +141,27 @@ final class OverlayLayer: @unchecked Sendable {
         return img.cropped(to: src.extent)
     }
 
-    // 玻璃标签后面那块：把画面模糊、提一点饱和和亮度，圆角胶囊形状
+    // 玻璃标签后面那块（像苹果 Liquid Glass）：中间是轻模糊、提饱和的画面；靠边一圈像透镜一样把画面放大折射；整体是圆角胶囊
     static func glass(_ img: CIImage, _ a: Annotation, space sp: Space, unit: Double, alpha: Double) -> CIImage {
         let sz = textBox(a, unit: unit), tl = sp.point(CGPoint(x: a.x, y: a.y))
         let R = CGRect(x: tl.x, y: tl.y - sz.height, width: sz.width, height: sz.height).integral
         guard R.width > 2, R.height > 2 else { return img }
-        var fx = img.clampedToExtent().applyingGaussianBlur(sigma: 14 * unit)
-            .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 1.5, kCIInputBrightnessKey: 0.06]).cropped(to: R)
+        let rad = R.height / 2
+        let src = img.clampedToExtent()
+        let tone: [String: Any] = [kCIInputSaturationKey: 1.6, kCIInputBrightnessKey: a.textLook == .glassDark ? -0.04 : 0.05]
+        let center = src.applyingGaussianBlur(sigma: 2.2 * unit).applyingFilter("CIColorControls", parameters: tone).cropped(to: R)
+        // 边缘折射：以胶囊中心放大 1.18 倍再糊一点，只留边上一圈（圈内渐隐）
+        let k = 1.18, cx = R.midX, cy = R.midY
+        let mag = src.transformed(by: CGAffineTransform(translationX: -cx, y: -cy).concatenating(CGAffineTransform(scaleX: k, y: k)).concatenating(CGAffineTransform(translationX: cx, y: cy)))
+            .applyingGaussianBlur(sigma: 3.5 * unit).applyingFilter("CIColorControls", parameters: tone).cropped(to: R)
+        func shape(_ r: CGRect, _ rr: Double) -> CIImage {
+            CIFilter(name: "CIRoundedRectangleGenerator", parameters: ["inputExtent": CIVector(cgRect: r), "inputRadius": max(0, rr), "inputColor": CIColor.white])!.outputImage!
+        }
+        let inset = min(R.height * 0.22, R.width * 0.2)
+        let inner = shape(R.insetBy(dx: inset, dy: inset), rad - inset).applyingGaussianBlur(sigma: inset * 0.45).cropped(to: R)
+        var fx = center.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: mag, kCIInputMaskImageKey: inner.composited(over: CIImage(color: .black).cropped(to: R))])
         if alpha < 0.998 { fx = fx.applyingFilter("CIColorMatrix", parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: alpha)]) }
-        let mask = CIFilter(name: "CIRoundedRectangleGenerator", parameters: ["inputExtent": CIVector(cgRect: R), "inputRadius": R.height / 2, "inputColor": CIColor.white])!.outputImage!
-        return fx.composited(over: img).applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: img, kCIInputMaskImageKey: mask])
+        return fx.composited(over: img).applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: img, kCIInputMaskImageKey: shape(R, rad)])
     }
 
     static func redact(_ img: CIImage, _ r: Redaction, space sp: Space, unit: Double) -> CIImage {
@@ -189,7 +202,8 @@ final class OverlayLayer: @unchecked Sendable {
         let line = textLine(a, px: a.fontSize * unit)
         var asc: CGFloat = 0, desc: CGFloat = 0
         let w = CTLineGetTypographicBounds(line, &asc, &desc, nil)
-        let look = a.textLook, pad = look == .plain ? 0 : a.fontSize * unit * 0.45
+        let look = a.textLook, px0 = a.fontSize * unit
+        let pad = look == .plain ? 0 : look == .marker ? px0 * 0.2 : look == .neon ? px0 * 0.35 : look == .sticker ? px0 * 0.5 : px0 * 0.45
         let tail = look == .bubble ? a.fontSize * unit * 0.4 : 0     // 气泡下面的小尾巴
         return CGSize(width: max(w, a.fontSize * unit) + pad * 2, height: asc + desc + pad * 1.2 + tail)
     }
@@ -201,7 +215,10 @@ final class OverlayLayer: @unchecked Sendable {
         switch a.textLook {
         case .pill, .bubble: color = Self.onColor(a.color)
         case .dark: color = light ? own : CGColor(gray: 1, alpha: 1)
-        case .glass: color = CGColor(srgbRed: 0.11, green: 0.11, blue: 0.12, alpha: 1)
+        case .glass, .marker: color = CGColor(srgbRed: 0.11, green: 0.11, blue: 0.12, alpha: 1)
+        case .glassDark, .gradient: color = CGColor(gray: 1, alpha: 1)
+        case .neon: color = light ? CGColor(srgbRed: 0.2, green: 0.9, blue: 1, alpha: 1) : own
+        case .sticker: color = light ? CGColor(srgbRed: 0.11, green: 0.11, blue: 0.12, alpha: 1) : own
         case .outline: color = light ? CGColor(srgbRed: 0.11, green: 0.11, blue: 0.12, alpha: 1) : own
         case .plain: color = own
         }
@@ -332,13 +349,52 @@ final class OverlayLayer: @unchecked Sendable {
             case .dark:
                 c.setShadow(offset: CGSize(width: 0, height: -px * 0.06), blur: px * 0.35, color: soft)
                 c.setFillColor(CGColor(gray: 0.08, alpha: 0.78)); c.addPath(capsule); c.fillPath()
-            case .glass:
-                // 玻璃：后面那块已经在 apply 里模糊过了；这里只蒙一层很淡的白 + 上亮下暗的细边
-                c.setShadow(offset: CGSize(width: 0, height: -px * 0.08), blur: px * 0.45, color: CGColor(gray: 0, alpha: 0.22))
-                c.setFillColor(CGColor(gray: 0.97, alpha: 0.38)); c.addPath(capsule); c.fillPath()
+            case .glass, .glassDark:
+                // 像苹果 Liquid Glass：背后的画面在 apply 里已经轻模糊 + 边缘放大折射；这里加浮起的阴影、一层很淡的色、上亮下暗的高光边
+                let dark = look == .glassDark, rad = body.height / 2
+                c.setShadow(offset: CGSize(width: 0, height: -px * 0.12), blur: px * 0.7, color: CGColor(gray: 0, alpha: dark ? 0.32 : 0.2))
+                c.setFillColor(dark ? CGColor(gray: 0.05, alpha: 0.38) : CGColor(gray: 1, alpha: 0.16)); c.addPath(capsule); c.fillPath()
                 c.setShadow(offset: .zero, blur: 0, color: nil)
-                c.setLineWidth(max(1, px * 0.05)); c.setStrokeColor(CGColor(gray: 1, alpha: 0.7))
-                c.addPath(CGPath(roundedRect: body.insetBy(dx: px * 0.025, dy: px * 0.025), cornerWidth: body.height / 2 - px * 0.025, cornerHeight: body.height / 2 - px * 0.025, transform: nil)); c.strokePath()
+                let space = CGColorSpace(name: CGColorSpace.sRGB)!
+                // 高光边：顶部亮、两侧渐暗、底部再亮一点（像玻璃边缘反光）
+                c.saveGState()
+                let lwRim = max(1.2, px * 0.055)
+                c.addPath(CGPath(roundedRect: body.insetBy(dx: lwRim / 2, dy: lwRim / 2), cornerWidth: rad - lwRim / 2, cornerHeight: rad - lwRim / 2, transform: nil))
+                c.setLineWidth(lwRim); c.replacePathWithStrokedPath(); c.clip()
+                let rim = CGGradient(colorsSpace: space, colors: [CGColor(gray: 1, alpha: 0.95), CGColor(gray: 1, alpha: 0.18), CGColor(gray: 1, alpha: 0.55)] as CFArray, locations: [0, 0.55, 1])!
+                c.drawLinearGradient(rim, start: CGPoint(x: body.minX, y: body.maxY), end: CGPoint(x: body.minX, y: body.minY), options: [])
+                c.restoreGState()
+                // 上半部一层很淡的反光
+                c.saveGState()
+                c.addPath(capsule); c.clip()
+                let sheen = CGGradient(colorsSpace: space, colors: [CGColor(gray: 1, alpha: dark ? 0.16 : 0.32), CGColor(gray: 1, alpha: 0)] as CFArray, locations: [0, 1])!
+                c.drawLinearGradient(sheen, start: CGPoint(x: body.minX, y: body.maxY), end: CGPoint(x: body.minX, y: body.midY), options: [])
+                c.restoreGState()
+            case .gradient:
+                c.setShadow(offset: CGSize(width: 0, height: -px * 0.06), blur: px * 0.35, color: soft)
+                c.addPath(capsule); c.fillPath(); c.setShadow(offset: .zero, blur: 0, color: nil)
+                c.saveGState(); c.addPath(capsule); c.clip()
+                // 从选的颜色渐变到它偏紫一点、亮一点的颜色
+                let c2 = CGColor(srgbRed: min(1, a.color.r * 0.7 + 0.35), green: a.color.g * 0.55 + 0.1, blue: min(1, a.color.b * 0.6 + 0.6), alpha: 1)
+                let g = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!, colors: [col, c2] as CFArray, locations: [0, 1])!
+                c.drawLinearGradient(g, start: CGPoint(x: body.minX, y: body.midY), end: CGPoint(x: body.maxX, y: body.midY), options: [])
+                c.restoreGState()
+            case .sticker:
+                // 贴纸：白底 + 粗白边 + 投影，有点歪
+                c.setShadow(offset: CGSize(width: 0, height: -px * 0.08), blur: px * 0.35, color: CGColor(gray: 0, alpha: 0.35))
+                let rr = CGPath(roundedRect: body, cornerWidth: body.height * 0.28, cornerHeight: body.height * 0.28, transform: nil)
+                c.setFillColor(CGColor(gray: 1, alpha: 1)); c.addPath(rr); c.fillPath()
+                c.setShadow(offset: .zero, blur: 0, color: nil)
+                c.setStrokeColor(col); c.setLineWidth(max(1.5, px * 0.07))
+                c.addPath(CGPath(roundedRect: body.insetBy(dx: px * 0.14, dy: px * 0.14), cornerWidth: body.height * 0.2, cornerHeight: body.height * 0.2, transform: nil)); c.strokePath()
+            case .neon:
+                // 霓虹：字发光（在下面画字时用彩色光晕）
+                break
+            case .marker:
+                // 荧光笔：字的下半截刷一道半透明的色
+                c.setFillColor(CGColor(srgbRed: a.color.r, green: a.color.g, blue: a.color.b, alpha: 0.5))
+                let m = CGRect(x: body.minX, y: body.minY + body.height * 0.08, width: body.width, height: body.height * 0.5)
+                c.addPath(CGPath(roundedRect: m, cornerWidth: m.height * 0.25, cornerHeight: m.height * 0.25, transform: nil)); c.fillPath()
             case .outline:
                 c.setShadow(offset: CGSize(width: 0, height: -px * 0.05), blur: px * 0.3, color: CGColor(gray: 0, alpha: 0.18))
                 c.setFillColor(CGColor(gray: 1, alpha: 0.92)); c.addPath(capsule); c.fillPath()
@@ -348,8 +404,13 @@ final class OverlayLayer: @unchecked Sendable {
             case .plain:
                 c.setShadow(offset: CGSize(width: 0, height: -px * 0.05), blur: px * 0.25, color: CGColor(gray: 0, alpha: 0.55))
             }
-            if look != .plain { c.setShadow(offset: .zero, blur: 0, color: nil) }
+            if look != .plain && look != .neon { c.setShadow(offset: .zero, blur: 0, color: nil) }
             c.textPosition = CGPoint(x: body.midX - tw / 2, y: body.midY - (asc - desc) / 2)
+            if look == .neon {
+                c.setShadow(offset: .zero, blur: px * 0.55, color: col); CTLineDraw(line, c)
+                c.textPosition = CGPoint(x: body.midX - tw / 2, y: body.midY - (asc - desc) / 2)
+                c.setShadow(offset: .zero, blur: px * 0.2, color: col)
+            }
             CTLineDraw(line, c)
         }
         guard let img = c.makeImage() else { return nil }

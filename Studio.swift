@@ -220,6 +220,8 @@ struct StudioLook: Codable, Equatable {
     var typeStyle = Typing.mechanical
     enum Typing: String, Codable, CaseIterable { case mechanical, laptop, clicky, thock }   // 都是真键盘录音（清脆 / 低沉由机械键盘升降调）
     var ripple = true              // 点击波纹
+    var rippleStyle = Ripple.ring  // 波纹样子
+    enum Ripple: String, Codable, CaseIterable { case ring, double, pulse, glow, burst, focus }
     var blur = Blur.light          // 运动模糊：只在镜头快速移动时有
     enum KeysAt: String, Codable, CaseIterable { case bottom, bottomLeft, bottomRight }
     var showKeys = false           // 画面上显示按的快捷键（⌘ ⇧ C 这种键帽）
@@ -234,7 +236,7 @@ struct StudioLook: Codable, Equatable {
     init() {}
     enum CodingKeys: String, CodingKey {
         case aspect, aspectW, aspectH, background, color, gradient0, gradient1, gradientAngle, wallpaper, imagePath, imageBookmark, padding, cornerRadius,
-             shadow, shadowBlur, cursorScale, smoothing, hideIdleCursor, hideAfter, clickSound, clickStyle, typeSound, typeStyle, ripple, blur,
+             shadow, shadowBlur, cursorScale, smoothing, hideIdleCursor, hideAfter, clickSound, clickStyle, typeSound, typeStyle, ripple, rippleStyle, blur,
              showKeys, keysAt, keysSize, keysDark, zoomSpeed, cursorLoop, cursorLoopSec, loopZoomOut
     }
     init(from d: Decoder) throws {
@@ -247,7 +249,7 @@ struct StudioLook: Codable, Equatable {
         shadowBlur = v(.shadowBlur, z.shadowBlur); cursorScale = v(.cursorScale, z.cursorScale); smoothing = v(.smoothing, z.smoothing)
         hideIdleCursor = v(.hideIdleCursor, z.hideIdleCursor); hideAfter = v(.hideAfter, z.hideAfter); clickSound = v(.clickSound, z.clickSound)
         clickStyle = v(.clickStyle, z.clickStyle); typeSound = v(.typeSound, z.typeSound); typeStyle = v(.typeStyle, z.typeStyle)
-        ripple = v(.ripple, z.ripple); blur = v(.blur, z.blur)
+        ripple = v(.ripple, z.ripple); rippleStyle = v(.rippleStyle, z.rippleStyle); blur = v(.blur, z.blur)
         showKeys = v(.showKeys, z.showKeys); keysAt = v(.keysAt, z.keysAt); keysSize = v(.keysSize, z.keysSize); keysDark = v(.keysDark, z.keysDark)
         zoomSpeed = v(.zoomSpeed, z.zoomSpeed); cursorLoop = v(.cursorLoop, z.cursorLoop); cursorLoopSec = v(.cursorLoopSec, z.cursorLoopSec)
         loopZoomOut = v(.loopZoomOut, z.loopZoomOut)
@@ -883,6 +885,7 @@ final class StudioRenderer: @unchecked Sendable {
     private var cursorArt: [Int: (img: CIImage, ppp: Double, hotX: Double, hotY: Double)] = [:]
     private let arrow: (img: CIImage, ppp: Double, hotX: Double, hotY: Double)
     private let ring: CIImage
+    private let rippleArt: [StudioLook.Ripple: CIImage]
     private(set) var background: CIImage!   // 背景 + 卡片阴影（分屏布局时露出来的地方也用它）
     private var mask: CIImage!
 
@@ -893,6 +896,7 @@ final class StudioRenderer: @unchecked Sendable {
         clicks = track.clicks.map { ($0[0], $0[1], h - $0[2]) }
         arrow = Self.drawArrow()
         ring = Self.drawRing()
+        rippleArt = Dictionary(uniqueKeysWithValues: StudioLook.Ripple.allCases.map { ($0, Self.drawRipple($0)) })
         for (i, c) in track.cursors.enumerated() where !c.arrow {
             if let img = CIImage(contentsOf: dir.appendingPathComponent(c.file)), c.w > 0 {
                 cursorArt[i] = (img, img.extent.width / c.w, c.hotX, c.hotY)
@@ -975,13 +979,29 @@ final class StudioRenderer: @unchecked Sendable {
         let t = Double(i) / Double(st.fps), ppp = track.pixelsPerPoint
         // 点击波纹：0.5 秒内从 6 点扩到 28 点、渐渐淡掉
         if look.ripple {
-            for c in clicks where t >= c.t && t < c.t + 0.5 {
-                let u = (t - c.t) / 0.5, e = 1 - pow(1 - u, 3)
-                let r = (6 + 22 * e) * ppp * look.cursorScale / 1.5, k = r / 52
-                let img = ring.applyingFilter("CIColorMatrix", parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1 - u)])
-                    .transformed(by: CGAffineTransform(translationX: -64, y: -64).concatenating(CGAffineTransform(scaleX: k, y: k))
-                        .concatenating(CGAffineTransform(translationX: c.x, y: c.y)).concatenating(lay.toScene))
-                scene = img.composited(over: scene)
+            let style = look.rippleStyle, dur = style == .focus ? 0.7 : style == .double ? 0.65 : 0.5
+            for c in clicks where t >= c.t && t < c.t + dur {
+                let u = (t - c.t) / dur, e = 1 - pow(1 - u, 3)
+                // 每种：(从多大扩到多大（点）, 透明度)；double 是两圈错开 0.15 秒
+                var layers: [(r: Double, a: Double)] = []
+                switch style {
+                case .ring, .burst: layers = [(6 + 22 * e, 1 - u)]
+                case .double:
+                    layers = [(6 + 24 * e, 1 - u)]
+                    let u2 = max(0, (t - c.t - 0.15) / (dur - 0.15)), e2 = 1 - pow(1 - u2, 3)
+                    if u2 > 0 { layers.append((6 + 24 * e2, 1 - u2)) }
+                case .pulse: layers = [(10 + 14 * e, (1 - u) * 0.9)]
+                case .glow: layers = [(14 + 16 * e, (1 - u) * 0.85)]
+                case .focus: layers = [(46 - 30 * e, min(1, u * 4) * (1 - u))]   // 从大往点击处收
+                }
+                let art = rippleArt[style] ?? ring
+                for (rad, al) in layers {
+                    let r = rad * ppp * look.cursorScale / 1.5, k = r / 52
+                    let img = art.applyingFilter("CIColorMatrix", parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: al)])
+                        .transformed(by: CGAffineTransform(translationX: -64, y: -64).concatenating(CGAffineTransform(scaleX: k, y: k))
+                            .concatenating(CGAffineTransform(translationX: c.x, y: c.y)).concatenating(lay.toScene))
+                    scene = img.composited(over: scene)
+                }
             }
         }
         if f.shape >= 0 && f.alpha > 0.002 {
@@ -1007,7 +1027,7 @@ final class StudioRenderer: @unchecked Sendable {
     // 快门子位置：镜头每帧移动（含推拉）换算成画布上的像素，超过门槛才模糊；快门角 轻 90° / 中 180° / 强 270°，取 3–8 个位置
     func shutter(_ i: Int, plan: [FramePlan]) -> [(z: Double, sx: Double, sy: Double)]? {
         let angle: Double
-        switch look.blur { case .off: return nil; case .light: angle = 90; case .medium: angle = 180; case .strong: angle = 270 }
+        switch look.blur { case .off: return nil; case .light: angle = 120; case .medium: angle = 220; case .strong: angle = 360 }
         guard plan.count > 1 else { return nil }
         let a = plan[max(i - 1, 0)], b = plan[min(i + 1, plan.count - 1)], f = plan[i]
         let span = Double(min(i + 1, plan.count - 1) - max(i - 1, 0))   // 前后相隔几帧
@@ -1015,7 +1035,7 @@ final class StudioRenderer: @unchecked Sendable {
         let move = (hypot((b.sx - a.sx) * f.z, (b.sy - a.sy) * f.z) + abs(log(b.z / a.z)) * diag) / span   // 每帧移动的像素
         let blurPx = move * angle / 360
         guard blurPx >= 1.5 else { return nil }
-        let n = min(8, max(3, Int(blurPx / 2) + 1))
+        let n = min(12, max(3, Int(blurPx / 2) + 1))
         // 在 i ± (快门/2) 帧之间按相邻帧插值：放大倍数按对数插值
         func at(_ x: Double) -> (z: Double, sx: Double, sy: Double) {
             let j = min(max(x, 0), Double(plan.count - 1)), lo = Int(j.rounded(.down)), hi = min(lo + 1, plan.count - 1), u = j - Double(lo)
@@ -1055,6 +1075,33 @@ final class StudioRenderer: @unchecked Sendable {
     }
 
     // 点击波纹：白圈 + 一圈淡淡的深色描边，深浅背景上都看得见（128 像素，圆心 64、半径 52）
+    // 各种点击波纹的底图（128×128，半径 52 的圆为基准，按时间缩放、淡出）
+    static func drawRipple(_ style: StudioLook.Ripple) -> CIImage {
+        let c = CGContext(data: nil, width: 128, height: 128, bitsPerComponent: 8, bytesPerRow: 0,
+                          space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        let r = CGRect(x: 12, y: 12, width: 104, height: 104), sp = CGColorSpace(name: CGColorSpace.sRGB)!
+        switch style {
+        case .ring, .double:
+            return drawRing()
+        case .pulse:   // 实心圆点
+            c.setFillColor(CGColor(gray: 0, alpha: 0.18)); c.fillEllipse(in: r.insetBy(dx: -3, dy: -3))
+            c.setFillColor(CGColor(gray: 1, alpha: 0.85)); c.fillEllipse(in: r)
+        case .glow:    // 柔和的光晕
+            let g = CGGradient(colorsSpace: sp, colors: [CGColor(srgbRed: 1, green: 0.95, blue: 0.6, alpha: 0.9), CGColor(srgbRed: 1, green: 0.85, blue: 0.3, alpha: 0)] as CFArray, locations: [0, 1])!
+            c.drawRadialGradient(g, startCenter: CGPoint(x: 64, y: 64), startRadius: 0, endCenter: CGPoint(x: 64, y: 64), endRadius: 62, options: [])
+        case .burst:   // 一圈放射的短线
+            c.setLineCap(.round)
+            for k in 0..<8 {
+                let a = Double(k) * .pi / 4, p0 = CGPoint(x: 64 + cos(a) * 34, y: 64 + sin(a) * 34), p1 = CGPoint(x: 64 + cos(a) * 56, y: 64 + sin(a) * 56)
+                c.setStrokeColor(CGColor(gray: 0, alpha: 0.25)); c.setLineWidth(10); c.move(to: p0); c.addLine(to: p1); c.strokePath()
+                c.setStrokeColor(CGColor(gray: 1, alpha: 0.95)); c.setLineWidth(6); c.move(to: p0); c.addLine(to: p1); c.strokePath()
+            }
+        case .focus:   // 往里收的细圈（像对焦）
+            c.setStrokeColor(CGColor(gray: 0, alpha: 0.3)); c.setLineWidth(7); c.strokeEllipse(in: r)
+            c.setStrokeColor(CGColor(srgbRed: 0.2, green: 0.6, blue: 1, alpha: 1)); c.setLineWidth(4); c.strokeEllipse(in: r)
+        }
+        return CIImage(cgImage: c.makeImage()!)
+    }
     private static func drawRing() -> CIImage {
         let c = CGContext(data: nil, width: 128, height: 128, bitsPerComponent: 8, bytesPerRow: 0,
                           space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
