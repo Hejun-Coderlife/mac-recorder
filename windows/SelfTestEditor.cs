@@ -102,6 +102,35 @@ namespace ScreenRecorder
                     else { ed.Seek(2.2); ed.SuggestSpeed(); PumpUntil(() => !ed.Suggesting, 60); ed.ScrollStyleTo(App.L("鼠标", "Cursor")); }
                     Pump(3);
                 }
+                // EDITOR_W5DEMO=clips|lanes：剪映式片段（分割、2× 快放、删掉一段留剪刀）+ 打字声轨（选中一阵）/ 叠在一起的遮挡标注各占一行 + 预览放大
+                if (Env("EDITOR_W5DEMO") is string w5)
+                {
+                    double d = Math.Min(ed.Duration, ed.Project.TrimEnd);
+                    if (ed.Track.Keys.Count == 0) ed.Track.Keys.AddRange(new[] { d * 0.12, d * 0.14, d * 0.16, d * 0.19, d * 0.6, d * 0.62, d * 0.64, d * 0.67, d * 0.7 });
+                    if (w5 == "clips")
+                    {
+                        ed.Split(d * 0.25); ed.Split(d * 0.4); ed.Split(d * 0.55); ed.Split(d * 0.75);
+                        var pcs = ed.PieceList;
+                        ed.SetPieceSpeed(pcs.First(x => Math.Abs(x.Start - d * 0.55) < 0.05), 2);
+                        ed.DeletePiece(ed.PieceList.First(x => Math.Abs(x.Start - d * 0.25) < 0.05));
+                        var b = Pieces.Bursts(ed.Track, ed.Project).LastOrDefault();
+                        if (b != null) { ed.Edit(p => Pieces.SetLookBool(p, "typeSound", true)); ed.SelectBurst(b.Start); }
+                        ed.Seek(d * 0.6);
+                    }
+                    else
+                    {
+                        ed.Edit(p =>
+                        {
+                            p.Redactions.Add(new Redaction { Start = 0.5, End = 4, X = 0.08, Y = 0.12, W = 0.3, H = 0.22, Style = "blur", Strength = 0.8 });
+                            p.Redactions.Add(new Redaction { Start = 2, End = 6, X = 0.62, Y = 0.62, W = 0.25, H = 0.2, Style = "mosaic", Strength = 0.6 });
+                            for (int i = 0; i < 4; i++) p.Annotations.Add(new Annotation { Start = 1 + i * 0.6, End = 4 + i * 0.6, Kind = i % 2 == 0 ? "rect" : "text", X = 0.1 + i * 0.15, Y = 0.3, W = 0.12, H = 0.12, Text = "Hi " + i, FontSize = 28 });
+                        });
+                        ed.Seek(3.0); Pump(1);
+                        ed.Preview.SetZoom(2f, new Point(ed.Preview.Width / 2, ed.Preview.Height / 2));
+                    }
+                    ed.ScrollStyleTo(App.L("推近", "Zoom"));
+                    Pump(3);
+                }
                 Pump(1.5);
                 using (var bmp = new Bitmap(ed.Width, ed.Height))
                 {
@@ -179,28 +208,30 @@ namespace ScreenRecorder
                     Check("project marked edited", ed.Project.SegmentsEdited);
                 }
 
-                // 3b) 剪辑轨上双击：加一段剪掉（选中）；拖它的右边把手；Ctrl+Z 撤销拖动；改成 4× 快放
-                int cuts0 = ed.Project.Cuts.Count;
-                float cx0 = tl.X(ed.Project.TrimStart + (ed.Project.TrimEnd - ed.Project.TrimStart) * 0.3);
-                In.Move(Screen(cx0, 47)); Pump(0.15); In.Click(); Pump(0.05); In.Click(); Pump(0.5);
-                Check("double-click on the cut lane adds a cut", ed.Project.Cuts.Count == cuts0 + 1 && ed.SelectedCut != null, $"{cuts0} -> {ed.Project.Cuts.Count}");
-                var cg = ed.Project.Cuts.FirstOrDefault(c => c.Id == ed.SelectedCut);
-                if (cg != null)
+                // 3b) 剪映式剪辑：剪辑轨上双击 = 分割；播放头处按 S 再切一刀；点选中间那段按 Delete 删掉（时间轴合拢）；
+                //     Ctrl+Z / Ctrl+Y；播放穿过删掉的段；点小剪刀按 Delete 恢复
+                double ta = ed.Project.TrimStart + (ed.Project.TrimEnd - ed.Project.TrimStart) * 0.3, tb = ed.Project.TrimStart + (ed.Project.TrimEnd - ed.Project.TrimStart) * 0.45;
+                int splits0 = ed.Project.Splits.Count;
+                In.Move(Screen(tl.X(ta), 44)); Pump(0.15); In.Click(); Pump(0.05); In.Click(); Pump(0.5);
+                Check("double-click on the clip lane splits there", ed.Project.Splits.Count == splits0 + 1 && ed.SelectedPiece != null, $"{splits0} -> {ed.Project.Splits.Count}");
+                ed.Seek(tb); Pump(0.3);
+                In.Key(0x53); Pump(0.4);   // S
+                Check("S splits at the playhead", ed.Project.Splits.Count == splits0 + 2 && ed.Project.Splits.Any(x => Math.Abs(x - tb) < 0.05), string.Join(",", ed.Project.Splits.Select(x => x.ToString("0.00"))));
+                var mid = ed.PieceList.FirstOrDefault(x => x.Start > ta - 0.1 && x.End < tb + 0.1 && x.Start < tb);
+                In.Move(Screen((tl.X(mid.Start) + tl.X(mid.End)) / 2, 44)); Pump(0.15); In.Click(); Pump(0.4);
+                Check("click selects the clip", ed.SelectedPiece is double spc && Math.Abs(spc - mid.Start) < 0.05, $"{ed.SelectedPiece}");
+                In.Key(0x2E); Pump(0.5);   // Delete
+                var removed = ed.Project.Cuts.FirstOrDefault(c => !c.Speed && Math.Abs(c.Start - mid.Start) < 0.05);
+                Check("Delete removes the clip (a cut)", removed != null && Math.Abs(removed.End - mid.End) < 0.05, string.Join(" ", ed.Project.Cuts.Select(c => $"{(c.Speed ? "speed" : "cut")}[{c.Start:0.00},{c.End:0.00}]")));
+                Check("timeline closes up", removed != null && Math.Abs(tl.X(removed.End) - tl.X(removed.Start)) < 1.5, removed == null ? "" : $"{tl.X(removed.Start):0.0} {tl.X(removed.End):0.0}");
+                In.Combo(0x11, 0x5A); Pump(0.3);
+                Check("Ctrl+Z brings the clip back", !ed.Project.Cuts.Any(c => !c.Speed));
+                In.Combo(0x11, 0x59); Pump(0.3);
+                var cut = ed.Project.Cuts.FirstOrDefault(c => !c.Speed);
+                Check("Ctrl+Y removes it again", cut != null);
+                if (cut != null)
                 {
-                    double ce0 = cg.End; float cex = Math.Max(tl.X(cg.Start) + 6, tl.X(cg.End)) - 4;
-                    In.Move(Screen(cex, 47)); Pump(0.15); In.Down();
-                    for (int i = 1; i <= 10; i++) { In.Move(Screen(cex + 4 * i, 47)); Pump(0.03); }
-                    In.Up(); Pump(0.3);
-                    var cg2 = ed.Project.Cuts.First(c => c.Id == cg.Id);
-                    Check("drag cut edge", cg2.End > ce0 + 0.05, $"{ce0:0.00} -> {cg2.End:0.00}");
-                    In.Combo(0x11, 0x5A); Pump(0.3);
-                    Check("Ctrl+Z undoes the cut drag", Math.Abs(ed.Project.Cuts.First(c => c.Id == cg.Id).End - ce0) < 1e-6);
-                    ed.SetCut(true, 4); Pump(0.3);
-                    var cg3 = ed.Project.Cuts.First(c => c.Id == cg.Id);
-                    Check("switch to 4x speed-up", cg3.Speed && cg3.Rate == 4);
-                    ed.SetCut(false, 0); Pump(0.3);
-                    // 播放穿过剪掉段：播放头不会停在剪掉段里面
-                    var cut = ed.Project.Cuts.First(c => c.Id == cg.Id);
+                    // 播放穿过删掉的段：播放头不会停在删掉的段里面
                     ed.Seek(Math.Max(ed.Project.TrimStart, cut.Start - 0.6)); Pump(0.5);
                     var times = new List<double>();
                     In.Key(0x20);
@@ -208,7 +239,14 @@ namespace ScreenRecorder
                     while (DateTime.Now < until) { Application.DoEvents(); System.Threading.Thread.Sleep(15); if (ed.Playing) times.Add(ed.Time); }
                     In.Key(0x20); Pump(0.3);
                     bool skipped = times.Count > 5 && times.All(t => t < cut.Start + 0.02 || t >= cut.End - 0.02) && times.Max() > cut.End;
-                    Check("playback skips the cut", skipped, $"cut {cut.Start:0.00}-{cut.End:0.00}, saw {times.FirstOrDefault():0.00}..{(times.Count > 0 ? times.Max() : 0):0.00} ({times.Count} ticks)");
+                    Check("playback skips the removed clip", skipped, $"cut {cut.Start:0.00}-{cut.End:0.00}, saw {times.FirstOrDefault():0.00}..{(times.Count > 0 ? times.Max() : 0):0.00} ({times.Count} ticks)");
+                    // 小剪刀：点选 → 属性条「恢复」；按 Delete 恢复，再 Ctrl+Z 删回去（后面的检查要用到剪掉段）
+                    In.Move(Screen(tl.X(cut.Start), 44)); Pump(0.15); In.Click(); Pump(0.4);
+                    Check("click the scissors mark selects the removed part", ed.SelectedCut == cut.Id, $"{ed.SelectedCut}");
+                    In.Key(0x2E); Pump(0.4);
+                    Check("Delete on the scissors mark restores it", !ed.Project.Cuts.Any(c => !c.Speed));
+                    In.Combo(0x11, 0x5A); Pump(0.3);
+                    Check("undo the restore", ed.Project.Cuts.Any(c => !c.Speed));
                 }
                 // 3c) 改音量：预览声音在后台重做
                 int ready = ed.AudioReady;

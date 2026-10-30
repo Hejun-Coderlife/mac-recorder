@@ -36,8 +36,8 @@ namespace ScreenRecorder
         {
             Flat(annotateBtn, "✎ " + L("标注", "Annotate"), (s, e) => ShowAnnotateMenu());
             tips.SetToolTip(annotateBtn, L("遮挡隐私（模糊 / 马赛克 / 色块），或者加箭头、框、圈、高亮、文字：选好后在预览画面上拖出来", "Redact (blur / mosaic / solid) or add an arrow, box, circle, highlight or text: pick one, then drag on the picture"));
-            Flat(suggestBtn, "⏩", (s, e) => SuggestSpeed()); suggestBtn.Width = 34;
-            tips.SetToolTip(suggestBtn, L("建议加速：找出很久没操作的空档（4×）和一直在打字的地方（2×），在剪辑轨上标出来，✓ 采纳、✕ 忽略", "Suggest speed-ups: finds idle gaps (4×) and long typing (2×); accept ✓ or ignore ✕ on the cut lane"));
+            Flat(suggestBtn, "⏩", (s, e) => ShowSpeedMenu()); suggestBtn.Width = 34;
+            tips.SetToolTip(suggestBtn, L("加速：找出可以加速的地方逐个确认，或者把打字的地方 / 很久没动的空档一键全部加速", "Speed up: review suggested parts one by one, or speed up all typing / idle parts in one click"));
         }
 
         void ShowAnnotateMenu()
@@ -602,7 +602,7 @@ namespace ScreenRecorder
                     BeginInvoke((Action)(() =>
                     {
                         Suggesting = false; Suggestions = found;
-                        if (found.Count == 0) System.Media.SystemSounds.Beep.Play();
+                        if (found.Count == 0) Toast(L("没找到要加速的地方：这段录制里没有长时间不动的空档，也没有长时间打字", "Nothing to speed up: no long idle stretches or long typing in this recording"));
                         Changed?.Invoke();
                     }));
                 }

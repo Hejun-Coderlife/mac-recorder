@@ -624,6 +624,28 @@ jobs:
           foreach ($k in "EDITOR", "EDITOR_W4DEMO", "APP_LANG", "EDITORSHOT") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
           Get-ChildItem (Join-Path $work "w4-marked*.mp4"), (Join-Path $work "w4-music*.mp4") -ErrorAction SilentlyContinue | Copy-Item -Destination (Join-Path $env:RUNNER_TEMP "studio")
 
+      - name: W5 - 剪映式剪辑（分割 / 删段合拢 / 跨段快放）、打字声轨、Mac 新字段往返、叠放各占一行、一键加速、预览放大 + 截图
+        run: |
+          foreach ($k in "AUTOTEST", "AUTOSTUDIO", "AUTOINPUT", "AUTOAUDIO", "AUTOOUT", "STUDIO_COMPOSE", "STUDIO_ENCODER", "STUDIO") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $w4 = Join-Path $env:RUNNER_TEMP "studio/w4"; $work = Join-Path $env:RUNNER_TEMP "studio/w5"; New-Item -ItemType Directory -Force $work | Out-Null
+          $env:W5TEST = $work; $env:W5SRC = (Join-Path $w4 "demo")
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          foreach ($k in "W5TEST", "W5SRC") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $txt = Get-Content "$env:TEMP\w5_test.txt" -Raw
+          Write-Host "exit=$($p.ExitCode)`n$txt"
+          if ($p.ExitCode -ne 0 -or -not $txt.StartsWith("OK")) { throw "W5 tests failed" }
+          $shots = Join-Path $env:RUNNER_TEMP "studio/editor"; New-Item -ItemType Directory -Force $shots | Out-Null
+          foreach ($lang in "zh", "en") {
+            foreach ($demo in "clips", "lanes") {
+              $env:EDITOR = (Join-Path $w4 "demo"); $env:EDITOR_W5DEMO = $demo; $env:APP_LANG = $lang; $env:EDITORSHOT = (Join-Path $shots "w5-$demo-$lang.png")
+              Remove-Item (Join-Path $w4 "demo/project.json") -ErrorAction SilentlyContinue
+              $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+              Write-Host "[$lang/$demo] exit=$($p.ExitCode) $(Get-Content "$env:TEMP\editorshot.txt" -Raw)"
+              if ($p.ExitCode -ne 0) { throw "W5 screenshot $demo $lang failed" }
+            }
+          }
+          foreach ($k in "EDITOR", "EDITOR_W5DEMO", "APP_LANG", "EDITORSHOT") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+
       - name: W3 - camera capture (a video file stands in for the camera) + do not disturb (banners off, restored, also after a crash)
         run: |
           $cam = Join-Path $env:RUNNER_TEMP "studio/w3cam"; New-Item -ItemType Directory -Force $cam | Out-Null

@@ -37,6 +37,7 @@ namespace ScreenRecorder
             Selected = kind == "seg" ? id : null; SelectedCut = kind == "cut" ? id : null;
             SelectedVoice = kind == "voice" ? id : null; SelectedCaption = kind == "cap" ? id : null; SelectedLayout = kind == "layout" ? id : null;
             SelectedRed = kind == "red" ? id : null; SelectedAnn = kind == "ann" ? id : null; SelectedMusic = kind == "music" ? id : null;
+            SelectedPiece = null; SelectedBurst = null;   // 片段 / 打字声的选中由 SelectPiece / SelectBurst 再设
             Picking = false;
             Changed?.Invoke();
         }
@@ -161,17 +162,15 @@ namespace ScreenRecorder
 
             // 左边：预览 / 播放栏 / 属性条 / 时间轴
             var left = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Window };
-            var tlArea = new Panel { Dock = DockStyle.Bottom, Height = 248, Padding = new Padding(14, 8, 14, 10), BackColor = Theme.Window };
-            Timeline.Dock = DockStyle.Fill;
+            var tlArea = new Panel { Dock = DockStyle.Bottom, Height = DefaultTimelineArea(HasCamera), Padding = new Padding(14, 8, 14, 10), BackColor = Theme.Window };
             inspector.Dock = DockStyle.Top; inspector.Height = 34; inspector.Visible = false;
             cutInspector.Dock = DockStyle.Top; cutInspector.Height = 34; cutInspector.Visible = false;
             voiceInspector.Dock = DockStyle.Top; voiceInspector.Height = 34; voiceInspector.Visible = false;
             capInspector.Dock = DockStyle.Top; capInspector.Height = 34; capInspector.Visible = false;
             BuildInspector(); BuildCutInspector(); BuildVoiceInspector(); BuildCaptionInspector(); BuildLayoutInspector();
-            tlArea.Controls.Add(Timeline); tlArea.Controls.Add(inspector); tlArea.Controls.Add(cutInspector); tlArea.Controls.Add(voiceInspector); tlArea.Controls.Add(capInspector); tlArea.Controls.Add(layInspector);
+            tlArea.Controls.Add(inspector); tlArea.Controls.Add(cutInspector); tlArea.Controls.Add(voiceInspector); tlArea.Controls.Add(capInspector); tlArea.Controls.Add(layInspector);
             BuildW4Inspectors(tlArea);
-            if (HasCamera) tlArea.Height += 26;   // 多一条「布局」轨
-            tlArea.Height += TimelineView.W4Lanes;   // 遮挡、标注、音乐三条轨
+            BuildW5Inspectors(tlArea);
             var barLine2 = new Panel { Dock = DockStyle.Bottom, Height = 1, BackColor = Theme.Line };
             var bar = new Panel { Dock = DockStyle.Bottom, Height = 50, Padding = new Padding(14, 7, 14, 7), BackColor = Theme.Window };
             BuildControlBar(bar);
@@ -182,6 +181,7 @@ namespace ScreenRecorder
             preview.Pick = (x, y) => PickAt(x, y);
             InitW3(); InitW4();
             left.Controls.Add(pv); left.Controls.Add(barLine); left.Controls.Add(bar); left.Controls.Add(barLine2); left.Controls.Add(tlArea);
+            InitW5(tlArea, pv, left);
 
             Controls.Add(left); Controls.Add(sep); Controls.Add(style); Controls.Add(topLine); Controls.Add(top);
             ResumeLayout();
@@ -197,8 +197,8 @@ namespace ScreenRecorder
             Flat(undoBtn, "↶", (s, e) => Undo()); tips.SetToolTip(undoBtn, L("撤销上一步（Ctrl+Z）", "Undo the last change (Ctrl+Z)"));
             Flat(redoBtn, "↷", (s, e) => Redo()); tips.SetToolTip(redoBtn, L("重做刚撤销的那步（Ctrl+Y）", "Redo what you just undid (Ctrl+Y)"));
             foreach (var b in new[] { undoBtn, redoBtn }) { b.Width = 34; b.Font = new Font(Font.FontFamily, Font.Size + 2); }
-            Flat(cutBtn, "✂ " + L("剪掉", "Cut"), (s, e) => AddCut(Time));
-            tips.SetToolTip(cutBtn, L("在播放头处放一段「剪掉」（红色斜纹）：拖两头改范围，选中后可以改成快放 2× / 4× / 8×", "Put a cut at the playhead (red stripes): drag its ends; select it to switch to speed-up 2× / 4× / 8×"));
+            Flat(cutBtn, "✂ " + L("分割", "Split"), (s, e) => Split(Time));
+            tips.SetToolTip(cutBtn, L("在播放头处切一刀（S 或 Ctrl+B）：点选切出来的一段按 Delete 删掉，时间轴直接合拢；也能给那段改速度", "Split at the playhead (S or Ctrl+B): select a part and press Delete to remove it, the timeline closes up; you can also change its speed"));
             Flat(voiceBtn, "🎙 " + L("录讲解", "Voice-over"), (s, e) => ToggleVoice());
             tips.SetToolTip(voiceBtn, L("从播放头开始边放边录你的声音（麦克风）；再点一下、空格或 Esc 停。录好的在时间轴「讲解」轨", "Plays from the playhead while recording your microphone; click again, Space or Esc to stop. It goes on the Voice-over lane"));
             Flat(capBtn, "字 " + L("字幕", "Captions"), (s, e) => ShowCaptionMenu());
@@ -334,6 +334,7 @@ namespace ScreenRecorder
             SyncVoiceCaption();
             SyncLayoutInspector();
             SyncW4();
+            SyncW5();
             optBtn.Text = "⚙ " + ExportOpt.Summary(L);
             playBtn.Invalidate();
             tlMinus.Enabled = Timeline.Scale > 1.001; tlPlus.Enabled = Timeline.Scale < 7.999;
@@ -406,9 +407,15 @@ namespace ScreenRecorder
         // 按自动规则重新排推近段（能撤销）；排完算「没手动改过」
         public void Regenerate()
         {
-            Edit(p => p.Segments = StudioPlan.AutoSegments(Track, Duration, p.Segments.FirstOrDefault()?.Zoom ?? 2.0));
+            var old = Project.Segments.Select(x => (x.Start, x.End)).ToList();
+            var segs = StudioPlan.AutoSegments(Track, Duration, Project.Segments.FirstOrDefault()?.Zoom ?? 2.0);
+            Edit(p => p.Segments = segs);
             Project.SegmentsEdited = false;
             Selected = null;
+            // 告诉用户发生了什么（自动排的和现在一样时，点了看不出变化）
+            bool same = old.Count == segs.Count && old.Zip(segs, (a, b) => Math.Abs(a.Start - b.Start) < 0.05 && Math.Abs(a.End - b.End) < 0.05).All(x => x);
+            Toast(same ? L("已按点击和打字重新排推近：和现在的一样，没有变化", "Zooms regenerated from your clicks and typing: same as before")
+                       : L($"已按点击和打字重新排了 {segs.Count} 段推近（原来 {old.Count} 段）· Ctrl+Z 撤销", $"Regenerated {segs.Count} zooms (was {old.Count}) · Ctrl+Z to undo"));
             saveTimer.Stop(); saveTimer.Start();
             Changed?.Invoke();
         }
@@ -471,7 +478,7 @@ namespace ScreenRecorder
 
         public void DeleteSelected()
         {
-            if (DeleteSelectedLayout() || DeleteSelectedW4()) return;
+            if (DeleteSelectedW5() || DeleteSelectedLayout() || DeleteSelectedW4()) return;
             if (SelectedVoice != null) { var vid = SelectedVoice; Edit(p => p.Voiceovers.RemoveAll(v => v.Id == vid)); Select(null, null); return; }
             if (SelectedCaption != null) { var kid = SelectedCaption; Edit(p => p.Captions.RemoveAll(c => c.Id == kid)); Select(null, null); return; }
             if (SelectedCut != null)
@@ -818,13 +825,14 @@ namespace ScreenRecorder
                 case Keys.Right: Step(1); return true;
                 case Keys.Control | Keys.Z: Undo(); return true;
                 case Keys.Control | Keys.Y: case Keys.Control | Keys.Shift | Keys.Z: Redo(); return true;
-                case Keys.Delete: case Keys.Back: if (Selected != null || SelectedCut != null || SelectedVoice != null || SelectedCaption != null || SelectedLayout != null || SelectedRed != null || SelectedAnn != null || SelectedMusic != null) { DeleteSelected(); return true; } break;
+                case Keys.S: case Keys.Control | Keys.B: Split(Time); return true;   // 分割
+                case Keys.Delete: case Keys.Back: if (SelectedPiece != null || SelectedBurst != null || Selected != null || SelectedCut != null || SelectedVoice != null || SelectedCaption != null || SelectedLayout != null || SelectedRed != null || SelectedAnn != null || SelectedMusic != null) { DeleteSelected(); return true; } break;
                 case Keys.Control | Keys.D: if (SelectedAnn != null || SelectedRed != null) { DuplicateOverlay(); return true; } break;
                 case Keys.Escape:
                     if (RecordingVoice || countdownLeft > 0) { ToggleVoice(); return true; }
                     if (Picking) { Picking = false; Changed?.Invoke(); return true; }
                     if (Tool != null) { Tool = null; Changed?.Invoke(); return true; }
-                    if (Selected != null || SelectedCut != null || SelectedVoice != null || SelectedCaption != null || SelectedLayout != null || SelectedRed != null || SelectedAnn != null || SelectedMusic != null) { Select(null, null); return true; } break;
+                    if (SelectedPiece != null || SelectedBurst != null || Selected != null || SelectedCut != null || SelectedVoice != null || SelectedCaption != null || SelectedLayout != null || SelectedRed != null || SelectedAnn != null || SelectedMusic != null) { Select(null, null); return true; } break;
             }
             return base.ProcessCmdKey(ref msg, keyData);
         }
@@ -876,13 +884,51 @@ namespace ScreenRecorder
         public Func<double, double, bool> OverlayDouble;
         public Func<double, double, Cursor> OverlayCursor;
         public Action<Graphics, RectangleF> Decor;
-        bool draggingCam, draggingOv;
+        bool draggingCam, draggingOv, panning;
         RectangleF imgRect;
         public RectangleF ImageRect => imgRect;
+        // 预览放大（像剪映）：1 = 适应窗口；Pan = 放大后挪了多少（像素，右 / 下为正）。只放大预览，不影响成片
+        public float Zoom = 1; public PointF Pan;
+        Point panFrom; PointF panBase;
+        RectangleF FitRect() { float k = Math.Min((Width - 16f) / Image.Width, (Height - 16f) / Image.Height); float w = Image.Width * k, h = Image.Height * k; return new RectangleF((Width - w) / 2, (Height - h) / 2, w, h); }
+        void ClampPan()
+        {
+            if (Image == null) return;
+            var f = FitRect(); float mx = f.Width * (Zoom - 1) / 2, my = f.Height * (Zoom - 1) / 2;
+            Pan = new PointF(Math.Min(Math.Max(Pan.X, -mx), mx), Math.Min(Math.Max(Pan.Y, -my), my));
+        }
+        // 以 anchor（本控件坐标）为中心放大：那一点在放大前后不动
+        public void SetZoom(float z, Point? anchor = null)
+        {
+            z = Math.Min(Math.Max(z, 1), 6);
+            if (Image != null && anchor is Point a)
+            {
+                float cx = Width / 2f + Pan.X, cy = Height / 2f + Pan.Y;
+                Pan = new PointF(Pan.X - (a.X - cx) * (z / Zoom - 1), Pan.Y - (a.Y - cy) * (z / Zoom - 1));
+            }
+            Zoom = z; if (Zoom <= 1.001) Pan = PointF.Empty;
+            ClampPan(); Invalidate();
+        }
+        // 右下角的 − 100% + 适应
+        RectangleF ZoomBar => new RectangleF(Width - 196, Height - 38, 186, 28);
+        RectangleF ZMinus => new RectangleF(ZoomBar.X + 6, ZoomBar.Y + 3, 22, 22);
+        RectangleF ZPlus => new RectangleF(ZoomBar.X + 86, ZoomBar.Y + 3, 22, 22);
+        RectangleF ZFit => new RectangleF(ZoomBar.X + 114, ZoomBar.Y + 3, 66, 22);
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            if ((ModifierKeys & Keys.Control) != 0) { SetZoom(Zoom * (float)Math.Pow(1.0015, e.Delta), e.Location); return; }   // 触控板双指捏合也是发这个
+            if (Zoom > 1.001) { if ((ModifierKeys & Keys.Shift) != 0) Pan = new PointF(Pan.X + e.Delta / 2f, Pan.Y); else Pan = new PointF(Pan.X, Pan.Y + e.Delta / 2f); ClampPan(); Invalidate(); return; }
+            base.OnMouseWheel(e);
+        }
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == 0x020E && Zoom > 1.001) { int d = (short)((long)m.WParam >> 16 & 0xffff); Pan = new PointF(Pan.X - d / 2f, Pan.Y); ClampPan(); Invalidate(); m.Result = IntPtr.Zero; return; }
+            base.WndProc(ref m);
+        }
 
         public PreviewBox()
         {
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
             BackColor = Theme.Under;
         }
 
@@ -895,13 +941,28 @@ namespace ScreenRecorder
             using (var b = new SolidBrush(Theme.Under)) g.FillPath(b, path);
             if (Image != null)
             {
-                float k = Math.Min((Width - 16f) / Image.Width, (Height - 16f) / Image.Height);
-                float w = Image.Width * k, h = Image.Height * k;
-                imgRect = new RectangleF((Width - w) / 2, (Height - h) / 2, w, h);
+                ClampPan();
+                var f = FitRect();
+                float w = f.Width * Zoom, h = f.Height * Zoom;
+                imgRect = new RectangleF((Width - w) / 2 + Pan.X, (Height - h) / 2 + Pan.Y, w, h);
+                var clip = g.Clip;
+                using (var cp = Theme.Round(new RectangleF(0, 0, Width - 1, Height - 1), 8)) g.SetClip(cp);   // 放大后裁在框里
                 g.InterpolationMode = InterpolationMode.HighQualityBilinear;
                 g.PixelOffsetMode = PixelOffsetMode.Half;
                 g.DrawImage(Image, imgRect);
                 Decor?.Invoke(g, imgRect);
+                g.Clip = clip;
+                // 右下角放大控件：放大时常亮，平时淡一点
+                var zb = ZoomBar;
+                using (var path = Theme.Round(zb, zb.Height / 2))
+                using (var b = new SolidBrush(Color.FromArgb(Zoom > 1.001 ? 230 : 150, Theme.Control))) g.FillPath(b, path);
+                using (var f2 = new Font("Segoe UI", 8.5f))
+                {
+                    TextRenderer.DrawText(g, "−", f2, Rectangle.Round(ZMinus), Zoom > 1.001 ? Theme.Text : Theme.Secondary, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                    TextRenderer.DrawText(g, (int)Math.Round(Zoom * 100) + "%", f2, Rectangle.Round(new RectangleF(ZMinus.Right, zb.Y, ZPlus.X - ZMinus.Right, zb.Height)), Theme.Text, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                    TextRenderer.DrawText(g, "+", f2, Rectangle.Round(ZPlus), Theme.Text, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                    TextRenderer.DrawText(g, App.L("适应", "Fit"), f2, Rectangle.Round(ZFit), Zoom > 1.001 ? Theme.Accent : Theme.Secondary, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                }
             }
             if (Hint != null)
             {
@@ -918,6 +979,7 @@ namespace ScreenRecorder
         {
             base.OnMouseMove(e);
             MouseMoves++;
+            if (panning) { Pan = new PointF(panBase.X + e.X - panFrom.X, panBase.Y + e.Y - panFrom.Y); ClampPan(); Invalidate(); return; }
             if (draggingCam && imgRect.Width > 0) { MoveCamera?.Invoke((e.X - imgRect.X) / imgRect.Width, (e.Y - imgRect.Y) / imgRect.Height); return; }
             if (draggingOv && imgRect.Width > 0) { OverlayMove?.Invoke((e.X - imgRect.X) / imgRect.Width, (e.Y - imgRect.Y) / imgRect.Height); return; }
             var oc = !Picking && imgRect.Width > 0 && OverlayCursor != null ? OverlayCursor((e.X - imgRect.X) / imgRect.Width, (e.Y - imgRect.Y) / imgRect.Height) : null;
@@ -927,6 +989,7 @@ namespace ScreenRecorder
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
+            if (panning) { panning = false; Capture = false; Cursor = Cursors.Default; return; }
             if (draggingCam) { draggingCam = false; Capture = false; ReleaseCamera?.Invoke(); }
             if (draggingOv) { draggingOv = false; Capture = false; OverlayUp?.Invoke(); }
         }
@@ -941,6 +1004,14 @@ namespace ScreenRecorder
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
+            Focus();
+            if (e.Button == MouseButtons.Left && Image != null && ZoomBar.Contains(e.Location))
+            {
+                if (ZMinus.Contains(e.Location)) SetZoom(Zoom / 1.25f); else if (ZPlus.Contains(e.Location)) SetZoom(Zoom * 1.25f); else if (ZFit.Contains(e.Location)) SetZoom(1);
+                return;
+            }
+            // 放大后：中键或空格按住拖 = 平移
+            if (Zoom > 1.001 && e.Button == MouseButtons.Middle) { panning = true; panFrom = e.Location; panBase = Pan; Capture = true; Cursor = Cursors.SizeAll; return; }
             if (!Picking && e.Button == MouseButtons.Left && imgRect.Width > 0 && imgRect.Contains(e.Location) && e.Clicks == 1 &&
                 OverlayDown != null && OverlayDown((e.X - imgRect.X) / imgRect.Width, (e.Y - imgRect.Y) / imgRect.Height)) { draggingOv = true; Capture = true; return; }
             if (!Picking && e.Button == MouseButtons.Left && imgRect.Width > 0 && imgRect.Contains(e.Location) &&

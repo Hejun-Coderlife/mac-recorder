@@ -12,27 +12,34 @@ namespace ScreenRecorder
 {
     sealed partial class TimelineView
     {
-        public const int W4Lanes = 84;          // 三条轨一共多高（剪辑窗口按这个加高时间轴）
-        const int RedH = 18, AnnH = 30, MusH = 24;
-        int RedY => (ed.HasCamera ? LayY + LayH : CapY + CapH) + 4;
+        // 遮挡、标注叠在一起时各占一整行（像剪映 / Premiere），轨道跟着变高；时间轴整体高度 ContentHeight，放不下就上下滚
+        const int Row = 18, RowGap = 2, MusH = 24;
+        int RedY => (ed.HasCamera ? LayY + LayH : KeyY + KeyH) + 4;
+        int RedRowsN => Math.Max(1, RedRows(ed.Project).Values.DefaultIfEmpty(-1).Max() + 1);
+        int AnnRowsN => Math.Max(1, AnnRows(ed.Project).Values.DefaultIfEmpty(-1).Max() + 1);
+        int RedH => RedRowsN * Row + (RedRowsN - 1) * RowGap;
+        int AnnH => AnnRowsN * Row + (AnnRowsN - 1) * RowGap;
         int AnnY => RedY + RedH + 4;
         int MusY => AnnY + AnnH + 4;
+        public int ContentHeight => MusY + MusH + 6;
         double baseMusStart, baseMusIn, baseMusOut;
 
-        // 标注分几行画（时间上叠在一起的往下挪，最多 3 行）
-        Dictionary<string, int> AnnRows(StudioProject p)
+        // 时间上叠在一起的排成几行（贪心：放进第一行放得下的，放不下就新开一行）
+        static Dictionary<string, int> Pack(IEnumerable<(string id, double s, double e)> items)
         {
             var rows = new Dictionary<string, int>(); var ends = new List<double>();
-            foreach (var a in p.Annotations.OrderBy(a => a.Start))
+            foreach (var (id, st, en) in items.OrderBy(x => x.s))
             {
-                int r = ends.FindIndex(e => e <= a.Start + 1e-6);
-                if (r < 0) { if (ends.Count < 3) { ends.Add(a.End); r = ends.Count - 1; } else { r = 2; ends[2] = Math.Max(ends[2], a.End); } }
-                else ends[r] = a.End;
-                rows[a.Id] = r;
+                int r = ends.FindIndex(x => x <= st + 1e-6);
+                if (r < 0) { ends.Add(en); r = ends.Count - 1; } else ends[r] = en;
+                rows[id] = r;
             }
             return rows;
         }
-        (float y, float h) AnnRow(int r, int n) { float rh = (AnnH - 2f) / Math.Max(1, n); return (AnnY + 1 + r * rh, rh - 1); }
+        Dictionary<string, int> AnnRows(StudioProject p) => Pack(p.Annotations.Select(a => (a.Id, a.Start, a.End)));
+        Dictionary<string, int> RedRows(StudioProject p) => Pack(p.Redactions.Select(r => (r.Id, r.Start, r.End)));
+        (float y, float h) AnnRow(int r, int n) => (AnnY + r * (Row + RowGap), Row);
+        (float y, float h) RedRow(int r) => (RedY + r * (Row + RowGap), Row);
 
         void PaintW4(Graphics g, StudioProject p)
         {
@@ -50,25 +57,27 @@ namespace ScreenRecorder
                 if (p.Music.Clips.Count == 0) g.DrawString(L("背景音乐（右边「声音」→ 选择音乐…）", "Music (Sound → Choose Music… on the right)"), lf, lb, 6, MusY + 5);
             }
             // 遮挡：深灰紫块，写样式
+            var rrows = RedRows(p);
             using (var f = new Font("Segoe UI", 7.5f, FontStyle.Bold))
                 foreach (var r in p.Redactions)
                 {
                     float x0 = X(r.Start), x1 = Math.Max(x0 + 6, X(r.End));
                     if (x1 < -2 || x0 > ClientSize.Width + 2) continue;
                     bool sel = r.Id == ed.SelectedRed;
-                    var rc = new RectangleF(x0, RedY, x1 - x0, RedH);
+                    var (ry0, rh0) = RedRow(rrows.TryGetValue(r.Id, out var rri) ? rri : 0);
+                    var rc = new RectangleF(x0, ry0, x1 - x0, rh0);
                     using (var path = Theme.Round(rc, 4))
                     {
                         using (var b = new SolidBrush(Color.FromArgb(sel ? 240 : 190, 90, 90, 110))) g.FillPath(b, path);
                         using (var hb = new HatchBrush(HatchStyle.SmallCheckerBoard, Color.FromArgb(60, Color.White), Color.Transparent)) g.FillPath(hb, path);
                         if (sel) using (var pen = new Pen(Color.White, 2)) g.DrawPath(pen, path);
                     }
-                    Handles(g, x0, x1, RedY, RedH);
+                    Handles(g, x0, x1, (int)ry0, (int)rh0);
                     if (rc.Width > 40) TextRenderer.DrawText(g, Redaction.Name(r.Style, L), f, Rectangle.Round(new RectangleF(rc.X + 6, rc.Y, rc.Width - 12, rc.Height)), Color.White, TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
                 }
             // 标注：每个标注一块（颜色就是标注的颜色），叠在一起的分行
             var rows = AnnRows(p); int nRows = rows.Count == 0 ? 1 : rows.Values.Max() + 1;
-            using (var f = new Font("Segoe UI", nRows > 1 ? 6.5f : 7.5f, FontStyle.Bold))
+            using (var f = new Font("Segoe UI", 7.5f, FontStyle.Bold))
                 foreach (var a in p.Annotations)
                 {
                     float x0 = X(a.Start), x1 = Math.Max(x0 + 6, X(a.End));
@@ -188,12 +197,16 @@ namespace ScreenRecorder
                 return b;
             }
             if (pt.Y >= RedY && pt.Y <= RedY + RedH)
+            {
+                var rrows = RedRows(p);
                 foreach (var r in p.Redactions)
                 {
                     float x0 = X(r.Start), x1 = Math.Max(x0 + 6, X(r.End));
-                    if (pt.X < x0 - 2 || pt.X > x1 + 2) continue;
+                    var (ry, rh) = RedRow(rrows.TryGetValue(r.Id, out var rr0) ? rr0 : 0);
+                    if (pt.X < x0 - 2 || pt.X > x1 + 2 || pt.Y < ry - 1 || pt.Y > ry + rh + 1) continue;
                     id = r.Id; return Edge(x0, x1, Hit.RedStart, Hit.RedEnd, Hit.RedBody);
                 }
+            }
             if (pt.Y >= AnnY && pt.Y <= AnnY + AnnH)
             {
                 var rows = AnnRows(p); int nRows = rows.Count == 0 ? 1 : rows.Values.Max() + 1;
@@ -262,7 +275,7 @@ namespace ScreenRecorder
             return null;
         }
 
-        void DragW4(Hit h, string id, double dt)
+        void DragW4(Hit h, string id, Func<double, double> Dt)
         {
             double D0 = ed.Duration;
             switch (h)
@@ -273,7 +286,7 @@ namespace ScreenRecorder
                     ed.DragUpdate(p =>
                     {
                         var r = p.Redactions.FirstOrDefault(x => x.Id == id); if (r == null) return;
-                        (r.Start, r.End) = Span(h == Hit.RedBody ? 0 : h == Hit.RedStart ? 1 : 2, dt, D0);
+                        (r.Start, r.End) = Span(h == Hit.RedBody ? 0 : h == Hit.RedStart ? 1 : 2, Dt, D0);
                     });
                     break;
                 }
@@ -283,7 +296,7 @@ namespace ScreenRecorder
                     ed.DragUpdate(p =>
                     {
                         var a = p.Annotations.FirstOrDefault(x => x.Id == id); if (a == null) return;
-                        (a.Start, a.End) = Span(h == Hit.AnnBody ? 0 : h == Hit.AnnStart ? 1 : 2, dt, D0);
+                        (a.Start, a.End) = Span(h == Hit.AnnBody ? 0 : h == Hit.AnnStart ? 1 : 2, Dt, D0);
                     });
                     break;
                 }
@@ -293,7 +306,7 @@ namespace ScreenRecorder
                     {
                         var c = p.Music.Clips.FirstOrDefault(x => x.Id == id); if (c == null) return;
                         var m = new TimeMap(p);
-                        c.Start = Math.Max(0, m.Out(Math.Min(Math.Max(0, m.Src(baseMusStart) + dt), D0)));
+                        c.Start = Math.Max(0, m.Out(Math.Min(Math.Max(0, m.Src(baseMusStart) + Dt(m.Src(baseMusStart))), D0)));
                     });
                     break;
                 case Hit.MusStart: case Hit.MusEnd:
@@ -306,13 +319,13 @@ namespace ScreenRecorder
                         double len0 = baseMusOut - baseMusIn;
                         if (isStart)
                         {
-                            double ns = m.Out(Math.Max(0, m.Src(baseMusStart) + dt));
+                            double ns = m.Out(Math.Max(0, m.Src(baseMusStart) + Dt(m.Src(baseMusStart))));
                             double delta = Math.Min(Math.Max(ns - baseMusStart, -baseMusIn), len0 - minLen);
                             c.Start = baseMusStart + delta; c.TrimIn = baseMusIn + delta; c.TrimOut = baseMusOut;
                         }
                         else
                         {
-                            double endOut = m.Out(Math.Max(0, m.Src(baseMusStart + len0) + dt));
+                            double endOut = m.Out(Math.Max(0, m.Src(baseMusStart + len0) + Dt(m.Src(baseMusStart + len0))));
                             c.TrimOut = Math.Min(Math.Max(baseMusIn + minLen, baseMusIn + (endOut - baseMusStart)), c.FileLength > 0 ? c.FileLength : double.MaxValue);
                         }
                     });
@@ -321,12 +334,12 @@ namespace ScreenRecorder
         }
 
         // 遮挡 / 标注拖动：0 = 整体挪，1 = 拖开头，2 = 拖结尾（最短 0.3 秒，不出素材）
-        (double s, double e) Span(int mode, double dt, double d)
+        (double s, double e) Span(int mode, Func<double, double> Dt, double d)
         {
             double len = baseEnd - baseStart;
-            if (mode == 0) { double ns = Math.Min(Math.Max(baseStart + dt, 0), Math.Max(0, d - len)); return (ns, ns + len); }
-            if (mode == 1) return (Math.Min(Math.Max(baseStart + dt, 0), baseEnd - 0.3), baseEnd);
-            return (baseStart, Math.Max(Math.Min(baseEnd + dt, d), baseStart + 0.3));
+            if (mode == 0) { double ns = Math.Min(Math.Max(baseStart + Dt(baseStart), 0), Math.Max(0, d - len)); return (ns, ns + len); }
+            if (mode == 1) return (Math.Min(Math.Max(baseStart + Dt(baseStart), 0), baseEnd - 0.3), baseEnd);
+            return (baseStart, Math.Max(Math.Min(baseEnd + Dt(baseEnd), d), baseStart + 0.3));
         }
     }
 }
