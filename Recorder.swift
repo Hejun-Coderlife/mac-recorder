@@ -33,6 +33,23 @@ final class Writer: NSObject, SCStreamOutput, @unchecked Sendable {
     private let micAudio: AVAssetWriterInput?
     private var started = false
     private(set) var startSeconds = 0.0   // 第一帧的时间（主机时钟），鼠标轨迹按它对齐
+    // 麦克风电平：最近一块的峰值（0–1）、整段录下来的最大峰值（录完判断是不是全程没声）
+    private let levelLock = NSLock()
+    private var _micLevel: Float = 0, _micPeak: Float = 0
+    var micLevel: Float { levelLock.lock(); defer { levelLock.unlock() }; return _micLevel }
+    var micPeak: Float { levelLock.lock(); defer { levelLock.unlock() }; return _micPeak }
+    private func meter(_ sb: CMSampleBuffer) {
+        var abl = AudioBufferList(), block: CMBlockBuffer?
+        guard CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(sb, bufferListSizeNeededOut: nil, bufferListOut: &abl, bufferListSize: MemoryLayout<AudioBufferList>.size,
+                                                                      blockBufferAllocator: nil, blockBufferMemoryAllocator: nil, flags: 0, blockBufferOut: &block) == noErr,
+              let fmt = CMSampleBufferGetFormatDescription(sb), let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt)?.pointee,
+              asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0, let data = abl.mBuffers.mData else { return }
+        let n = Int(abl.mBuffers.mDataByteSize) / 4
+        let p = data.bindMemory(to: Float.self, capacity: n)
+        var peak: Float = 0
+        for i in Swift.stride(from: 0, to: n, by: 4) { peak = max(peak, abs(p[i])) }
+        levelLock.lock(); _micLevel = peak; _micPeak = max(_micPeak, peak); levelLock.unlock()
+    }
     var onError: ((Error) -> Void)?
     // 亮度校正：苹果自带录屏把屏幕的 2.2 伽马按 2.4 重新编码（暗部、中间调更深），我们按同样的曲线改亮度平面，颜色看起来和它一样
     // （实测：苹果的数值 ≈ 我们的数值 ^ 1.09；GAMMA 环境变量用来试验）
@@ -96,6 +113,7 @@ final class Writer: NSObject, SCStreamOutput, @unchecked Sendable {
         case .audio:
             if started, let a = sysAudio, a.isReadyForMoreMediaData { a.append(sb) }
         case .microphone:
+            meter(sb)
             if started, let a = micAudio, a.isReadyForMoreMediaData { a.append(sb) }
         @unknown default: break
         }
@@ -132,6 +150,7 @@ final class Recorder: NSObject, ObservableObject {
     @Published var recording = false
     @Published var busy = false
     @Published var elapsed: TimeInterval = 0
+    @Published var micLevel: Float = 0      // 录制时麦克风电平（0–1），主界面显示
     @Published var message = ""
     @Published var isError = false        // 提示是不是出错（标红）
     @Published var region: Region?        // 框选的区域（列表里 id = "r"）
@@ -349,8 +368,10 @@ final class Recorder: NSObject, ObservableObject {
         stream = s; writer = w; lastFile = url; tracker = tr; project = dir
         recording = true; startedAt = Date(); elapsed = 0; say("")
         Focus.begin()   // 开了「录制时开启勿扰」：不弹通知
-        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            Task { @MainActor in if let self, let t = self.startedAt { self.elapsed = Date().timeIntervalSince(t) } }
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                if let self, let t = self.startedAt { self.elapsed = Date().timeIntervalSince(t); self.micLevel = self.microphone ? (self.writer?.micLevel ?? 0) : 0 }
+            }
         }
         NSSound(named: "Tink")?.play()
     }
@@ -362,10 +383,18 @@ final class Recorder: NSObject, ObservableObject {
         let fresh = bubbleID != nil ? try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) : nil
         guard hideDesktopIcons, let all = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else {
             let keep = (fresh ?? c).windows.filter { $0.windowID == bubbleID }
-            return SCContentFilter(display: d, excludingApplications: c.applications.filter { $0.bundleIdentifier == me }, exceptingWindows: keep)
+            return SCContentFilter(display: d, excludingApplications: c.applications.filter { $0.bundleIdentifier == me || Self.isInputMethod($0.bundleIdentifier) }, exceptingWindows: keep)
         }
-        let skip = all.windows.filter { ($0.owningApplication?.bundleIdentifier == me && $0.windowID != bubbleID) || Self.isDesktopIcons($0) }
+        let skip = all.windows.filter { ($0.owningApplication?.bundleIdentifier == me && $0.windowID != bubbleID) || Self.isDesktopIcons($0) || Self.isInputMethod($0.owningApplication?.bundleIdentifier ?? "") }
         return SCContentFilter(display: d, excludingWindows: skip)
+    }
+    // 输入法的候选条、输入法切换提示：不录进去（打出来的字照样录到，那是在被打字的程序里）
+    // 系统自带（拼音、注音、日文…）、系统输入提示，以及常见第三方：搜狗、微信输入法、百度、讯飞、QQ、手心、RIME（鼠须管）
+    nonisolated static func isInputMethod(_ id: String) -> Bool {
+        let s = id.lowercased()
+        return s.hasPrefix("com.apple.inputmethod.") || s.hasPrefix("com.apple.textinputui") || s == "com.apple.textinputswitcher" || s.hasPrefix("com.apple.inputmethodkit")
+            || s.contains("inputmethod") || s.contains("wetype") || s.contains("sogou") || s.contains("squirrel") || s.contains("rime")
+            || s.contains("baidu.inputmethod") || s.contains("iflytek") || s.contains("qqinput") || s.contains("xinshou")
     }
     // 访达的桌面图标窗口：层级在普通窗口之下（桌面图片是程序坞 / 壁纸进程画的，不是访达，不会被排除）
     nonisolated static func isDesktopIcons(_ w: SCWindow) -> Bool {
@@ -384,6 +413,17 @@ final class Recorder: NSObject, ObservableObject {
         NSSound(named: "Pop")?.play()
         guard let w else { return }
         do { try await w.finish() } catch { finished(error); return }
+        // 开了麦克风但整段都没收到声音：提醒（权限、选错设备、静音键…）
+        let micSilent = microphone && w.micPeak < 0.003
+        micLevel = 0
+        if micSilent {
+            let a = NSAlert()
+            a.messageText = L("麦克风全程没有声音", "The microphone was silent the whole time")
+            a.informativeText = L("这段录制里麦克风一直是静音的。看看：系统设置 → 声音 → 输入 里选的是不是对的麦克风、音量有没有调到最低；或者 隐私与安全性 → 麦克风 里有没有允许「\(appName)」。",
+                                  "Nothing came in from the microphone. Check System Settings → Sound → Input (right device, volume up), and Privacy & Security → Microphone for “\(appName)”.")
+            a.alertStyle = .warning
+            DispatchQueue.main.async { a.runModal() }   // 别挡住后面打开剪辑窗口（AI 停止录制时也不卡住）
+        }
         // Studio 模式：存轨迹，打开剪辑窗口（自动生成推近段，调好再导出；声音在导出时混成一条）
         if let tr, let dir, let out = lastFile {
             if ProcessInfo.processInfo.environment["AUTOTEST"] == nil {
@@ -800,6 +840,13 @@ struct ContentView: View {
                 .tint(rec.recording ? .red : .accentColor)
                 .disabled(rec.busy || rec.selection == nil)
 
+                if rec.recording && rec.microphone {
+                    // 麦克风电平：说话时会跳；一直不动就是没收到声音
+                    HStack(spacing: 4) {
+                        Image(systemName: rec.micLevel < 0.003 ? "mic.slash" : "mic.fill").foregroundStyle(rec.micLevel < 0.003 ? Color.orange : Color.secondary)
+                        LevelMeter(level: min(1, sqrt(rec.micLevel) * 1.2)).frame(width: 60, height: 6)
+                    }.help(L("麦克风电平：说话时会跳", "Microphone level"))
+                }
                 if rec.recording {
                     Circle().fill(.red).frame(width: 10, height: 10)
                     Text(String(format: "%02d:%02d", Int(rec.elapsed) / 60, Int(rec.elapsed) % 60))

@@ -1154,6 +1154,58 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     }
     private func saveNow() { saveWork?.cancel(); saveWork = nil; if Self.testShot == nil { try? project.save(dir) } }
 
+    // 导出前自检：容易漏的问题列出来（占位文字、没声音、透明背景、摄像头压住标注、文件很大、原始大分辨率）
+    func exportIssues() -> [String] {
+        var out: [String] = []
+        let o = exportOptions, p = project
+        let placeholders: Set<String> = ["text", "hello", "123", "文字", "test", "测试", "点这里"]
+        let ph = p.annotations.filter { $0.kind == .text && placeholders.contains($0.text.trimmingCharacters(in: .whitespaces).lowercased()) }
+        if !ph.isEmpty { out.append(L("有 \(ph.count) 个文字标注看起来是测试用的（\(Set(ph.map(\.text)).sorted().joined(separator: "、"))）", "\(ph.count) text notes look like placeholders (\(Set(ph.map(\.text)).sorted().joined(separator: ", ")))")) }
+        let emptyCaps = p.captions.filter { $0.text.trimmingCharacters(in: .whitespaces).isEmpty }.count
+        if emptyCaps > 0 { out.append(L("有 \(emptyCaps) 句字幕是空的", "\(emptyCaps) captions are empty")) }
+        if o.format == .video {
+            let a = p.audio
+            let recorded = hasRecordedAudio && !a.muted && (a.system > 0.01 || a.mic > 0.01)
+            if !recorded && p.voiceovers.isEmpty && p.music.clips.isEmpty && !(p.look.clickSound || p.look.typeSound) {
+                out.append(L("成片没有任何声音", "The video will have no sound"))
+            }
+            if p.look.transparent { out.append(L("背景是透明的：导出成 .mov，微信和很多播放器会显示成黑底；要发出去建议换个背景", "Transparent background: exports .mov, which many players and chat apps show with a black background")) }
+            if o.res == .original, min(renderer.lay.cw, renderer.lay.ch) > 1500 {
+                out.append(L("分辨率是「原始大小」（\(Int(renderer.lay.cw))×\(Int(renderer.lay.ch))）：文件大、导出慢，发出去一般选 1080p 或 1440p 就够", "Resolution is Original (\(Int(renderer.lay.cw))×\(Int(renderer.lay.ch))): large and slow; 1080p or 1440p is usually enough"))
+            }
+            let secs = timeMap.out(p.trimEnd) - timeMap.out(p.trimStart)
+            let st = StudioStyle(o), lay = StudioLayout(track: track, look: p.look, maxShort: st.maxShort)
+            let mb = st.estimatedBytes(canvas: CGSize(width: lay.cw, height: lay.ch), seconds: secs) / 1_000_000
+            if mb > 500 { out.append(L("预计文件约 \(Int(mb)) MB，比较大", "Estimated size about \(Int(mb)) MB")) }
+        }
+        // 摄像头小窗压住了标注（同一时间、位置重叠）
+        if let cam = cameraPipRect {
+            let lay = renderer.lay
+            let hit = p.annotations.filter { a in
+                let n = a.kind == .text ? CGRect(x: a.x, y: a.y, width: 0.1, height: 0.05) : CGRect(x: a.x, y: a.y, width: a.w, height: a.h).standardized
+                // 标注的位置是原画面比例，换成画布比例再比
+                let c = CGRect(x: (lay.card.minX + n.minX * lay.card.width) / lay.cw, y: 1 - (lay.card.minY + (1 - n.minY) * lay.card.height) / lay.ch,
+                               width: n.width * lay.card.width / lay.cw, height: n.height * lay.card.height / lay.ch)
+                return c.intersects(cam) && !(p.layouts.contains { $0.start <= a.start && $0.end >= a.end && $0.mode == .hidden })
+            }
+            if !hit.isEmpty { out.append(L("摄像头小窗压住了 \(hit.count) 个标注，可以把小窗拖到别的角落", "The camera bubble covers \(hit.count) annotations; drag it to another corner")) }
+        }
+        return out
+    }
+    // 有问题先问：去修改 / 仍要导出
+    func exportChecked() {
+        let issues = exportIssues()
+        guard !issues.isEmpty, Self.testShot == nil else { export(); return }
+        let a = NSAlert()
+        a.messageText = L("导出前检查到 \(issues.count) 个问题", "\(issues.count) things to check before exporting")
+        a.informativeText = issues.map { "• " + $0 }.joined(separator: "\n")
+        a.addButton(withTitle: L("去修改", "Go Back"))
+        a.addButton(withTitle: L("仍要导出", "Export Anyway"))
+        if let w = window {
+            a.beginSheetModal(for: w) { r in if r == .alertSecondButtonReturn { MainActor.assumeIsolated { self.export() } } }
+        } else if a.runModal() == .alertSecondButtonReturn { export() }
+    }
+
     func export() {
         guard exportProgress == nil else { return }
         saveNow()
@@ -1251,7 +1303,7 @@ struct EditorView: View {
                 Text(e).font(.callout).foregroundStyle(.red).lineLimit(1)
             }
             ExportOptionsButton(ed: ed).disabled(ed.exportProgress != nil)
-            Button(L("导出", "Export")) { ed.export() }.buttonStyle(.borderedProminent).disabled(ed.exportProgress != nil)
+            Button(L("导出", "Export")) { ed.exportChecked() }.buttonStyle(.borderedProminent).disabled(ed.exportProgress != nil)
         }
     }
 
@@ -3420,6 +3472,10 @@ enum StudioTests {
                 // 选了片段再点空白：取消
                 ed.selectedPiece = ed.pieces.first?.start; ed.selected = UUID(); ed.selected = nil
                 check("blank click clears piece", ed.selectedPiece == nil)
+                // 导出前检查：占位文字、透明背景要被认出来
+                ed.edit { $0.look.background = .transparent; $0.annotations = [Annotation(start: 0, end: 2, kind: .text, x: 0.2, y: 0.2, w: 0, h: 0, text: "hello")] }
+                let iss = ed.exportIssues()
+                check("export check finds placeholder + transparent", iss.contains { $0.contains("hello") } && iss.contains { $0.contains(".mov") }, iss.joined(separator: " | "))
                 print(ok ? "FLOWTEST OK" : "FLOWTEST FAIL")
                 exit(ok ? 0 : 1)
             }
@@ -3518,7 +3574,7 @@ struct ExportOptionsButton: View {
     }
     private var summary: String {
         let o = ed.exportOptions
-        return o.format == .gif ? "GIF" : "\(Self.resName(o.res)) · \(o.fps)" + L(" 帧", "fps")
+        return o.format == .gif ? "GIF" : "\(Self.resName(o.res)) · \(o.fps)" + L(" 帧", "fps") + (o.codec == .hevc ? " · HEVC" : "")
     }
 
     var body: some View {
@@ -3546,6 +3602,10 @@ struct ExportOptionsPanel: View {
                 Picker(L("帧率", "Frame rate"), selection: $o.fps) {
                     Text(L("60 帧（更顺）", "60 fps (smoother)")).tag(60)
                     Text(L("30 帧（更快更小）", "30 fps (faster, smaller)")).tag(30)
+                }
+                Picker(L("编码", "Codec"), selection: $o.codec) {
+                    Text(L("H.264（哪里都能放）", "H.264 (plays everywhere)")).tag(ExportOptions.Codec.h264)
+                    Text(L("HEVC（文件小一半）", "HEVC (about half the size)")).tag(ExportOptions.Codec.hevc)
                 }
                 Picker(L("画质", "Quality"), selection: $o.quality) {
                     Text(L("高", "High")).tag(ExportOptions.Quality.high)

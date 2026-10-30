@@ -301,11 +301,12 @@ enum ControlTools {
         if let f = (a["format"] as? String).flatMap(ExportOptions.Format.init(rawValue:)) { o.format = f }
         e.exportOptions = o
         guard e.exportProgress == nil else { throw fail("这份素材正在导出") }
+        let warnings = e.exportIssues()   // AI 导出不弹窗，把检查结果一起返回
         e.export()
         while e.exportProgress != nil { try await Task.sleep(for: .milliseconds(200)) }
         if let err = e.exportError { throw fail(err) }
         guard let u = e.exported else { throw fail("导出被取消了") }
-        return ["ok": true, "file": u.path]
+        return ["ok": true, "file": u.path, "warnings": warnings]
     }
 }
 

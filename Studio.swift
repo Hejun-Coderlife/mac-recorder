@@ -130,6 +130,7 @@ struct StudioStyle {
     var maxShort: Double?          // 成片短边最多多少像素（nil = 原始大小，画面 1:1）
     var maxWidth: Double?          // 成片宽度最多多少（GIF 用）
     var gif = false                // 导出 GIF
+    var hevc = false               // 用 HEVC（同画质码率给 H.264 的六成）
 
     // 按导出选项设好：分辨率、帧率、画质、格式
     init(_ o: ExportOptions? = nil) {
@@ -144,7 +145,16 @@ struct StudioStyle {
             case .standard: bitsPerPixel = 0.07; minBitRate = 6_000_000
             case .small: bitsPerPixel = 0.035; minBitRate = 3_000_000
             }
+            if o.codec == .hevc { hevc = true; bitsPerPixel *= 0.6; minBitRate = minBitRate * 6 / 10 }
         }
+    }
+}
+
+extension StudioStyle {
+    // 预计成片大小（字节）：码率 × 时长 + 声音（192kbps）
+    func estimatedBytes(canvas: CGSize, seconds: Double) -> Double {
+        let vb = Double(max(minBitRate, Int(canvas.width * canvas.height * Double(fps) * bitsPerPixel)))
+        return (vb + 192_000) / 8 * seconds
     }
 }
 
@@ -156,12 +166,14 @@ struct ExportOptions: Codable, Equatable {
     }
     enum Quality: String, Codable, CaseIterable { case high, standard, small }
     enum Format: String, Codable, CaseIterable { case video, gif }
+    enum Codec: String, Codable, CaseIterable { case h264, hevc }   // H.264 哪里都能放；HEVC 同画质文件小一半左右
     // 默认 1440p：推近时字照样清楚（放大 2 倍时原画面 1 像素≈成片 1.3 像素），像素只有 Retina 原始大小的四成多，导出快一倍多、文件小
     var res = Res.qhd
     var fps = 60
     var quality = Quality.high
     var format = Format.video
     var copyToClipboard = false
+    var codec = Codec.h264
 
     init() {}
     init(from d: Decoder) throws {
@@ -171,6 +183,7 @@ struct ExportOptions: Codable, Equatable {
         quality = (try? c.decodeIfPresent(Quality.self, forKey: .quality)) ?? z.quality
         format = (try? c.decodeIfPresent(Format.self, forKey: .format)) ?? z.format
         copyToClipboard = (try? c.decodeIfPresent(Bool.self, forKey: .copyToClipboard)) ?? z.copyToClipboard
+        codec = (try? c.decodeIfPresent(Codec.self, forKey: .codec)) ?? z.codec
     }
     private static let key = "studioExportOptions"
     static var saved: ExportOptions {
@@ -846,12 +859,13 @@ enum Studio {
         let out = URL(fileURLWithPath: env["STUDIO_OUT"] ?? dir.appendingPathComponent("studio.mov").path)
         // STUDIO_RES=original|4k|1440p|1080p|720p STUDIO_FPS=30|60 STUDIO_QUALITY=high|standard|small STUDIO_FORMAT=video|gif（不给 = 原始大小、60 帧、高画质）
         var o: ExportOptions?
-        if env["STUDIO_RES"] != nil || env["STUDIO_FPS"] != nil || env["STUDIO_QUALITY"] != nil || env["STUDIO_FORMAT"] != nil {
+        if env["STUDIO_RES"] != nil || env["STUDIO_FPS"] != nil || env["STUDIO_QUALITY"] != nil || env["STUDIO_FORMAT"] != nil || env["STUDIO_CODEC"] != nil {
             var x = ExportOptions(); x.res = .original
             if let v = env["STUDIO_RES"].flatMap(ExportOptions.Res.init(rawValue:)) { x.res = v }
             if let v = env["STUDIO_FPS"].flatMap(Int.init) { x.fps = v }
             if let v = env["STUDIO_QUALITY"].flatMap(ExportOptions.Quality.init(rawValue:)) { x.quality = v }
             if let v = env["STUDIO_FORMAT"].flatMap(ExportOptions.Format.init(rawValue:)) { x.format = v }
+            if let v = env["STUDIO_CODEC"].flatMap(ExportOptions.Codec.init(rawValue:)) { x.codec = v }
             o = x
         }
         var st = StudioStyle(o)
@@ -1265,10 +1279,10 @@ final class StudioJob: @unchecked Sendable {
             AVVideoMaxKeyFrameIntervalKey: st.fps * 2,
         ]
         if alpha { props[kVTCompressionPropertyKey_AlphaChannelMode as String] = kVTAlphaChannelMode_PremultipliedAlpha }   // Core Image 出的是预乘透明
-        else { props[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel }
+        else if !st.hevc { props[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel }
         // 标上色彩（和原始录屏一样 709），不然有的播放器按 601 解，颜色会偏
         let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: [
-            AVVideoCodecKey: alpha ? AVVideoCodecType.hevcWithAlpha : AVVideoCodecType.h264, AVVideoWidthKey: w, AVVideoHeightKey: h,
+            AVVideoCodecKey: alpha ? AVVideoCodecType.hevcWithAlpha : (st.hevc ? AVVideoCodecType.hevc : AVVideoCodecType.h264), AVVideoWidthKey: w, AVVideoHeightKey: h,
             AVVideoCompressionPropertiesKey: props,
             AVVideoColorPropertiesKey: [
                 AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
