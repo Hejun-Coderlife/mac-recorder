@@ -219,6 +219,33 @@ extension StudioEditor {
     }
 }
 
+extension StudioEditor {
+    // 这阵打字的速度（这段视频的快放倍数；1 = 原速）
+    func burstRate(_ b: KeyBurst) -> Double {
+        project.cuts.first { $0.mode == .speed && $0.start <= b.start + 0.01 && $0.end >= b.end - 0.01 }?.rate ?? 1
+    }
+    // 改这阵打字的速度：这段视频连同打字声一起快放（和剪辑轨上的快放段是同一种东西）
+    func setBurstRate(_ b: KeyBurst, _ rate: Double) {
+        let s = max(b.start, project.trimStart), e = min(b.end, project.trimEnd)
+        guard e - s > 0.1 else { return }
+        edit { pr in
+            // 和这段重叠的快放段：把重叠部分去掉（两头留着）
+            var out: [CutSegment] = []
+            for c in pr.cuts {
+                guard c.mode == .speed, c.end > s, c.start < e else { out.append(c); continue }
+                if c.start < s { var a = c; a.id = UUID(); a.end = s; out.append(a) }
+                if c.end > e { var a = c; a.id = UUID(); a.start = e; out.append(a) }
+            }
+            if rate != 1 && !out.contains(where: { $0.mode == .cut && $0.start < e && $0.end > s }) {
+                out.append(CutSegment(start: s, end: e, mode: .speed, rate: rate))
+            }
+            pr.cuts = out.sorted { $0.start < $1.start }
+        }
+        selectedBurst = b.start
+        showToast(rate == 1 ? L("这阵打字恢复原速", "Back to normal speed") : L("这阵打字 \(rate.formatted())× 快放（画面和打字声一起）· ⌘Z 撤销", "This typing plays \(rate.formatted())× (picture and sound) · ⌘Z to undo"))
+    }
+}
+
 struct KeyBurstBlock: View {
     @ObservedObject var ed: StudioEditor
     let burst: KeyBurst
@@ -239,6 +266,11 @@ struct KeyBurstBlock: View {
                     ctx.fill(Path(CGRect(x: px - 0.6, y: size.height * 0.25, width: 1.2, height: size.height * 0.5)), with: .color(.white.opacity(k_on ? 0.9 : 0.25)))
                 }
             }
+            if ed.burstRate(burst) != 1 {
+                Text(ed.burstRate(burst).formatted() + "×").font(.system(size: 9, weight: .bold).monospacedDigit()).foregroundStyle(.white)
+                    .padding(.horizontal, 3).background(Capsule().fill(Color.black.opacity(0.35)))
+                    .frame(maxWidth: .infinity, alignment: .trailing).padding(.trailing, 3)
+            }
             if !on {
                 Image(systemName: "speaker.slash.fill").font(.system(size: 8)).foregroundStyle(.secondary).padding(.leading, 4)
             }
@@ -247,6 +279,9 @@ struct KeyBurstBlock: View {
         .onTapGesture { ed.selected = nil; ed.selectedPiece = nil; ed.selectedBurst = burst.start; ed.picking = false }
         .contextMenu {
             Button(on ? L("去掉这阵打字声", "Remove Typing Sound") : L("恢复这阵打字声", "Restore Typing Sound")) { ed.setBurstSound(burst, !on) }
+            Menu(L("速度", "Speed")) {
+                ForEach([1.0, 1.5, 2, 3, 4], id: \.self) { r in Button(r.formatted() + "×" + (ed.burstRate(burst) == r ? " ✓" : "")) { ed.setBurstRate(burst, r) } }
+            }
         }
         .help(L("打字声：\(burst.keys.count) 下。选中按 Delete 去掉 / 恢复", "Typing: \(burst.keys.count) keys. Select and press Delete to remove / restore"))
     }
@@ -261,6 +296,12 @@ struct BurstInspector: View {
                 Label(L("打字声", "Typing sound"), systemImage: "keyboard").font(.callout.weight(.semibold))
                 Text(clock(max(0, b.start)) + " – " + clock(b.end)).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                 Text(L("\(b.keys.count) 下", "\(b.keys.count) keys")).font(.callout).foregroundStyle(.secondary)
+                Divider().frame(height: 16)
+                Text(L("速度", "Speed")).font(.callout)
+                Picker("", selection: Binding(get: { ed.burstRate(b) }, set: { ed.setBurstRate(b, $0) })) {
+                    ForEach([1.0, 1.5, 2, 3, 4], id: \.self) { Text($0.formatted() + "×").tag($0) }
+                }.pickerStyle(.segmented).labelsHidden().fixedSize()
+                    .help(L("这一段视频连同打字声一起快放", "Speeds up this part of the video together with its typing sound"))
                 Spacer()
                 Button(role: on ? .destructive : nil) { ed.setBurstSound(b, !on) } label: {
                     Label(on ? L("去掉这阵打字声", "Remove") : L("恢复", "Restore"), systemImage: on ? "speaker.slash" : "speaker.wave.2")
