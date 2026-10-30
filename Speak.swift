@@ -188,10 +188,10 @@ struct SpeakBox: View {
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } else if engine == .local {
                 if let p = local.progress {
-                    HStack { ProgressView(value: p).frame(width: 120); Text(L("正在下载声音模型（约 150MB，只下一次）", "Downloading the voice model (~150MB, once)")).font(.caption) }
+                    HStack { ProgressView(value: p).frame(width: 120); Text(L("正在下载声音模型（约 360MB，只下一次）", "Downloading the voice model (~360MB, once)")).font(.caption) }
                 } else {
                     Text(LocalTTS.ready ? L("在这台电脑上用 AI 念，不上传、不收费。", "AI voice on this Mac — nothing uploaded, free.")
-                                        : L("第一次用会下载约 150MB 的声音模型（只下一次），之后不联网也能用。", "First use downloads a ~150MB voice model once; works offline afterwards."))
+                                        : L("第一次用会下载约 360MB 的声音模型（只下一次），之后不联网也能用。", "First use downloads a ~360MB voice model once; works offline afterwards."))
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }

@@ -1,5 +1,5 @@
 // 文字转配音的几种声音来源：
-// - local：本机 AI 声音（Kokoro，sherpa-onnx 跑；程序在 App 里，声音模型第一次用时下载约 150MB；Apache-2.0）
+// - local：本机 AI 声音（Kokoro 高音质版，sherpa-onnx 跑；程序在 App 里，声音模型第一次用时下载约 360MB；Apache-2.0）
 // - system：macOS 自带声音（不用下载，但比较生硬）
 // - azure / openai / qwen：云端声音（最自然，用户自己填 key，按字数付费；key 存在钥匙串里）
 import AVFoundation
@@ -87,13 +87,13 @@ final class LocalTTS: ObservableObject {
         return v
     }()
 
-    static let modelName = "kokoro-int8-multi-lang-v1_1"
+    static let modelName = "kokoro-multi-lang-v1_1"   // 高音质版（不压缩，约 360MB 下载）；压缩版机器味重，不用
     nonisolated static var root: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent(Bundle.main.bundleIdentifier ?? "Recorder").appendingPathComponent("tts")
     }
     nonisolated static var modelDir: URL { root.appendingPathComponent(modelName) }
-    nonisolated static var ready: Bool { FileManager.default.fileExists(atPath: modelDir.appendingPathComponent("voices.bin").path) && FileManager.default.fileExists(atPath: modelDir.appendingPathComponent("model.int8.onnx").path) }
+    nonisolated static var ready: Bool { FileManager.default.fileExists(atPath: modelDir.appendingPathComponent("voices.bin").path) && FileManager.default.fileExists(atPath: modelDir.appendingPathComponent("model.onnx").path) }
     nonisolated static var helper: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/tts/sherpa-onnx-offline-tts") }
 
     // 第一次用：下载声音模型。国内先走 hf-mirror 国内镜像，其他地方先走 GitHub；一个不通换另一个
@@ -103,6 +103,7 @@ final class LocalTTS: ObservableObject {
         defer { progress = nil }
         let cn = Locale.current.region?.identifier == "CN" || Locale.preferredLanguages.first?.hasPrefix("zh-Hans") == true
         let tries: [() async throws -> Void] = cn ? [mirrorFiles, githubTarball] : [githubTarball, mirrorFiles]
+        defer { try? FileManager.default.removeItem(at: Self.root.appendingPathComponent("kokoro-int8-multi-lang-v1_1")) }   // 以前下的压缩版不要了
         var last: Error?
         for t in tries {
             do { try await t(); if Self.ready { return } } catch { last = error }
@@ -112,7 +113,7 @@ final class LocalTTS: ObservableObject {
     // GitHub：一个压缩包（147MB）
     private func githubTarball() async throws {
         let url = URL(string: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/\(Self.modelName).tar.bz2")!
-        let tmp = try await download(url, size: 147_052_523)
+        let tmp = try await download(url, size: 364_855_331)
         try FileManager.default.createDirectory(at: Self.root, withIntermediateDirectories: true)
         let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/tar"); p.arguments = ["xjf", tmp.path, "-C", Self.root.path]
         try p.run(); p.waitUntilExit()
@@ -173,7 +174,7 @@ final class LocalTTS: ObservableObject {
             let p = Process(), pipe = Pipe()
             p.executableURL = helper
             p.arguments = ["--debug=0", "--num-threads=4",
-                           "--kokoro-model=\(m)/model.int8.onnx", "--kokoro-voices=\(m)/voices.bin", "--kokoro-tokens=\(m)/tokens.txt",
+                           "--kokoro-model=\(m)/model.onnx", "--kokoro-voices=\(m)/voices.bin", "--kokoro-tokens=\(m)/tokens.txt",
                            "--kokoro-data-dir=\(m)/espeak-ng-data", "--kokoro-dict-dir=\(m)/dict",
                            "--kokoro-lexicon=\(m)/lexicon-us-en.txt,\(m)/lexicon-zh.txt",
                            "--tts-rule-fsts=\(m)/date-zh.fst,\(m)/number-zh.fst",

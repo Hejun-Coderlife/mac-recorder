@@ -107,8 +107,8 @@ final class CaptionLayer: @unchecked Sendable {
     // 这一刻显示的那句字幕占画布哪块（预览上点选、拖动用）
     func rect(atSource t: Double) -> CGRect? {
         guard !map.inCut(t), let s = text(atOut: map.out(t)), let img = Self.render(s, style: style, cw: cw, ch: ch) else { return nil }
-        let w = Double(img.width), h = Double(img.height), o = place(w: w, h: h)
-        return CGRect(x: o.x, y: o.y, width: w, height: h)
+        let w = Double(img.width), h = Double(img.height), o = place(w: w, h: h), m = Self.glassMargin(style, cw: cw, ch: ch)
+        return CGRect(x: o.x, y: o.y, width: w, height: h).insetBy(dx: m, dy: m)   // 玻璃底四周给阴影留的那圈不算
     }
     func image(atSource t: Double) -> CIImage? { map.inCut(t) ? nil : image(atOut: map.out(t)) }
     // 叠到画面上（玻璃底要先把字幕后面那块画面做成透镜，所以要拿到画面）

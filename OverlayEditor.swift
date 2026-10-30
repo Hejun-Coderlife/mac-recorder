@@ -684,7 +684,7 @@ struct CaptionHandle: View {
         let v = CGRect(x: fit.minX + r.minX / hit.cw * fit.width, y: fit.minY + (1 - r.maxY / hit.ch) * fit.height,
                        width: r.width / hit.cw * fit.width, height: r.height / hit.ch * fit.height)
         let sel = ed.selected == hit.id
-        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: min(v.height / 2, 14), style: .continuous)
         let editing = ed.editingCaptionOnPreview == hit.id
         ZStack {
             shape.fill(Color.white.opacity(0.001))
