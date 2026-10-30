@@ -11,7 +11,8 @@ for i in $(seq 1 4320); do
   st=$("$EXE" ctl get_status 2>/dev/null)
   busy=$(echo "$st" | python3 -c 'import sys,json
 try:
-  j=json.load(sys.stdin); print("1" if j.get("recording") or j.get("busy") else "0")
+  j=json.load(sys.stdin)
+  print("?" if "error" in j or "recording" not in j else ("1" if j.get("recording") or j.get("busy") else "0"))
 except Exception: print("?")')
   # 问不到状态（旧版没有控制口）时更保守：必须 2 分钟没碰电脑，免得在录制中被重启
   if { [[ "$busy" == "0" ]] && { [[ "$front" != "$BID" ]] || (( idle >= 120 )); }; } || { [[ "$busy" == "?" ]] && (( idle >= 120 )); }; then
