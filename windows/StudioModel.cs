@@ -38,7 +38,7 @@ namespace ScreenRecorder
         public string ImagePath = "";          // 自己选的图片
         public string ImageBookmark;           // Mac 版的书签（Windows 用不上，原样留着）
         public double Padding = 0.06;          // 画面四周留的边：占画布短边 0–20%
-        public double CornerRadius = 14;       // 圆角（点）0–40
+        public double CornerRadius = 14;       // 圆角（点）0–100
         public double Shadow = 0.45;           // 阴影深浅 0–1
         public double ShadowBlur = 0.33;       // 阴影虚化 0–1
         public double CursorScale = 1.5;       // 鼠标大小 0.5–3 倍

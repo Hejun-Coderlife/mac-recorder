@@ -187,7 +187,7 @@ namespace ScreenRecorder
             double pad = f * Math.Min(cw, ch);
             s = Math.Min((cw - 2 * pad) / W, (ch - 2 * pad) / H);
             card = new RectD(Math.Round((cw - W * s) / 2), Math.Round((ch - H * s) / 2), W * s, H * s);
-            radius = Math.Min(Math.Max(0, look.CornerRadius), 40) * track.PixelsPerPoint * s;
+            radius = Math.Min(Math.Max(0, look.CornerRadius), 100) * track.PixelsPerPoint * s;
         }
     }
 

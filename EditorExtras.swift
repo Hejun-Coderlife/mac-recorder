@@ -69,14 +69,18 @@ extension StudioEditor {
     // ---- 建议加速 ----
     func suggestSpeed() {
         guard !suggesting else { return }
-        suggesting = true; suggestions = []; selected = nil
+        suggesting = true; suggestNone = false; suggestions = []; selected = nil
         let r = project.trimStart...max(project.trimStart, project.trimEnd), raw = dir.appendingPathComponent("raw.mp4"), tr = track, cuts = project.cuts
         Task {
             let diffs = await SpeedSuggest.frameDiffs(raw: raw, range: r)
             let found = SpeedSuggest.find(track: tr, diffs: diffs, range: r, existing: cuts)
             self.suggestions = found
             self.suggesting = false
-            if found.isEmpty { NSSound.beep() }
+            if found.isEmpty {
+                self.suggestNone = true
+                try? await Task.sleep(for: .seconds(5))
+                self.suggestNone = false
+            }
         }
     }
     // 采纳：变成正式的快放段（能撤销）；和已有剪辑段重叠的跳过
@@ -242,6 +246,11 @@ struct SuggestionBar: View {
             if ed.suggesting {
                 ProgressView().controlSize(.small)
                 Text(L("正在找可以加速的地方…", "Looking for parts to speed up…")).font(.callout).foregroundStyle(.secondary)
+            } else if ed.suggestions.isEmpty {
+                Text(L("没找到要加速的地方：这段录制里没有长时间不动的空档，也没有长时间打字", "Nothing to speed up: no long idle stretches or long typing in this recording"))
+                    .font(.callout).foregroundStyle(.secondary)
+                Spacer()
+                Button(L("好", "OK")) { ed.suggestNone = false }
             } else {
                 let idle = ed.suggestions.filter { $0.kind == .idle }.count, typing = ed.suggestions.count - idle
                 Text(L("找到 \(ed.suggestions.count) 处可以加速（空档 \(idle)、打字 \(typing)）", "Found \(ed.suggestions.count) parts to speed up (\(idle) idle, \(typing) typing)"))
@@ -255,24 +264,24 @@ struct SuggestionBar: View {
     }
 }
 
-// 样式面板「推近」：全局推近速度
+// 样式面板「推近」：全局推近速度（滑块，0.4× 很慢 … 2.5× 很快，1× 标准）
 struct ZoomSpeedBox: View {
     @ObservedObject var ed: StudioEditor
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(L("推近速度", "Zoom speed")).font(.callout)
-            HStack(spacing: 4) {
-                ForEach(ZoomSpeed.all, id: \.v) { s in
-                    let on = abs(ed.project.look.zoomSpeed - s.v) < 0.01
-                    Button { ed.edit { $0.look.zoomSpeed = s.v } } label: {
-                        Text(s.name).font(.callout).lineLimit(1).frame(maxWidth: .infinity).padding(.vertical, 4)
-                            .background(RoundedRectangle(cornerRadius: 6).fill(on ? Color.accentColor : Color.primary.opacity(0.08)))
-                            .foregroundStyle(on ? Color.white : Color.primary).contentShape(Rectangle())
-                    }.buttonStyle(.plain)
-                }
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text(L("推近速度", "Zoom speed")).font(.callout)
+                Spacer(minLength: 0)
+                Text(String(format: "%.1f×", ed.project.look.zoomSpeed)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
+            Slider(value: ed.lookSlider(\.zoomSpeed), in: 0.4...2.5, step: 0.1, onEditingChanged: { if !$0 { ed.dragEnd() } }).controlSize(.small)
+            HStack {
+                Text(L("慢", "Slow")); Spacer()
+                Button(L("标准", "Normal")) { ed.edit { $0.look.zoomSpeed = 1 } }.buttonStyle(.plain).foregroundStyle(Color.accentColor)
+                Spacer(); Text(L("快", "Fast"))
+            }.font(.caption2).foregroundStyle(.secondary)
             Text(L("镜头推近、拉远、跟着鼠标走的快慢；选中某段推近还能单独设", "How fast the camera zooms in, out and follows; you can also set it per zoom"))
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).padding(.top, 2)
         }
     }
 }

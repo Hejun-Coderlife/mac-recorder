@@ -206,7 +206,7 @@ struct StudioLook: Codable, Equatable {
     var imagePath = ""             // 自己选的图片
     var imageBookmark: Data?       // 图片被挪动后靠它找回来
     var padding = 0.06             // 画面四周留的边：占画布短边 0–20%
-    var cornerRadius = 14.0        // 圆角（点）0–40
+    var cornerRadius = 14.0        // 圆角（点）0–100
     var shadow = 0.45              // 阴影深浅 0–1
     var shadowBlur = 0.33          // 阴影虚化 0–1
     var cursorScale = 1.5          // 鼠标大小 0.5–3 倍
@@ -215,6 +215,7 @@ struct StudioLook: Codable, Equatable {
     var hideAfter = 2.0            // 1–5 秒
     var clickSound = false         // 点击时加一声轻响
     var clickStyle = Click.soft    // 哪种声音：轻点 / 鼠标咔哒 / 低沉 / 木头 / 气泡 / 清脆滴答
+    var typeSound = false          // 打字时每按一下加一声键盘声
     var ripple = true              // 点击波纹
     var blur = Blur.light          // 运动模糊：只在镜头快速移动时有
     enum KeysAt: String, Codable, CaseIterable { case bottom, bottomLeft, bottomRight }
@@ -230,7 +231,7 @@ struct StudioLook: Codable, Equatable {
     init() {}
     enum CodingKeys: String, CodingKey {
         case aspect, background, color, gradient0, gradient1, gradientAngle, wallpaper, imagePath, imageBookmark, padding, cornerRadius,
-             shadow, shadowBlur, cursorScale, smoothing, hideIdleCursor, hideAfter, clickSound, clickStyle, ripple, blur,
+             shadow, shadowBlur, cursorScale, smoothing, hideIdleCursor, hideAfter, clickSound, clickStyle, typeSound, ripple, blur,
              showKeys, keysAt, keysSize, keysDark, zoomSpeed, cursorLoop, cursorLoopSec, loopZoomOut
     }
     init(from d: Decoder) throws {
@@ -242,7 +243,7 @@ struct StudioLook: Codable, Equatable {
         padding = v(.padding, z.padding); cornerRadius = v(.cornerRadius, z.cornerRadius); shadow = v(.shadow, z.shadow)
         shadowBlur = v(.shadowBlur, z.shadowBlur); cursorScale = v(.cursorScale, z.cursorScale); smoothing = v(.smoothing, z.smoothing)
         hideIdleCursor = v(.hideIdleCursor, z.hideIdleCursor); hideAfter = v(.hideAfter, z.hideAfter); clickSound = v(.clickSound, z.clickSound)
-        clickStyle = v(.clickStyle, z.clickStyle)
+        clickStyle = v(.clickStyle, z.clickStyle); typeSound = v(.typeSound, z.typeSound)
         ripple = v(.ripple, z.ripple); blur = v(.blur, z.blur)
         showKeys = v(.showKeys, z.showKeys); keysAt = v(.keysAt, z.keysAt); keysSize = v(.keysSize, z.keysSize); keysDark = v(.keysDark, z.keysDark)
         zoomSpeed = v(.zoomSpeed, z.zoomSpeed); cursorLoop = v(.cursorLoop, z.cursorLoop); cursorLoopSec = v(.cursorLoopSec, z.cursorLoopSec)
@@ -357,7 +358,7 @@ struct StudioLayout {
         let pad = f * min(cw, ch)
         s = min((cw - 2 * pad) / W, (ch - 2 * pad) / H)
         card = CGRect(x: ((cw - W * s) / 2).rounded(), y: ((ch - H * s) / 2).rounded(), width: W * s, height: H * s)
-        radius = min(max(0, look.cornerRadius), 40) * track.pixelsPerPoint * s
+        radius = min(max(0, look.cornerRadius), 100) * track.pixelsPerPoint * s
     }
     var canvas: CGRect { CGRect(x: 0, y: 0, width: cw, height: ch) }
     var toScene: CGAffineTransform { CGAffineTransform(a: s, b: 0, c: 0, d: s, tx: card.minX, ty: card.minY) }
@@ -1067,6 +1068,7 @@ final class StudioJob: @unchecked Sendable {
     private let plan: [FramePlan]
     private let first: Int, last: Int          // 导出第 first..<last 帧（成片时间）
     private let clickTimes: [Double]           // 要加点击声的时刻（秒，成片时间）；不加就是空的
+    private let keyTimes: [Double]             // 要加打字声的时刻（同上）
     private let clickStyle: StudioLook.Click
     private let map: TimeMap                   // 剪掉 / 快放：成片第 i 帧取素材哪个时刻
     private let srcEnd: Double                 // 素材里读到哪（修剪终点，素材时间）
@@ -1106,6 +1108,7 @@ final class StudioJob: @unchecked Sendable {
         last = max(first + 1, min(plan.count, Int((wp.trimEnd * fps).rounded())))
         srcEnd = p.trimEnd
         clickTimes = p.look.clickSound ? wTrack.clicks.map { $0[0] } : []
+        keyTimes = p.look.typeSound ? wTrack.keys : []
         clickStyle = p.look.clickStyle
         audio = p.audio
         var vols: [Double] = []
@@ -1196,7 +1199,7 @@ final class StudioJob: @unchecked Sendable {
         ])
         writer.add(vIn)
         var aIn: AVAssetWriterInput?
-        if aOut != nil || !clickTimes.isEmpty || voice != nil || music != nil {
+        if aOut != nil || !clickTimes.isEmpty || !keyTimes.isEmpty || voice != nil || music != nil {
             let a = AVAssetWriterInput(mediaType: .audio, outputSettings: [
                 AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48000, AVNumberOfChannelsKey: 2, AVEncoderBitRateKey: 192_000,
             ])
@@ -1285,7 +1288,7 @@ final class StudioJob: @unchecked Sendable {
         if let aIn {
             group.enter()
             var audioDone = false
-            let clicks = ClickSound(times: clickTimes, style: clickStyle, volume: audio.clicks)
+            let clicks = ClickSound(times: clickTimes, style: clickStyle, volume: audio.clicks, keyTimes: keyTimes)
             let warp = AudioWarp(map: map, gain: Float(maxVol), clicks: clicks, voice: voice, music: music)
             // 没有原声音（或原声音先读完了）：自己按 0.1 秒一块生成静音 + 点击 + 讲解，一直到成片结尾
             var genAt = Int64((range.start.seconds * 48000).rounded()), genEnd = Int64((range.end.seconds * 48000).rounded())
@@ -1367,16 +1370,36 @@ final class StudioJob: @unchecked Sendable {
 
 // 点击音效：程序合成的几种短声（衰减正弦 + 一点噪声，几十毫秒），按点击时刻混进 48k 立体声浮点 PCM
 final class ClickSound: @unchecked Sendable {
-    private let starts: [Int64]                // 每次点击从第几个采样开始
-    private let wave: [Float]
+    private let starts: [(at: Int64, w: Int)]  // 每一声从第几个采样开始、用哪个波形
+    private let waves: [[Float]]               // 0 = 点击声；1… = 几种略有不同的按键声（轮着用，听着不机械）
     private var format: CMAudioFormatDescription?
     var isEmpty: Bool { starts.isEmpty }
 
-    init(times: [Double], style: StudioLook.Click = .soft, volume: Double = 1) {
-        starts = times.map { Int64(($0 * 48000).rounded()) }.sorted()
+    init(times: [Double], style: StudioLook.Click = .soft, volume: Double = 1, keyTimes: [Double] = []) {
         let v = Float(max(0, volume))
-        wave = Self.wave(style).map { $0 * v }
+        waves = [Self.wave(style).map { $0 * v }] + (0..<4).map { k in Self.keyWave(k).map { $0 * v } }
+        starts = (times.map { (Int64(($0 * 48000).rounded()), 0) } + keyTimes.enumerated().map { (Int64(($0.element * 48000).rounded()), 1 + ($0.offset * 3 + $0.offset / 2) % 4) })
+            .sorted { $0.0 < $1.0 }
     }
+
+    // 打字声：机械键盘的「嗒」——一下短促的噪声咔 + 一点低沉的键帽回弹；k 换一点音高和长短
+    static func keyWave(_ k: Int) -> [Float] {
+        var g = SystemRandomNumberGenerator()
+        let pitch = [1.0, 0.92, 1.08, 0.97][k % 4], n = 2400
+        var lp = 0.0
+        return (0..<n).map { i in
+            let t = Double(i) / 48000
+            let noise = Double.random(in: -1...1, using: &g)
+            lp += 0.35 * (noise - lp)                               // 轻低通，去掉刺耳的高频
+            let click = exp(-t / 0.0022) * lp * 0.55
+            let body = exp(-t / 0.009) * sin(2 * .pi * 420 * pitch * t) * 0.16
+            let top = t > 0.012 ? exp(-(t - 0.012) / 0.003) * lp * 0.12 : 0   // 松开时的一下轻响
+            return Float((click + body + top) * 0.75)
+        }
+    }
+
+    // 试听 / 预览用：一声按键包成 WAV
+    static func keyWav(_ k: Int) -> Data { wavData(keyWave(k)) }
 
     // 超过 ±0.8 的部分柔和地压到 ±0.95 以内（音量调大、和点击声叠加时不爆音；留点余量，AAC 编码后也不会超过 1）
     @inline(__always) static func softLimit(_ x: Float) -> Float {
@@ -1421,8 +1444,9 @@ final class ClickSound: @unchecked Sendable {
     }
 
     // 试听用：一声包成 WAV
-    static func wav(_ style: StudioLook.Click) -> Data {
-        let pcm = wave(style).map { Int16(max(-1, min(1, $0)) * 32767) }
+    static func wav(_ style: StudioLook.Click) -> Data { wavData(wave(style)) }
+    static func wavData(_ w: [Float]) -> Data {
+        let pcm = w.map { Int16(max(-1, min(1, $0)) * 32767) }
         var d = Data()
         func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
         func u16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
@@ -1464,7 +1488,8 @@ final class ClickSound: @unchecked Sendable {
 
     private func add(_ data: inout [Float], frames n: Int, at a0: Int64) -> Bool {
         var touched = false
-        for s in starts where s < a0 + Int64(n) && s + Int64(wave.count) > a0 {
+        for (s, wi) in starts where s < a0 + Int64(n) && s + Int64(waves[wi].count) > a0 {
+            let wave = waves[wi]
             for k in 0..<wave.count {
                 let j = s + Int64(k) - a0
                 guard j >= 0 && j < Int64(n) else { continue }

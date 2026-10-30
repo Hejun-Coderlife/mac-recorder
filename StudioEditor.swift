@@ -32,7 +32,7 @@ final class PlanBox: @unchecked Sendable {
 
 @MainActor
 final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
-    private static var open: [URL: StudioEditor] = [:]
+    static var open: [URL: StudioEditor] = [:]
     // 自测：EDITORSHOT=图片路径 [EDITOR=素材夹] → 不抢前台，把剪辑窗口画成图片后退出
     static let testShot = ProcessInfo.processInfo.environment["EDITORSHOT"]
 
@@ -48,7 +48,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     var renderer: StudioRenderer { box.renderer }
     // 成片路径：透明背景 .mov，其他 .mp4
     var out: URL { Studio.output(Recorder.folder.appendingPathComponent(dir.lastPathComponent + ".mov"), look: project.look) }
-    private var window: NSWindow?
+    private(set) var window: NSWindow?
     private var timeObserver: Any?
     private var endObserver: Any?, statusObserver: NSKeyValueObservation?
     private var keyMonitor: Any?
@@ -89,6 +89,8 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     var musicDuckCache: [Float] = []
     @Published var suggestions: [SpeedSuggestion] = []   // 「建议加速」找到的段（还没采纳）
     @Published var suggesting = false
+    @Published var revealSection: String?                // 让样式面板展开并滚到某一节
+    @Published var suggestNone = false                   // 点了「建议加速」但没找到：提示条显示几秒
     private var duckNow: Float = 1             // 预览里原声音现在压到多少（有讲解时 0.25）
     static var countdownOn: Bool { UserDefaults.standard.object(forKey: "voiceCountdown") as? Bool ?? true }
     static var muteWhileRecording: Bool { UserDefaults.standard.object(forKey: "voiceMuteOriginal") as? Bool ?? true }
@@ -98,7 +100,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     @Published var captionError: String?
     @Published var editingCaption: UUID?       // 双击字幕：弹出改字
     @Published var drawing: OverlayTool?       // 正在等用户在预览上拖出遮挡 / 标注
-    @Published var editingNote: UUID?          // 双击文字标注：弹出改字
+    @Published var editingNote: UUID?          // 正在预览上直接改字的文字标注
     private var captionTask: Task<Void, Never>?
     // 降噪：改了强度先在后台处理声音（有缓存很快），好了换预览
     @Published var denoiseJob: Double?
@@ -106,7 +108,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     private var denoiseTask: Task<Void, Never>?
     private var previewKey = "off"             // 预览现在用的是哪一版声音
     private var undoStack: [StudioProject] = [], redoStack: [StudioProject] = []
-    private var dragBase: StudioProject?
+    private(set) var dragBase: StudioProject?
     private var scrubber = Scrubber()          // 拖动时的 seek 排队：同时只有一个在路上，只留最新目标；拖动中不让播放器回调改播放头
 
     var canUndo: Bool { !undoStack.isEmpty }
@@ -298,6 +300,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         }
         w.center()
         w.setFrameAutosaveName("StudioEditor")
+        if ProcessInfo.processInfo.environment["EDITOR_LIVE"] != nil { NSApp.setActivationPolicy(.accessory); w.orderBack(nil); return }
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -319,6 +322,8 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     // 空格 播放/暂停，←/→ 逐帧，Delete 删选中的段，⌘Z / ⌘⇧Z 撤销重做
     private func key(_ e: NSEvent) -> Bool {
         let cmd = e.modifierFlags.contains(.command), shift = e.modifierFlags.contains(.shift)
+        // 正在输入框里打字（预览上改文字标注等）：按键都交给输入框
+        if editingNote != nil || window?.firstResponder is NSTextView { return false }
         // 录讲解 / 倒数中：空格或 Esc 停下
         if (voiceRec != nil || countdown != nil) && (e.keyCode == 49 || e.keyCode == 53) { toggleVoice(); return true }
         switch e.keyCode {
@@ -510,9 +515,11 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         var times = map.pieces.flatMap { [$0.start, $0.end] }
         let clickAt = project.look.clickSound
             ? track.clicks.map { $0[0] }.filter { $0 >= project.trimStart && $0 < project.trimEnd && !map.inCut($0) } : []
-        times += clickAt
+        let keyAt = project.look.typeSound
+            ? track.keys.filter { $0 >= project.trimStart && $0 < project.trimEnd && !map.inCut($0) } : []
+        times += clickAt + keyAt
         guard !times.isEmpty else { return }
-        let clicks = Set(clickAt.map { Int(($0 * 1000).rounded()) })
+        let clicks = Set(clickAt.map { Int(($0 * 1000).rounded()) }), keys = keyAt
         boundaryObserver = player.addBoundaryTimeObserver(forTimes: times.map { NSValue(time: CMTime(seconds: $0, preferredTimescale: 6000)) }, queue: .main) { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, self.playing else { return }
@@ -521,6 +528,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
                 if clicks.contains(where: { abs(Double($0) / 1000 - t) < 0.06 }) {
                     ClickPreview.play(self.project.look.clickStyle, volume: self.project.audio.clicks)
                 }
+                if keys.contains(where: { abs($0 - t) < 0.03 }) { ClickPreview.playKey(volume: self.project.audio.clicks) }
                 self.syncPlayback()
             }
         }
@@ -767,7 +775,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     // 在预览上拖小窗：d = 拖了多远（预览里的比例）
     func moveCamera(by d: CGSize, phase: Int) {
         switch phase {
-        case 0: dragBegin()
+        case 0: dragBegin(); revealSection = "camera"
         case 1: dragUpdate { p in
             var c = p.camera ?? CameraSettings()
             c.x = min(max(c.x + d.width, 0), 1); c.y = min(max(c.y + d.height, 0), 1)
@@ -1020,7 +1028,7 @@ struct EditorView: View {
                         else if ed.voiceIndex(ed.selected) != nil { voiceInspector.frame(height: 30) }   // 选中讲解
                         else if ed.musicIndex(ed.selected) != nil { MusicInspector(ed: ed).frame(height: 30) }   // 选中音乐
                         else if ed.selected != nil { inspector.frame(height: 30) }   // 选中推近段才出现
-                        else if !ed.suggestions.isEmpty || ed.suggesting { SuggestionBar(ed: ed).frame(height: 30) }   // 建议加速
+                        else if !ed.suggestions.isEmpty || ed.suggesting || ed.suggestNone { SuggestionBar(ed: ed).frame(height: 30) }   // 建议加速
                         timeline.frame(height: ed.hasCamera ? 278 : 252)
                             .help(L("从上到下：剪掉 / 快放、推近、讲解、字幕、遮挡、标注、音乐；点选来调整，空白处双击新加推近（字幕那条双击新加字幕），两端黄条修剪",
                                    "Top to bottom: cut / speed-up, zooms, voiceovers, captions, redactions, annotations, music. Click to edit, double-click empty space to add a zoom (a caption on the caption lane), drag the yellow bars to trim"))
@@ -1039,15 +1047,8 @@ struct EditorView: View {
             Button(L("取消", "Cancel"), role: .cancel) { ed.editingCaption = nil }
         } message: { Text(L("一次只显示一行，太长会自动缩小字", "Shown on one line; long text is scaled down to fit")) }
         .onChange(of: ed.editingCaption) { _, id in captionText = id.flatMap { i in ed.project.captions.first { $0.id == i }?.text } ?? "" }
-        .alert(L("文字标注", "Text"), isPresented: Binding(get: { ed.editingNote != nil }, set: { if !$0 { ed.editingNote = nil } })) {
-            TextField(L("要写的字", "Text"), text: $noteText)
-            Button(L("好", "OK")) { if let id = ed.editingNote { ed.setNoteText(id, noteText) }; ed.editingNote = nil }
-            Button(L("取消", "Cancel"), role: .cancel) { ed.editingNote = nil }
-        }
-        .onChange(of: ed.editingNote) { _, id in noteText = id.flatMap { i in ed.project.annotations.first { $0.id == i }?.text } ?? "" }
     }
     @State private var captionText = ""
-    @State private var noteText = ""
 
     // 顶部只留文件名和「导出」
     private var toolbar: some View {
@@ -1096,6 +1097,7 @@ struct EditorView: View {
                     Button { ed.setTimelineScale(ed.timelineScale / 1.5) } label: { Image(systemName: "minus.magnifyingglass") }
                         .disabled(ed.timelineScale <= 1)
                     Slider(value: Binding(get: { ed.timelineScale }, set: { ed.setTimelineScale($0) }), in: TimelineMath.scaleRange).frame(width: 90)
+                    Text(String(format: "%.1f×", ed.timelineScale)).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 30, alignment: .leading)
                     Button { ed.setTimelineScale(ed.timelineScale * 1.5) } label: { Image(systemName: "plus.magnifyingglass") }
                         .disabled(ed.timelineScale >= 8)
                 }
@@ -2098,6 +2100,7 @@ struct StylePanel: View {
         ?? ["preset", "aspect", "bg", "frame", "zoom", "cursor", "keys", "audio", "music", "camera", "caption", "blur"]
 
     var body: some View {
+        ScrollViewReader { sv in
         ScrollView {
             VStack(alignment: .leading, spacing: 4) {
                 section("preset", L("预设", "Presets")) { presetsBox }
@@ -2109,12 +2112,20 @@ struct StylePanel: View {
                 section("keys", L("快捷键", "Keystrokes")) { keysBox }
                 section("audio", L("声音", "Sound")) { audioBox }
                 section("music", L("背景音乐", "Music")) { MusicBox(ed: ed) }
-                if ed.hasCamera { section("camera", L("摄像头", "Camera")) { cameraBox } }
+                if ed.hasCamera { section("camera", L("摄像头", "Camera")) { cameraBox }.id("camera") }
                 section("caption", L("字幕", "Captions")) { captionBox }
                 section("blur", L("运动模糊", "Motion Blur")) { blurBox }
             }
             .frame(width: 270, alignment: .leading)   // 面板 300 宽，左右各留 15
             .padding(.horizontal, 15).padding(.vertical, 12)
+        }
+        // 在预览上点了摄像头小窗：展开「摄像头」设置并滚过去（形状、大小在那里改）
+        .onChange(of: ed.revealSection) { _, k in
+            guard let k else { return }
+            open.insert(k)
+            withAnimation(.easeInOut(duration: 0.25)) { sv.scrollTo(k, anchor: .top) }
+            ed.revealSection = nil
+        }
         }
         .alert(L("存成预设", "Save as Preset"), isPresented: $naming) {
             TextField(L("名字", "Name"), text: $newName)
@@ -2267,7 +2278,7 @@ struct StylePanel: View {
     private var frameBox: some View {
         VStack(alignment: .leading, spacing: 8) {
             slider(L("边距", "Padding"), \.padding, 0...0.2) { "\(Int(($0 * 100).rounded()))%" }
-            slider(L("圆角", "Corners"), \.cornerRadius, 0...40) { "\(Int($0.rounded()))" }
+            slider(L("圆角", "Corners"), \.cornerRadius, 0...100) { "\(Int($0.rounded()))" }
             slider(L("阴影", "Shadow"), \.shadow, 0...1) { "\(Int(($0 * 100).rounded()))%" }
             slider(L("阴影虚化", "Softness"), \.shadowBlur, 0...1) { "\(Int(($0 * 100).rounded()))%" }
         }
@@ -2349,6 +2360,14 @@ struct StylePanel: View {
                         .help(L("试听", "Preview sound"))
                 }.controlSize(.small)
             }
+            HStack(spacing: 6) {
+                Toggle(L("打字声", "Typing sound"), isOn: Binding(get: { look.typeSound }, set: { v in ed.look(\.typeSound).wrappedValue = v; if v { ClickPreview.playTyping() } }))
+                if look.typeSound {
+                    Button { ClickPreview.playTyping() } label: { Image(systemName: "speaker.wave.2.fill") }.controlSize(.small).help(L("试听", "Preview sound"))
+                }
+            }
+            .help(L("录制时每按一下键盘，成片里加一声机械键盘的「嗒」，预览和导出都有；音量和点击声一起在「声音」里调",
+                    "Adds a mechanical keyboard tap for every key you pressed while recording, in the preview and the export; volume is under Sound with the click sound"))
             Toggle(L("结尾鼠标回到起点", "Return cursor to start at the end"), isOn: ed.look(\.cursorLoop))
                 .help(L("最后一小段鼠标慢慢走回第一帧的位置，首尾接得上，适合做循环播放的视频", "In the last moment the cursor glides back to where it started, so the video loops seamlessly"))
             if look.cursorLoop {
@@ -2934,6 +2953,27 @@ enum StudioTests {
 
     // EDITORSHOT=图片路径 EDITOR=素材夹 → 打开剪辑窗口（不抢前台）画成图片
     @MainActor static func editorShot() -> Bool {
+        // EDITOR_LIVE=素材夹：正常打开剪辑窗口（真播放器、放到最后面不抢前台），暂停状态下改样式 / 加标注，打印窗口号给 screencapture -l 截真画面
+        if let p = ProcessInfo.processInfo.environment["EDITOR_LIVE"] {
+            Task {
+                await StudioEditor.open(URL(fileURLWithPath: p))
+                guard let ed = StudioEditor.open.values.first, let w = ed.window else { exit(1) }
+                w.orderBack(nil)
+                try? await Task.sleep(for: .seconds(2.5))
+                print("LIVE before", w.windowNumber); fflush(stdout)
+                try? await Task.sleep(for: .seconds(2.5))
+                ed.edit { $0.look.cornerRadius = 90 }
+                ed.addAnnotation(.ellipse, OverlayGeo(x: 0.3, y: 0.3, w: 0.3, h: 0.3))
+                ed.addAnnotation(.arrow, OverlayGeo(x: 0.15, y: 0.8, w: 0.15, h: -0.2))
+                ed.addAnnotation(.text, OverlayGeo(x: 0.62, y: 0.7, w: 0, h: 0))
+                ed.typeNote(ed.editingNote!, "点这里")
+                try? await Task.sleep(for: .seconds(1.5))
+                print("LIVE after", w.windowNumber); fflush(stdout)
+                try? await Task.sleep(for: .seconds(3))
+                exit(0)
+            }
+            return true
+        }
         guard StudioEditor.testShot != nil, let p = ProcessInfo.processInfo.environment["EDITOR"] else { return false }
         // EDITOR_APPEARANCE=dark|light 强制深色 / 浅色
         switch ProcessInfo.processInfo.environment["EDITOR_APPEARANCE"] {
@@ -2949,6 +2989,22 @@ enum StudioTests {
 // 点击音效试听：选了就响一声
 @MainActor enum ClickPreview {
     private static var player: AVAudioPlayer?
+    private static var keyPlayers: [AVAudioPlayer] = []
+    private static var keyN = 0
+    // 一声按键（连打时几个播放器轮着用，前一声还没放完也不会被掐断）
+    static func playKey(volume: Double = 1) {
+        guard StudioEditor.testShot == nil else { return }
+        if keyPlayers.isEmpty { keyPlayers = (0..<8).compactMap { try? AVAudioPlayer(data: ClickSound.keyWav($0 % 4)) } }
+        guard !keyPlayers.isEmpty else { return }
+        let p = keyPlayers[keyN % keyPlayers.count]; keyN += 1
+        p.volume = Float(min(max(volume, 0), 1)); p.currentTime = 0; p.play()
+    }
+    // 试听：像打了一小串字
+    static func playTyping() {
+        for (i, d) in [0, 0.13, 0.24, 0.41, 0.52, 0.66].enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + d) { MainActor.assumeIsolated { _ = i; playKey() } }
+        }
+    }
     static func name(_ c: StudioLook.Click) -> String {
         switch c {
         case .soft: L("轻点", "Soft tap")

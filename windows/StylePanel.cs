@@ -33,7 +33,7 @@ namespace ScreenRecorder
             Section(L("背景", "Background"), BackgroundBox());
             Section(L("画面", "Frame"), Box(
                 Slider(L("边距", "Padding"), 0, 0.2, l => l.Padding, (l, v) => l.Padding = v, v => $"{Math.Round(v * 100)}%"),
-                Slider(L("圆角", "Corners"), 0, 40, l => l.CornerRadius, (l, v) => l.CornerRadius = v, v => $"{Math.Round(v)}"),
+                Slider(L("圆角", "Corners"), 0, 100, l => l.CornerRadius, (l, v) => l.CornerRadius = v, v => $"{Math.Round(v)}"),
                 Slider(L("阴影", "Shadow"), 0, 1, l => l.Shadow, (l, v) => l.Shadow = v, v => $"{Math.Round(v * 100)}%"),
                 Slider(L("阴影虚化", "Softness"), 0, 1, l => l.ShadowBlur, (l, v) => l.ShadowBlur = v, v => $"{Math.Round(v * 100)}%")));
             Section(L("推近", "Zoom"), Box(

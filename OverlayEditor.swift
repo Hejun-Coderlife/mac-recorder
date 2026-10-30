@@ -77,7 +77,23 @@ extension StudioEditor {
         if kind == .highlight { a.color = RGB(1.0, 0.84, 0.04) }
         edit { $0.annotations.append(a) }
         selectOverlay(a.id)
-        if kind == .text { editingNote = a.id }
+        if kind == .text { beginNote(a.id) }
+    }
+    // 文字标注直接在预览上改：打字时实时进工程（整次改字算一步撤销），回车 / 点别处收好，Esc 退回原来的字；改完是空的就删掉
+    func beginNote(_ id: UUID) { dragBegin(); editingNote = id }
+    func typeNote(_ id: UUID, _ text: String) {
+        guard dragBase != nil else { return }
+        dragUpdate { p in if let i = p.annotations.firstIndex(where: { $0.id == id }) { p.annotations[i].text = text.replacingOccurrences(of: "\n", with: " ") } }
+    }
+    func endNote(cancel: Bool = false) {
+        guard let id = editingNote else { return }
+        editingNote = nil
+        if cancel, let base = dragBase { project = base }
+        if let i = annotationIndex(id), project.annotations[i].text.trimmingCharacters(in: .whitespaces).isEmpty {
+            dragUpdate { $0.annotations.removeAll { $0.id == id } }
+            selected = nil
+        }
+        dragEnd()
     }
     func setNoteText(_ id: UUID, _ text: String) {
         guard let i = annotationIndex(id) else { return }
@@ -87,7 +103,11 @@ extension StudioEditor {
     func selectOverlay(_ id: UUID) {
         selected = id; picking = false; drawing = nil
         let range: (Double, Double)? = project.redactions.first { $0.id == id }.map { ($0.start, $0.end) } ?? project.annotations.first { $0.id == id }.map { ($0.start, $0.end) }
-        if let (s, e) = range, !(time >= s && time < e) { seek(s + min(0.35, (e - s) / 2)) }
+        // 刚出现的那一下是淡入 / 箭头正在画（第一帧几乎看不见）：播放头停在出现动画之后
+        if let (s, e) = range {
+            let ready = s + min(OverlayAnim.draw + 0.05, (e - s) / 2)
+            if !(time >= ready && time < e) { seek(ready) }
+        }
     }
     // 复制一份（⌘D）：时间往后挪到它结束处，位置稍微错开
     func duplicateOverlay() {
@@ -186,6 +206,7 @@ struct OverlayCanvas: View {
                 Color.clear
                 if let tool = ed.drawing { drawLayer(tool, m: m, fit: fit, size: g.size) }
                 else if let sel = selection(m) { SelectionBox(ed: ed, sel: sel, m: m, fit: fit) }
+                if let id = ed.editingNote, let a = ed.project.annotations.first(where: { $0.id == id }) { NoteField(ed: ed, note: a, m: m, fit: fit) }
             }
             .coordinateSpace(name: Self.space)
         }
@@ -279,7 +300,7 @@ struct SelectionBox: View {
                     .frame(width: max(r.width, 4), height: max(r.height, 4)).offset(x: r.minX, y: r.minY)
                     .onHover { inside in if inside { NSCursor.openHand.push() } else { NSCursor.pop() } }
                     .gesture(moveGesture)
-                    .simultaneousGesture(TapGesture(count: 2).onEnded { if sel.kind == .text { ed.editingNote = sel.id } })
+                    .simultaneousGesture(TapGesture(count: 2).onEnded { if sel.kind == .text { ed.beginNote(sel.id) } })
                 if sel.kind != .text {
                     ForEach(0..<8, id: \.self) { k in
                         let hx = [-1, 0, 1, 1, 1, 0, -1, -1][k], hy = [-1, -1, -1, 0, 1, 1, 1, 0][k]
@@ -353,7 +374,7 @@ struct OverlayBlock: View {
         }
         .clipped()
         .contentShape(Rectangle())
-        .gesture(TapGesture(count: 2).onEnded { if info.isText { ed.selectOverlay(id); ed.editingNote = id } }
+        .gesture(TapGesture(count: 2).onEnded { if info.isText { ed.selectOverlay(id); ed.beginNote(id) } }
             .exclusively(before: TapGesture().onEnded { ed.selectOverlay(id) }))
         .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .named(TimelineStrip.space))
             .onChanged { v in if ed.selected != id { ed.selected = id }; ed.dragOverlayTime(id, edge: 0, dt: v.translation.width / w * d) }
@@ -436,7 +457,7 @@ struct AnnotationInspector: View {
                 }
                 switch a.kind {
                 case .text:
-                    Button(L("改文字", "Edit Text")) { ed.editingNote = a.id }
+                    Button(L("改文字", "Edit Text")) { ed.beginNote(a.id) }
                     Text(L("字号", "Size")).font(.callout)
                     Slider(value: ed.noteSlider(\.fontSize), in: 12...80, onEditingChanged: { if !$0 { ed.dragEnd() } }).frame(width: 80)
                     Toggle(L("底色", "Background"), isOn: ed.note(\.pill)).toggleStyle(.checkbox)
@@ -459,5 +480,35 @@ struct OverlayActions: View {
     var body: some View {
         Button { ed.duplicateOverlay() } label: { Image(systemName: "plus.square.on.square") }.help(L("复制一份（⌘D）", "Duplicate (⌘D)"))
         Button(role: .destructive) { ed.deleteSelected() } label: { Label(L("删除", "Delete"), systemImage: "trash") }
+    }
+}
+
+// 预览上直接打字的文字标注：盖在那条标注上，样子和成片里一样（胶囊底色 + 白字）
+struct NoteField: View {
+    @ObservedObject var ed: StudioEditor
+    let note: Annotation
+    let m: OverlayMapping
+    let fit: CGRect
+    @State private var text = ""
+    @FocusState private var focused: Bool
+    var body: some View {
+        // 原画面的点 → 预览上的点（含推近倍数）
+        let k = m.ppp * m.lay.s * (m.f?.z ?? 1) * fit.width / m.lay.cw
+        let px = max(9, note.fontSize * k), p = m.view(CGPoint(x: note.x, y: note.y), fit: fit)
+        let col = Color(red: note.color.r, green: note.color.g, blue: note.color.b)
+        TextField(L("输入文字", "Type here"), text: $text)
+            .textFieldStyle(.plain).font(.custom("PingFangSC-Semibold", size: px))
+            .foregroundStyle(note.pill ? Color.white : col).focused($focused)
+            .fixedSize()
+            .frame(minWidth: px * 3)
+            .padding(.horizontal, note.pill ? px * 0.45 : 2).padding(.vertical, note.pill ? px * 0.27 : 1)
+            .background(Capsule().fill(note.pill ? col : Color.black.opacity(0.25)))
+            .overlay(Capsule().stroke(Color.accentColor, lineWidth: 1.5).padding(-3))
+            .offset(x: p.x, y: p.y)
+            .onAppear { text = note.text; DispatchQueue.main.async { focused = true } }
+            .onChange(of: text) { _, v in ed.typeNote(note.id, v) }
+            .onSubmit { ed.endNote() }
+            .onExitCommand { ed.endNote(cancel: true) }
+            .onChange(of: focused) { _, f in if !f { ed.endNote() } }
     }
 }
