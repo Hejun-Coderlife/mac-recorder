@@ -681,9 +681,21 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     }
     // 按自动规则重新排推近段（能撤销）；排完算「没手动改过」
     func regenerate() {
-        edit { $0.segments = StudioPlan.autoSegments(track, duration: duration, zoom: $0.segments.first?.zoom ?? 2.0) }
+        let old = project.segments.map { ($0.start, $0.end) }
+        let segs = StudioPlan.autoSegments(track, duration: duration, zoom: project.segments.first?.zoom ?? 2.0)
+        edit { $0.segments = segs }
         project.segmentsEdited = false
         selected = nil
+        // 告诉用户发生了什么（之前点了常常看不出变化：自动排的和现在的一样）
+        let same = old.count == segs.count && zip(old, segs).allSatisfy { abs($0.0 - $1.start) < 0.05 && abs($0.1 - $1.end) < 0.05 }
+        showToast(same ? L("已按点击和打字重新排推近：和现在的一样，没有变化", "Zooms regenerated from your clicks and typing: same as before")
+                       : L("已按点击和打字重新排了 \(segs.count) 段推近（原来 \(old.count) 段）· ⌘Z 撤销", "Regenerated \(segs.count) zooms (was \(old.count)) · ⌘Z to undo"))
+    }
+    @Published var toast: String?
+    private var toastTask: Task<Void, Never>?
+    func showToast(_ s: String) {
+        toast = s; toastTask?.cancel()
+        toastTask = Task { try? await Task.sleep(for: .seconds(3.5)); if !Task.isCancelled { toast = nil } }
     }
     func undo() { guard let p = undoStack.popLast() else { return }; redoStack.append(project); project = p }
     func redo() { guard let p = redoStack.popLast() else { return }; undoStack.append(project); project = p }
@@ -1164,6 +1176,13 @@ struct EditorView: View {
             }
             // 遮挡、标注：选中的那个出编辑框，「遮挡 / 标注」按下后在画面上拖出来
             OverlayCanvas(ed: ed)
+            if let t = ed.toast {
+                VStack {
+                    Spacer()
+                    Text(t).font(.callout).padding(.horizontal, 14).padding(.vertical, 8)
+                        .background(.ultraThinMaterial, in: Capsule()).shadow(radius: 6).padding(.bottom, 14)
+                }.allowsHitTesting(false).transition(.opacity)
+            }
             if let d = ed.drawing {
                 VStack {
                     Text(d.hint).font(.callout).padding(.horizontal, 12).padding(.vertical, 6)
@@ -2234,7 +2253,24 @@ struct StylePanel: View {
     }
 
     private var aspectBox: some View {
-        chips(ed.look(\.aspect), [(.original, L("原始", "Original")), (.wide, "16:9"), (.tall, "9:16"), (.square, "1:1"), (.classic, "4:3")], columns: 5)
+        VStack(alignment: .leading, spacing: 8) {
+            chips(ed.look(\.aspect), [(.original, L("原始", "Original")), (.wide, "16:9"), (.tall, "9:16"), (.square, "1:1"), (.classic, "4:3"), (.custom, L("自定义", "Custom"))], columns: 3)
+            if ed.project.look.aspect == .custom {
+                // 自己填宽 : 高，或点常用的
+                HStack(spacing: 6) {
+                    TextField("", value: ed.look(\.aspectW), format: .number.precision(.fractionLength(0...2))).frame(width: 52).multilineTextAlignment(.center)
+                    Text(":").foregroundStyle(.secondary)
+                    TextField("", value: ed.look(\.aspectH), format: .number.precision(.fractionLength(0...2))).frame(width: 52).multilineTextAlignment(.center)
+                    Spacer(minLength: 0)
+                    Menu(L("常用", "Common")) {
+                        ForEach([(21.0, 9.0), (2.35, 1.0), (3.0, 4.0), (4.0, 5.0), (3.0, 2.0), (2.0, 1.0)], id: \.0) { w, h in
+                            Button("\(w.formatted()) : \(h.formatted())") { ed.edit { $0.look.aspectW = w; $0.look.aspectH = h } }
+                        }
+                    }.fixedSize()
+                }.textFieldStyle(.roundedBorder).controlSize(.small)
+                Text(L("宽和高的比例，比如 21 : 9、4 : 5", "Width : height, e.g. 21 : 9 or 4 : 5")).font(.caption).foregroundStyle(.secondary)
+            }
+        }
     }
 
     private var backgroundBox: some View {

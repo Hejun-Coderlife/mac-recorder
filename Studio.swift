@@ -192,12 +192,13 @@ struct RGB: Codable, Equatable {
 
 // 剪辑窗口「样式」面板里能调的东西：存在 project.json 里，也能存成预设。旧工程没有这些字段时用默认值
 struct StudioLook: Codable, Equatable {
-    enum Aspect: String, Codable, CaseIterable { case original, wide = "16:9", tall = "9:16", square = "1:1", classic = "4:3" }
+    enum Aspect: String, Codable, CaseIterable { case original, wide = "16:9", tall = "9:16", square = "1:1", classic = "4:3", custom }
     enum Background: String, Codable, CaseIterable { case transparent, color, gradient, wallpaper, image }
     enum Blur: String, Codable, CaseIterable { case off, light, medium, strong }
     enum Click: String, Codable, CaseIterable { case soft, mouse, thock, wood, pop, tick }
 
     var aspect = Aspect.original
+    var aspectW = 21.0, aspectH = 9.0   // 自定义比例（宽:高）
     var background = Background.transparent
     var color = RGB(0.96, 0.96, 0.97)
     var gradient0 = RGB(0.36, 0.40, 0.96), gradient1 = RGB(0.86, 0.43, 0.78)
@@ -232,14 +233,14 @@ struct StudioLook: Codable, Equatable {
 
     init() {}
     enum CodingKeys: String, CodingKey {
-        case aspect, background, color, gradient0, gradient1, gradientAngle, wallpaper, imagePath, imageBookmark, padding, cornerRadius,
+        case aspect, aspectW, aspectH, background, color, gradient0, gradient1, gradientAngle, wallpaper, imagePath, imageBookmark, padding, cornerRadius,
              shadow, shadowBlur, cursorScale, smoothing, hideIdleCursor, hideAfter, clickSound, clickStyle, typeSound, typeStyle, ripple, blur,
              showKeys, keysAt, keysSize, keysDark, zoomSpeed, cursorLoop, cursorLoopSec, loopZoomOut
     }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self), z = StudioLook()
         func v<T: Decodable>(_ k: CodingKeys, _ def: T) -> T { (try? c.decodeIfPresent(T.self, forKey: k)) ?? def }
-        aspect = v(.aspect, z.aspect); background = v(.background, z.background); color = v(.color, z.color)
+        aspect = v(.aspect, z.aspect); aspectW = v(.aspectW, z.aspectW); aspectH = v(.aspectH, z.aspectH); background = v(.background, z.background); color = v(.color, z.color)
         gradient0 = v(.gradient0, z.gradient0); gradient1 = v(.gradient1, z.gradient1); gradientAngle = v(.gradientAngle, z.gradientAngle)
         wallpaper = v(.wallpaper, z.wallpaper); imagePath = v(.imagePath, z.imagePath); imageBookmark = v(.imageBookmark, z.imageBookmark)
         padding = v(.padding, z.padding); cornerRadius = v(.cornerRadius, z.cornerRadius); shadow = v(.shadow, z.shadow)
@@ -262,7 +263,10 @@ struct StudioLook: Codable, Equatable {
         }
     }
     var ratio: Double? {
-        switch aspect { case .original: nil; case .wide: 16.0 / 9; case .tall: 9.0 / 16; case .square: 1; case .classic: 4.0 / 3 }
+        switch aspect {
+        case .original: nil; case .wide: 16.0 / 9; case .tall: 9.0 / 16; case .square: 1; case .classic: 4.0 / 3
+        case .custom: aspectW > 0 && aspectH > 0 ? min(max(aspectW / aspectH, 0.25), 4) : nil
+        }
     }
     // 自己选的图片：路径找不到就用书签找
     var imageURL: URL? {

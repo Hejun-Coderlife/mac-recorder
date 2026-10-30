@@ -79,6 +79,20 @@ extension StudioEditor {
         selectOverlay(a.id)
         if kind == .text { beginNote(a.id) }
     }
+    // 正圆：原画面里宽 = 高（按像素），比例坐标下 w * W = h * H
+    func circleRect(center c: CGPoint, diameterW d: Double) -> CGRect {
+        let h = d * Double(track.width) / Double(max(track.height, 1))
+        return CGRect(x: c.x - d / 2, y: c.y - h / 2, width: d, height: h)
+    }
+    // 拖把手时保持正圆：拖角按大的一边、拖边按那条边；左 / 上边被拖时右 / 下边不动
+    func keepCircle(_ g: inout OverlayGeo, movedLeft: Bool, movedTop: Bool, edgeOnly: Bool, horizontal: Bool) {
+        let W = Double(track.width), H = Double(max(track.height, 1))
+        let right = g.x + g.w, bottom = g.y + g.h
+        let side = edgeOnly ? (horizontal ? g.w * W : g.h * H) : max(g.w * W, g.h * H)
+        g.w = side / W; g.h = side / H
+        if movedLeft { g.x = right - g.w }
+        if movedTop { g.y = bottom - g.h }
+    }
     // 在预览上点一下：点中正在显示的标注 / 遮挡就选中它（上面的优先），点空白处取消选中。p = 画布里的比例（左上原点）
     func tapPreview(_ p: CGPoint?) {
         guard let p else { selected = nil; return }
@@ -166,6 +180,12 @@ extension StudioEditor {
         }
     }
     // 时间轴上拖：move = 整段挪，否则改开头 / 结尾
+    // 拖文字的角：字号 = 拖之前的 × k（12–160）
+    func dragNoteScale(_ id: UUID, _ k: Double) {
+        dragBegin()
+        guard let base = dragBase?.annotations.first(where: { $0.id == id }) else { return }
+        dragUpdate { p in if let i = p.annotations.firstIndex(where: { $0.id == id }) { p.annotations[i].fontSize = min(max(base.fontSize * k, 12), 160) } }
+    }
     func dragOverlayTime(_ id: UUID, edge: Int, dt: Double) {
         dragBegin()
         let d = duration, minLen = 0.3
@@ -269,6 +289,13 @@ struct OverlayCanvas: View {
             if tool == .annotate(.arrow) {
                 Path { p in p.move(to: a); p.addLine(to: b) }.stroke(Color.white, style: StrokeStyle(lineWidth: 2, dash: [5, 4]))
                     .shadow(color: .black.opacity(0.5), radius: 1).allowsHitTesting(false)
+            } else if tool == .annotate(.ellipse) {
+                // 圈默认是正圆：按拖得远的那个方向定直径
+                let side = max(abs(b.x - a.x), abs(b.y - a.y)), ox = b.x < a.x ? a.x - side : a.x, oy = b.y < a.y ? a.y - side : a.y
+                Circle().stroke(Color.white, style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+                    .background(Circle().fill(Color.accentColor.opacity(0.12)))
+                    .shadow(color: .black.opacity(0.5), radius: 1)
+                    .frame(width: side, height: side).offset(x: ox, y: oy).allowsHitTesting(false)
             } else {
                 Rectangle().stroke(Color.white, style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
                     .background(Rectangle().fill(Color.accentColor.opacity(0.12)))
@@ -295,6 +322,17 @@ struct OverlayCanvas: View {
             let a = tiny ? CGPoint(x: n0.x - 0.12, y: n0.y + 0.10) : n0
             ed.addAnnotation(.arrow, OverlayGeo(x: a.x, y: a.y, w: n0.x - a.x + (tiny ? 0 : n1.x - n0.x), h: n0.y - a.y + (tiny ? 0 : n1.y - n0.y)))
         case .annotate(.text): ed.addAnnotation(.text, OverlayGeo(x: clamp(n0.x), y: clamp(n0.y), w: 0, h: 0))
+        case .annotate(.ellipse):
+            // 正圆：预览上是正方形（预览和原画面等比），换成原画面比例
+            var e = end
+            if !tiny {
+                let side = max(abs(end.x - start.x), abs(end.y - start.y))
+                e = CGPoint(x: start.x + (end.x < start.x ? -side : side), y: start.y + (end.y < start.y ? -side : side))
+            }
+            let n1c = m.norm(view: e, fit: fit)
+            let r = tiny ? ed.circleRect(center: n0, diameterW: 0.16)
+                         : CGRect(x: min(n0.x, n1c.x), y: min(n0.y, n1c.y), width: max(0.01, abs(n1c.x - n0.x)), height: max(0.01, abs(n1c.y - n0.y)))
+            ed.addAnnotation(.ellipse, OverlayGeo(x: r.minX, y: r.minY, w: r.width, h: r.height))
         case .annotate(let k):
             let r = rect(0.22, 0.14)
             ed.addAnnotation(k, OverlayGeo(x: r.minX, y: r.minY, w: r.width, h: r.height))
@@ -332,7 +370,24 @@ struct SelectionBox: View {
                     .onHover { inside in if inside { NSCursor.openHand.push() } else { NSCursor.pop() } }
                     .gesture(moveGesture)
                     .simultaneousGesture(TapGesture(count: 2).onEnded { if sel.kind == .text { ed.beginNote(sel.id) } })
+                if sel.kind == .text {
+                    // 文字：拖四个角改字号（离中心越远字越大）
+                    ForEach(0..<4, id: \.self) { k in
+                        let sx = k % 2 == 0 ? -1.0 : 1.0, sy = k < 2 ? -1.0 : 1.0
+                        Circle().fill(Color.white).overlay(Circle().stroke(Color.accentColor, lineWidth: 1.5))
+                            .frame(width: knob, height: knob).shadow(color: .black.opacity(0.35), radius: 1)
+                            .contentShape(Rectangle().inset(by: -4))
+                            .offset(x: (sx < 0 ? r.minX : r.maxX) - knob / 2, y: (sy < 0 ? r.minY : r.maxY) - knob / 2)
+                            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named(OverlayCanvas.space))
+                                .onChanged { v in
+                                    let grow = (v.translation.width * sx + v.translation.height * sy) / 2
+                                    ed.dragNoteScale(sel.id, max(0.2, 1 + grow / max(r.width / 2, 10)))
+                                }
+                                .onEnded { _ in ed.dragEnd() })
+                    }
+                }
                 if sel.kind != .text {
+                    let circle = sel.kind == .ellipse && ed.project.annotations.first(where: { $0.id == sel.id })?.oval != true
                     ForEach(0..<8, id: \.self) { k in
                         let hx = [-1, 0, 1, 1, 1, 0, -1, -1][k], hy = [-1, -1, -1, 0, 1, 1, 1, 0][k]
                         handle(at: CGPoint(x: r.midX + Double(hx) * r.width / 2, y: r.midY + Double(hy) * r.height / 2)) { d, g in
@@ -340,6 +395,7 @@ struct SelectionBox: View {
                             if hx < 0 { g.x += d.width; g.w -= d.width } else if hx > 0 { g.w += d.width }
                             if hy < 0 { g.y += d.height; g.h -= d.height } else if hy > 0 { g.h += d.height }
                             if g.w < 0.01 { g.w = 0.01 }; if g.h < 0.01 { g.h = 0.01 }
+                            if circle { ed.keepCircle(&g, movedLeft: hx < 0, movedTop: hy < 0, edgeOnly: hx == 0 || hy == 0, horizontal: hy == 0) }
                         }
                     }
                 }
@@ -449,7 +505,7 @@ struct RedactionInspector: View {
                 Divider().frame(height: 16)
                 Picker("", selection: ed.red(\.style)) {
                     ForEach(Redaction.Style.allCases, id: \.self) { Text(Redaction.name($0)).tag($0) }
-                }.pickerStyle(.segmented).labelsHidden().fixedSize()
+                }.pickerStyle(.segmented).labelsHidden().fixedSize().help(Redaction.hint(r.style))
                 if r.style == .solid {
                     ColorPicker(L("颜色", "Color"), selection: Binding(get: { r.color.color }, set: { c in ed.red(\.color).wrappedValue = RGB(c) }), supportsOpacity: false)
                         .fixedSize()
@@ -458,7 +514,7 @@ struct RedactionInspector: View {
                     Slider(value: ed.redSlider(\.strength), in: 0...1, onEditingChanged: { if !$0 { ed.dragEnd() } }).frame(width: 110)
                 }
                 Text(L("圆角", "Corners")).font(.callout)
-                Slider(value: ed.redSlider(\.corner), in: 0...30, onEditingChanged: { if !$0 { ed.dragEnd() } }).frame(width: 80)
+                Slider(value: ed.redSlider(\.corner), in: 0...80, onEditingChanged: { if !$0 { ed.dragEnd() } }).frame(width: 80)
                 Spacer()
                 OverlayActions(ed: ed)
             }.controlSize(.small)
@@ -490,11 +546,25 @@ struct AnnotationInspector: View {
                 case .text:
                     Button(L("改文字", "Edit Text")) { ed.beginNote(a.id) }
                     Text(L("字号", "Size")).font(.callout)
-                    Slider(value: ed.noteSlider(\.fontSize), in: 12...80, onEditingChanged: { if !$0 { ed.dragEnd() } }).frame(width: 80)
-                    Toggle(L("底色", "Background"), isOn: ed.note(\.pill)).toggleStyle(.checkbox)
+                    Slider(value: ed.noteSlider(\.fontSize), in: 12...160, onEditingChanged: { if !$0 { ed.dragEnd() } }).frame(width: 80)
+                    Picker("", selection: Binding(get: { a.textLook }, set: { v in ed.edit { $0.annotations[i].textStyle = v; $0.annotations[i].pill = v != .plain } })) {
+                        ForEach(Annotation.TextLook.allCases, id: \.self) { Text(Annotation.textLookName($0)).tag($0) }
+                    }.labelsHidden().fixedSize()
                 case .highlight:
                     EmptyView()
                 default:
+                    if a.kind == .ellipse {
+                        Picker("", selection: Binding(get: { a.oval == true }, set: { v in
+                            ed.edit { p in
+                                p.annotations[i].oval = v ? true : nil
+                                if !v {   // 改回正圆：按宽定直径，中心不动
+                                    var g = OverlayGeo(x: p.annotations[i].x, y: p.annotations[i].y, w: p.annotations[i].w, h: p.annotations[i].h)
+                                    let cy = g.y + g.h / 2; ed.keepCircle(&g, movedLeft: false, movedTop: false, edgeOnly: true, horizontal: true); g.y = cy - g.h / 2
+                                    p.annotations[i].x = g.x; p.annotations[i].y = g.y; p.annotations[i].w = g.w; p.annotations[i].h = g.h
+                                }
+                            }
+                        })) { Text(L("正圆", "Circle")).tag(false); Text(L("椭圆", "Oval")).tag(true) }.pickerStyle(.segmented).fixedSize()
+                    }
                     if a.kind == .arrow {
                         Picker("", selection: Binding(get: { a.arrow ?? .plain }, set: { v in ed.edit { $0.annotations[i].arrow = v == .plain ? nil : v } })) {
                             ForEach(Annotation.ArrowStyle.allCases, id: \.self) { Text(Annotation.arrowName($0)).tag($0) }
@@ -523,6 +593,18 @@ struct OverlayActions: View {
     }
 }
 
+extension NoteField {
+    @ViewBuilder func fieldBack(_ col: Color) -> some View {
+        switch note.textLook {
+        case .pill, .bubble: Capsule().fill(col)
+        case .dark: Capsule().fill(Color.black.opacity(0.78))
+        case .glass: Capsule().fill(.ultraThinMaterial).overlay(Capsule().stroke(Color.white.opacity(0.7), lineWidth: 1))
+        case .outline: Capsule().fill(Color.white.opacity(0.92)).overlay(Capsule().stroke(col, lineWidth: 2))
+        case .plain: Capsule().fill(Color.black.opacity(0.2))
+        }
+    }
+}
+
 // 预览上直接打字的文字标注：盖在那条标注上，样子和成片里一样（胶囊底色 + 白字）
 struct NoteField: View {
     @ObservedObject var ed: StudioEditor
@@ -538,11 +620,11 @@ struct NoteField: View {
         let col = Color(red: note.color.r, green: note.color.g, blue: note.color.b)
         TextField(L("输入文字", "Type here"), text: $text)
             .textFieldStyle(.plain).font(.custom("PingFangSC-Semibold", size: px))
-            .foregroundStyle(note.pill ? Color.white : col).focused($focused)
+            .foregroundStyle([.pill, .bubble].contains(note.textLook) || note.textLook == .dark ? Color.white : col).focused($focused)
             .fixedSize()
             .frame(minWidth: px * 3)
-            .padding(.horizontal, note.pill ? px * 0.45 : 2).padding(.vertical, note.pill ? px * 0.27 : 1)
-            .background(Capsule().fill(note.pill ? col : Color.black.opacity(0.25)))
+            .padding(.horizontal, note.textLook != .plain ? px * 0.45 : 2).padding(.vertical, note.textLook != .plain ? px * 0.27 : 1)
+            .background(fieldBack(col))
             .overlay(Capsule().stroke(Color.accentColor, lineWidth: 1.5).padding(-3))
             .offset(x: p.x, y: p.y)
             .onAppear { text = note.text; DispatchQueue.main.async { focused = true } }
