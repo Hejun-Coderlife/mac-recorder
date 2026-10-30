@@ -116,13 +116,17 @@ final class CaptionLayer: @unchecked Sendable {
         guard let c = image(atOut: t) else { return img }
         var base = img
         if style.box == .glass, let s = text(atOut: t), let cg = Self.render(s, style: style, cw: cw, ch: ch) {
-            let w = Double(cg.width), h = Double(cg.height), o = place(w: w, h: h)
-            let px = style.fontPx(canvas: cw, ch)
-            base = OverlayLayer.lens(img, rect: CGRect(x: o.x, y: o.y, width: w, height: h), radius: px * 0.45, strength: 0.9, dark: true, alpha: 1)
+            // 和玻璃文字标签同一套：透镜（边缘折射）在胶囊里，外面那圈是给阴影留的边
+            let w = Double(cg.width), h = Double(cg.height), o = place(w: w, h: h), m = Self.glassMargin(style, cw: cw, ch: ch)
+            let body = CGRect(x: o.x + m, y: o.y + m, width: w - 2 * m, height: h - 2 * m)
+            base = OverlayLayer.lens(img, rect: body, radius: body.height / 2, strength: 1, dark: false, alpha: 1)
         }
         return c.composited(over: base)
     }
     func compose(_ img: CIImage, atSource t: Double) -> CIImage { map.inCut(t) ? (keys?.image(atOut: map.out(t)).map { $0.composited(over: img) } ?? img) : compose(img, atOut: map.out(t)) }
+
+    // 玻璃底的字幕图四周多留一圈（画浮起的阴影），按字号定，合成时能算回来
+    static func glassMargin(_ style: CaptionStyle, cw: Double, ch: Double) -> Double { style.box == .glass ? (style.fontPx(canvas: cw, ch) * 0.9).rounded() : 0 }
 
     private static let lock = NSLock()
     nonisolated(unsafe) private static var cache: [String: CGImage] = [:]
@@ -134,37 +138,41 @@ final class CaptionLayer: @unchecked Sendable {
         var px = style.fontPx(canvas: cw, ch)
         func line(_ px: Double, stroke: Bool) -> CTLine {
             let font = CTFontCreateWithName(style.fontName as CFString, px, nil)
-            var a: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: style.color.cg]
+            // 玻璃底和玻璃文字标签一样用深色字
+            var a: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: style.box == .glass ? CGColor(srgbRed: 0.11, green: 0.11, blue: 0.12, alpha: 1) : style.color.cg]
             if stroke { a[NSAttributedString.Key(kCTStrokeWidthAttributeName as String)] = 14.0; a[NSAttributedString.Key(kCTStrokeColorAttributeName as String)] = CGColor(gray: 0, alpha: 0.85) }
             return CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: a))
         }
         // 连左右留白一起不超过画布宽的 90%
         // 有底时（深色 / 浅色 / 玻璃）照宣传片的字幕条：左右留白宽、圆角大、字上不描黑边
-        let padK = style.box == .none ? 0.25 : 0.8
+        let padK = style.box == .none ? 0.25 : style.box == .glass ? 0.45 : 0.8   // 玻璃和文字标签一样的留白
         var w = CTLineGetTypographicBounds(line(px, stroke: false), nil, nil, nil)
         let maxW = cw * 0.9
         if w + 2 * padK * px > maxW { px *= maxW / (w + 2 * padK * px) }
         let fill = line(px, stroke: false)
         var asc: CGFloat = 0, desc: CGFloat = 0
         w = CTLineGetTypographicBounds(fill, &asc, &desc, nil)
-        let padX = px * padK, padY = style.box == .none ? px * 0.22 : px * 0.34
-        let W = Int((w + padX * 2).rounded(.up)), H = Int((asc + desc + padY * 2).rounded(.up))
+        let padX = px * padK, padY = style.box == .none ? px * 0.22 : style.box == .glass ? px * 0.3 : px * 0.34
+        let gm = glassMargin(style, cw: cw, ch: ch)
+        let bw = (w + padX * 2).rounded(.up), bh = (asc + desc + padY * 2).rounded(.up)
+        let W = Int(bw + 2 * gm), H = Int(bh + 2 * gm)
         guard W > 0, H > 0, let c = CGContext(data: nil, width: W, height: H, bitsPerComponent: 8, bytesPerRow: 0,
                                              space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return nil }
         if style.box != .none {
-            let r = CGRect(x: 0, y: 0, width: W, height: H), rad = px * 0.45
+            let r = CGRect(x: gm, y: gm, width: bw, height: bh), rad = px * 0.45
             let path = CGPath(roundedRect: r, cornerWidth: rad, cornerHeight: rad, transform: nil)
             switch style.box {
             case .dark: c.addPath(path); c.setFillColor(CGColor(srgbRed: 18 / 255, green: 18 / 255, blue: 22 / 255, alpha: 0.74)); c.fillPath()
             case .light: c.addPath(path); c.setFillColor(CGColor(gray: 1, alpha: 0.88)); c.fillPath()
-            case .glass:   // 后面的画面在 compose 里做成透镜；这里压一层很淡的暗色，白字才看得清
-                c.addPath(path); c.setFillColor(CGColor(gray: 0.05, alpha: 0.28)); c.fillPath()
+            case .glass:   // 和玻璃文字标签一模一样（后面的透镜在 compose 里做）
+                _ = path
+                OverlayLayer.drawGlassChrome(c, body: r, px: px, dark: false)
             case .none: break
             }
         }
         let plainText = style.box != .none   // 有底就不描黑边、不加阴影（宣传片那种干净的字幕条）
-        let origin = CGPoint(x: padX, y: padY + desc)
+        let origin = CGPoint(x: gm + padX, y: gm + padY + desc)
         c.setLineJoin(.round)
         if style.shadow && !plainText { c.setShadow(offset: CGSize(width: 0, height: -px * 0.04), blur: px * 0.16, color: CGColor(gray: 0, alpha: 0.55)) }
         if style.outline && !plainText {

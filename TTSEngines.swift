@@ -7,21 +7,23 @@ import Foundation
 import Security
 
 enum TTSEngine: String, CaseIterable, Identifiable {
-    case local, azure, openai, qwen, system
+    case local, volc, azure, openai, qwen, system
     var id: String { rawValue }
     var name: String {
         switch self {
         case .local: L("本机 AI 声音（推荐，免费）", "On-device AI voice (free)")
+        case .volc: L("火山引擎·豆包（云端，剪映同款）", "Volcengine Doubao (cloud)")
         case .azure: L("微软 Azure（云端）", "Microsoft Azure (cloud)")
         case .openai: "OpenAI（" + L("云端", "cloud") + "）"
         case .qwen: L("阿里百炼 千问（云端）", "Alibaba Qwen TTS (cloud)")
         case .system: L("系统声音（生硬）", "macOS voice (robotic)")
         }
     }
-    var cloud: Bool { [.azure, .openai, .qwen].contains(self) }
+    var cloud: Bool { [.volc, .azure, .openai, .qwen].contains(self) }
     // 申请 key 的地方
     var keyHelp: (String, URL)? {
         switch self {
+        case .volc: (L("在火山引擎「豆包语音」控制台开通语音合成，拿 AppID 和 Access Token", "Enable TTS in the Volcengine Doubao Speech console for an AppID + Access Token"), URL(string: "https://console.volcengine.com/speech/app")!)
         case .azure: (L("在 Azure 门户建一个「语音服务」，拿 key 和区域", "Create a Speech resource in the Azure portal for a key + region"), URL(string: "https://portal.azure.com/#create/Microsoft.CognitiveServicesSpeechServices")!)
         case .openai: (L("在 OpenAI 后台创建 API key", "Create an API key in the OpenAI dashboard"), URL(string: "https://platform.openai.com/api-keys")!)
         case .qwen: (L("在阿里云百炼控制台创建 API key", "Create an API key in Alibaba Model Studio"), URL(string: "https://bailian.console.aliyun.com/?tab=model#/api-key")!)
@@ -32,6 +34,11 @@ enum TTSEngine: String, CaseIterable, Identifiable {
     @MainActor var voices: [(String, String)] {
         switch self {
         case .local: LocalTTS.voices
+        case .volc: [("zh_female_shuangkuaisisi_moon_bigtts", L("爽快思思（女）", "Sisi (female)")), ("zh_male_wennuanahu_moon_bigtts", L("温暖阿虎（男）", "Ahu (male)")),
+                     ("zh_female_tianmeixiaoyuan_moon_bigtts", L("甜美小源（女）", "Xiaoyuan (female)")), ("zh_male_shaonianzixin_moon_bigtts", L("少年梓辛（男）", "Zixin (male)")),
+                     ("zh_female_wanwanxiaohe_moon_bigtts", L("湾湾小何（台湾腔）", "Xiaohe (Taiwanese)")), ("zh_male_jingqiangkanye_moon_bigtts", L("京腔侃爷（北京话）", "Kanye (Beijing)")),
+                     ("zh_male_M392_conversation_wvae_bigtts", L("对话男声", "Conversational male")),
+                     ("BV001_streaming", L("通用女声（免费）", "Standard female (free)")), ("BV002_streaming", L("通用男声（免费）", "Standard male (free)"))]
         case .azure: [("zh-CN-YunxiNeural", L("云希（男，年轻）", "Yunxi (male)")), ("zh-CN-YunjianNeural", L("云健（男，浑厚）", "Yunjian (male)")),
                       ("zh-CN-YunyangNeural", L("云扬（男，播音）", "Yunyang (male, news)")), ("zh-CN-XiaoxiaoNeural", L("晓晓（女，温暖）", "Xiaoxiao (female)")),
                       ("zh-CN-XiaoyiNeural", L("晓伊（女，活泼）", "Xiaoyi (female)")), ("zh-CN-XiaochenNeural", L("晓辰（女，自然）", "Xiaochen (female)")),
@@ -192,6 +199,19 @@ enum CloudTTS {
         var req: URLRequest
         var ext = "wav"
         switch e {
+        case .volc:
+            // 豆包语音合成（V1 HTTP）：AppID 填在 region 那一格，Access Token 是 key；头里是「Bearer;」加 token
+            let appid = TTSKeys.get(e, "region")
+            guard !appid.isEmpty else { throw fail(L("还要填火山引擎的 AppID", "Enter your Volcengine AppID too")) }
+            req = URLRequest(url: URL(string: "https://openspeech.bytedance.com/api/v1/tts")!)
+            req.setValue("Bearer;\(key)", forHTTPHeaderField: "Authorization")
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try JSONSerialization.data(withJSONObject: [
+                "app": ["appid": appid, "token": "access_token", "cluster": "volcano_tts"],
+                "user": ["uid": "recorder"],
+                "audio": ["voice_type": voice, "encoding": "wav", "speed_ratio": min(max(speed, 0.5), 2)],
+                "request": ["reqid": UUID().uuidString, "text": text, "operation": "query"],
+            ])
         case .azure:
             let region = TTSKeys.get(e, "region").isEmpty ? "eastasia" : TTSKeys.get(e, "region")
             req = URLRequest(url: URL(string: "https://\(region).tts.speech.microsoft.com/cognitiveservices/v1")!)
@@ -221,6 +241,13 @@ enum CloudTTS {
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard code == 200 else { throw fail("\(e.name)：HTTP \(code) " + String(decoding: data.prefix(300), as: UTF8.self)) }
         var audio = data
+        if e == .volc {
+            guard let j = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw fail(L("火山引擎返回的不对", "Bad response from Volcengine")) }
+            guard (j["code"] as? Int) == 3000, let b = (j["data"] as? String).flatMap({ Data(base64Encoded: $0) }) else {
+                throw fail("火山引擎：\(j["code"] ?? "") \(j["message"] ?? "")")
+            }
+            audio = b
+        }
         if e == .qwen {
             // 千问返回的是 JSON，里面给音频文件的地址
             guard let j = try JSONSerialization.jsonObject(with: data) as? [String: Any], let o = j["output"] as? [String: Any],

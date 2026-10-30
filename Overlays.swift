@@ -141,6 +141,23 @@ final class OverlayLayer: @unchecked Sendable {
         return img.cropped(to: src.extent)
     }
 
+    // 玻璃的体积感（文字标签和字幕共用，保证一模一样）：没有描边线；浮起的柔影、一点点色、边缘往里渐淡的内阴影、上沿柔光
+    static func drawGlassChrome(_ c: CGContext, body: CGRect, px: Double, dark: Bool) {
+        let capsule = CGPath(roundedRect: body, cornerWidth: body.height / 2, cornerHeight: body.height / 2, transform: nil)
+        c.setShadow(offset: CGSize(width: 0, height: -px * 0.16), blur: px * 1.0, color: CGColor(gray: 0, alpha: dark ? 0.32 : 0.2))
+        c.setFillColor(dark ? CGColor(gray: 0.06, alpha: 0.3) : CGColor(gray: 1, alpha: 0.05)); c.addPath(capsule); c.fillPath()
+        c.setShadow(offset: .zero, blur: 0, color: nil)
+        let outer = CGPath(rect: body.insetBy(dx: -px * 2, dy: -px * 2), transform: nil)
+        func inner(_ color: CGColor, offset: CGSize, blur: Double) {
+            c.saveGState(); c.addPath(capsule); c.clip()
+            c.setShadow(offset: offset, blur: blur, color: color)
+            c.addPath(outer); c.addPath(capsule); c.setFillColor(CGColor(gray: 0, alpha: 1)); c.fillPath(using: .evenOdd)
+            c.restoreGState()
+        }
+        inner(CGColor(gray: 0, alpha: dark ? 0.35 : 0.16), offset: CGSize(width: 0, height: -px * 0.04), blur: px * 0.35)   // 边缘内阴影
+        inner(CGColor(gray: 1, alpha: dark ? 0.35 : 0.75), offset: CGSize(width: 0, height: -px * 0.06), blur: px * 0.12)  // 上沿柔光
+    }
+
     // 玻璃标签后面那块（像苹果 Liquid Glass）：中间几乎是透明的（只糊一点点），越靠边越像透镜把画面放大、弯过来；没有描边
     static func glass(_ img: CIImage, _ a: Annotation, space sp: Space, unit: Double, alpha: Double) -> CIImage {
         let sz = textBox(a, unit: unit), tl = sp.point(CGPoint(x: a.x, y: a.y))
@@ -373,21 +390,7 @@ final class OverlayLayer: @unchecked Sendable {
                 c.setShadow(offset: CGSize(width: 0, height: -px * 0.06), blur: px * 0.35, color: soft)
                 c.setFillColor(CGColor(gray: 0.08, alpha: 0.78)); c.addPath(capsule); c.fillPath()
             case .glass, .glassDark:
-                // 像苹果 Liquid Glass：背后的画面在 apply 里用透镜弯过（边缘折射）。这里只加体积感，不画描边线：
-                // 浮起的柔影、边缘一圈往里渐淡的内阴影、上沿一点柔光
-                let dark = look == .glassDark
-                c.setShadow(offset: CGSize(width: 0, height: -px * 0.16), blur: px * 1.0, color: CGColor(gray: 0, alpha: dark ? 0.32 : 0.2))
-                c.setFillColor(dark ? CGColor(gray: 0.06, alpha: 0.3) : CGColor(gray: 1, alpha: 0.05)); c.addPath(capsule); c.fillPath()
-                c.setShadow(offset: .zero, blur: 0, color: nil)
-                let outer = CGPath(rect: body.insetBy(dx: -px * 2, dy: -px * 2), transform: nil)
-                func inner(_ color: CGColor, offset: CGSize, blur: Double) {
-                    c.saveGState(); c.addPath(capsule); c.clip()
-                    c.setShadow(offset: offset, blur: blur, color: color)
-                    c.addPath(outer); c.addPath(capsule); c.setFillColor(CGColor(gray: 0, alpha: 1)); c.fillPath(using: .evenOdd)
-                    c.restoreGState()
-                }
-                inner(CGColor(gray: 0, alpha: dark ? 0.35 : 0.16), offset: CGSize(width: 0, height: -px * 0.04), blur: px * 0.35)   // 边缘内阴影
-                inner(CGColor(gray: 1, alpha: dark ? 0.35 : 0.75), offset: CGSize(width: 0, height: -px * 0.06), blur: px * 0.12)  // 上沿柔光
+                Self.drawGlassChrome(c, body: body, px: px, dark: look == .glassDark)
             case .gradient:
                 c.setShadow(offset: CGSize(width: 0, height: -px * 0.06), blur: px * 0.35, color: soft)
                 c.addPath(capsule); c.fillPath(); c.setShadow(offset: .zero, blur: 0, color: nil)

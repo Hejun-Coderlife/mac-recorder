@@ -163,25 +163,25 @@ struct SpeakBox: View {
     @State private var engine = TTSPrefs.engine
     @State private var voice = TTSPrefs.voice(TTSPrefs.engine)
     @State private var key = TTSKeys.get(TTSPrefs.engine)
-    @State private var region = TTSKeys.get(.azure, "region")
+    @State private var region = TTSKeys.get(TTSPrefs.engine, "region")
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(L("文字转配音", "Text to Speech")).font(.headline)
             Picker(L("来源", "Engine"), selection: $engine) {
                 ForEach(TTSEngine.allCases) { Text($0.name).tag($0) }
             }
-            .onChange(of: engine) { _, e in TTSPrefs.engine = e; voice = TTSPrefs.voice(e); key = TTSKeys.get(e) }
+            .onChange(of: engine) { _, e in TTSPrefs.engine = e; voice = TTSPrefs.voice(e); key = TTSKeys.get(e); region = TTSKeys.get(e, "region") }
             Picker(L("声音", "Voice"), selection: $voice) {
                 if engine == .system { Text(L("自动（按字幕语言挑最好的）", "Auto (best for the language)")).tag("") }
                 ForEach(engine.voices, id: \.0) { Text($0.1).tag($0.0) }
             }
             .onChange(of: voice) { _, v in TTSPrefs.setVoice(engine, v) }
             if engine.cloud {
-                SecureField(L("API key", "API key"), text: $key).textFieldStyle(.roundedBorder)
+                SecureField(engine == .volc ? L("Access Token", "Access Token") : L("API key", "API key"), text: $key).textFieldStyle(.roundedBorder)
                     .onChange(of: key) { _, v in TTSKeys.set(engine, "key", v.trimmingCharacters(in: .whitespaces)) }
-                if engine == .azure {
-                    TextField(L("区域（比如 eastasia、eastus）", "Region (e.g. eastasia, eastus)"), text: $region).textFieldStyle(.roundedBorder)
-                        .onChange(of: region) { _, v in TTSKeys.set(.azure, "region", v.trimmingCharacters(in: .whitespaces)) }
+                if engine == .azure || engine == .volc {
+                    TextField(engine == .volc ? L("AppID", "AppID") : L("区域（比如 eastasia、eastus）", "Region (e.g. eastasia, eastus)"), text: $region).textFieldStyle(.roundedBorder)
+                        .onChange(of: region) { _, v in TTSKeys.set(engine, "region", v.trimmingCharacters(in: .whitespaces)) }
                 }
                 if let (t, u) = engine.keyHelp { Link(t + " ↗", destination: u).font(.caption) }
                 Text(L("key 只存在这台电脑的钥匙串里；念的时候把字幕文字发给这家服务，按字数收费（一般几分钱一段）。", "The key stays in this Mac's Keychain; caption text is sent to this service when speaking, billed per character."))

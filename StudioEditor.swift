@@ -1247,7 +1247,17 @@ struct EditorView: View {
                 OverlayButtons(ed: ed)
                 Spacer()
                 // 右半边：自动生成、撤销重做（只放图标，鼠标停上去有说明），再是时间轴缩放
-                Button { ed.suggestSpeed() } label: { Image(systemName: "gauge.with.dots.needle.67percent") }
+                Menu {
+                    Button(L("找可以加速的地方（逐个确认）", "Find Parts to Speed Up (review each)")) { ed.suggestSpeed() }
+                    Divider()
+                    Menu(L("打字的地方全部加速", "Speed Up All Typing")) {
+                        ForEach([1.5, 2.0, 3.0, 4.0], id: \.self) { r in Button(r.formatted() + "×") { ed.autoSpeed(.typing, rate: r) } }
+                    }
+                    Menu(L("很久没动的空档全部加速", "Speed Up All Idle Parts")) {
+                        ForEach([2.0, 4.0, 8.0], id: \.self) { r in Button(r.formatted() + "×") { ed.autoSpeed(.idle, rate: r) } }
+                    }
+                } label: { Image(systemName: "gauge.with.dots.needle.67percent") }
+                    .menuIndicator(.hidden).fixedSize()
                     .disabled(ed.suggesting)
                     .help(L("建议加速：找出很久没操作、画面也不动的空档（建议 4×）和一直在打字的地方（建议 2×），在剪辑轨上用虚线标出来，点 ✓ 采纳",
                             "Suggest speed-ups: finds long idle stretches (4×) and long typing (2×) and marks them on the cut lane with dashed outlines; click ✓ to apply"))

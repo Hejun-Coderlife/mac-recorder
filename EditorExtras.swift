@@ -83,6 +83,30 @@ extension StudioEditor {
             }
         }
     }
+    // 一键加速：把所有打字的地方（或很久没动的空档）直接变成快放段，倍数自己选；能撤销
+    func autoSpeed(_ kind: SpeedSuggestion.Kind, rate: Double) {
+        guard !suggesting else { return }
+        suggesting = true; suggestNone = false; suggestions = []
+        let r = project.trimStart...max(project.trimStart, project.trimEnd), raw = dir.appendingPathComponent("raw.mp4"), tr = track, cuts = project.cuts
+        Task {
+            let diffs = await SpeedSuggest.frameDiffs(raw: raw, range: r)
+            let found = SpeedSuggest.find(track: tr, diffs: diffs, range: r, existing: cuts).filter { $0.kind == kind }
+            suggesting = false
+            guard !found.isEmpty else {
+                showToast(kind == .typing ? L("没找到连续打字的地方", "No long typing found") : L("没找到很久没动的空档", "No long idle stretches found")); return
+            }
+            let before = timeMap.out(project.trimEnd)
+            edit { p in
+                for g in found where !p.cuts.contains(where: { $0.start < g.end && $0.end > g.start }) {
+                    p.cuts.append(CutSegment(start: max(g.start, p.trimStart), end: min(g.end, p.trimEnd), mode: .speed, rate: rate))
+                }
+                p.cuts.sort { $0.start < $1.start }
+            }
+            let saved = before - timeMap.out(project.trimEnd)
+            showToast(L("\(found.count) 处\(kind == .typing ? "打字" : "空档")已加速 \(rate.formatted())×，成片短了 \(String(format: "%.1f", saved)) 秒 · ⌘Z 撤销",
+                        "Sped up \(found.count) \(kind == .typing ? "typing" : "idle") parts \(rate.formatted())×, \(String(format: "%.1f", saved))s shorter · ⌘Z to undo"))
+        }
+    }
     // 采纳：变成正式的快放段（能撤销）；和已有剪辑段重叠的跳过
     func acceptSuggestions(_ ids: [UUID]) {
         let pick = suggestions.filter { ids.contains($0.id) }
