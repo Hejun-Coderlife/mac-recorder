@@ -28,6 +28,9 @@ final class PlanBox: @unchecked Sendable {
     private var ov: OverlayLayer?
     var overlay: OverlayLayer? { lock.lock(); defer { lock.unlock() }; return ov }
     func setOverlay(_ o: OverlayLayer?) { lock.lock(); ov = o; lock.unlock() }
+    // 正在播放：只有播的时候加运动模糊（暂停编辑时画面要清楚）
+    private var isPlaying = false
+    var playing: Bool { get { lock.lock(); defer { lock.unlock() }; return isPlaying } set { lock.lock(); isPlaying = newValue; lock.unlock() } }
 }
 
 @MainActor
@@ -68,7 +71,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     @Published var selectedPiece: Double?                // 剪辑轨上选中的那段（起点）
     @Published var selected: UUID? { didSet { if selected != nil { selectedPiece = nil }; if let n = editingNote, selected != n { endNote() } } }   // 选了别的：正在改的字先收好
     @Published var time = 0.0
-    @Published var playing = false { didSet { if !playing { musicPlayer.pauseAll() } } }
+    @Published var playing = false { didSet { box.playing = playing; if !playing { musicPlayer.pauseAll(); if oldValue { redrawPausedFrame() } } } }
     @Published var picking = false             // 正在等用户在预览上点固定位置
     @Published var exportProgress: Double?
     @Published var exported: URL?
@@ -418,7 +421,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
             guard !plan.isEmpty else { req.finish(with: req.sourceImage, context: nil); return }
             let i = min(max(Int((req.compositionTime.seconds * fps).rounded()), 0), plan.count - 1)
             let kk = min(1, 1600 / max(r.lay.cw, r.lay.ch))   // 样式刚改、合成还没换时按新画布缩放
-            var img = r.frame(i, plan: plan, source: req.sourceImage, overlay: box.overlay, srcTime: req.compositionTime.seconds)
+            var img = r.frame(i, plan: plan, source: req.sourceImage, overlay: box.overlay, srcTime: req.compositionTime.seconds, motionBlur: box.playing)
             if let cam = box.camera { img = cam.compose(img, srcTime: req.compositionTime.seconds) }
             if let c = box.captions?.image(atSource: req.compositionTime.seconds) { img = c.composited(over: img) }
             img = img.transformed(by: CGAffineTransform(scaleX: kk, y: kk))
@@ -546,7 +549,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         guard let src = cachedSource?.img, dragBase != nil else { return }
         let (r, plan) = box.both, i = min(max(Int((t * fps).rounded()), 0), plan.count - 1)
         let lay = r.lay
-        var fr = r.frame(i, plan: plan, source: src, overlay: box.overlay, srcTime: t)
+        var fr = r.frame(i, plan: plan, source: src, overlay: box.overlay, srcTime: t, motionBlur: false)
         if let cam = box.camera { fr = cam.compose(fr, srcTime: t) }
         if let c = box.captions?.image(atSource: t) { fr = c.composited(over: fr) }
         let k = min(1, 1600 / lay.cw)
@@ -555,6 +558,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         dragFrame = NSImage(cgImage: out, size: CGSize(width: lay.cw, height: lay.ch))
     }
     private let dragCtx = CIContext(options: [.cacheIntermediates: false])
+    func redrawPausedFrame() { player.currentItem?.videoComposition = makeComposition(); seek(time) }   // 停下时这一帧不带运动模糊重画
     func dragFinished() {
         if needsAudioRefresh { replan() }               // 拖完把声音、边界、播放器都更新一遍
         else if dragFrame != nil { redrawPaused() }
@@ -2653,8 +2657,11 @@ struct StylePanel: View {
             Toggle(L("点击波纹", "Click ripple"), isOn: ed.look(\.ripple))
                 .help(L("每次点击时在鼠标处冒一下，让观众看清点了哪里", "A little effect at each click so viewers see where you clicked"))
             if look.ripple {
-                chips(ed.look(\.rippleStyle), [(.glass, L("玻璃", "Glass")), (.ring, L("圆圈", "Ring")), (.double, L("双圈", "Double")),
+                chips(ed.look(\.rippleStyle), [(.ring, L("圆圈", "Ring")), (.glass, L("玻璃", "Glass")), (.double, L("双圈", "Double")),
                                                (.pulse, L("圆点", "Dot")), (.glow, L("光晕", "Glow")), (.focus, L("对焦", "Focus"))], columns: 3)
+                if [.ring, .double, .focus].contains(look.rippleStyle) {
+                    slider(L("线粗", "Thickness"), \.rippleWidth, 0.4...3) { String(format: "%.1f×", $0) }
+                }
             }
             Toggle(L("点击音效", "Click sound"), isOn: ed.look(\.clickSound))
                 .help(L("每次点击处加一声轻响，预览和导出都有；音量在「声音」里调", "Adds a soft click at each click, in the preview and the export; set its volume under Sound"))
@@ -3604,7 +3611,7 @@ struct SplitHandle: View {
         .frame(height: 9)
         .contentShape(Rectangle())
         .onHover { inside in if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() } }
-        .gesture(DragGesture(minimumDistance: 1)
+        .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)   // 用窗口坐标：把手自己跟着动，局部坐标会来回跳（画面晃）
             .onChanged { v in
                 if start == nil { start = height }
                 height = min(max((start ?? height) - v.translation.height, 110), 640)
