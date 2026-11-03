@@ -646,6 +646,29 @@ jobs:
           }
           foreach ($k in "EDITOR", "EDITOR_W5DEMO", "APP_LANG", "EDITORSHOT") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
 
+      - name: W6 - 画面对照（和 Mac 版标准图比：玻璃透镜、遮挡、文字标签 11 种、箭头 / 形状、字幕 4 种底、点击波纹 6 种；CPU 和显卡）
+        run: |
+          foreach ($k in "AUTOTEST", "AUTOSTUDIO", "AUTOINPUT", "AUTOAUDIO", "AUTOOUT", "STUDIO_ENCODER", "STUDIO") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          # 显卡版在 runner 上是软件渲染（WARP），算法一样
+          $env:REFTEST = (Resolve-Path windows/tests/reference).Path; $env:STUDIO_COMPOSE = "gpu"
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          foreach ($k in "REFTEST", "STUDIO_COMPOSE") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $txt = Get-Content "$env:TEMP\ref_test.txt" -Raw -Encoding UTF8
+          Write-Host "exit=$($p.ExitCode)`n$txt"
+          # Windows 渲染的图、显卡版、并排图（左 Mac | 右 Windows）打包成附件，不进仓库
+          $out = Join-Path $env:RUNNER_TEMP "reftest"; New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item windows/tests/reference/win (Join-Path $out "win") -Recurse -ErrorAction SilentlyContinue
+          Copy-Item "$env:TEMP\reftest\gpu" (Join-Path $out "gpu") -Recurse -ErrorAction SilentlyContinue
+          Copy-Item "$env:TEMP\reftest\side" (Join-Path $out "side") -Recurse -ErrorAction SilentlyContinue
+          Copy-Item "$env:TEMP\ref_test.txt" $out -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0 -or -not $txt.TrimEnd().EndsWith("REFTEST OK")) { throw "W6 reference comparison failed" }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reftest-mac-vs-windows
+          path: ${{ runner.temp }}/reftest
+
       - name: W3 - camera capture (a video file stands in for the camera) + do not disturb (banners off, restored, also after a crash)
         run: |
           $cam = Join-Path $env:RUNNER_TEMP "studio/w3cam"; New-Item -ItemType Directory -Force $cam | Out-Null
