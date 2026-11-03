@@ -1,0 +1,164 @@
+[
+ {
+  "case": "overlays",
+  "shot": "text-labels",
+  "time": 0.6,
+  "png": "mac/overlays@text-labels.png"
+ },
+ {
+  "case": "overlays",
+  "shot": "arrows-shapes",
+  "time": 1.6,
+  "png": "mac/overlays@arrows-shapes.png"
+ },
+ {
+  "case": "overlays",
+  "shot": "redact-inside",
+  "time": 2.6,
+  "png": "mac/overlays@redact-inside.png"
+ },
+ {
+  "case": "overlays",
+  "shot": "spotlight",
+  "time": 3.6,
+  "png": "mac/overlays@spotlight.png"
+ },
+ {
+  "case": "overlays",
+  "shot": "focus",
+  "time": 4.6,
+  "png": "mac/overlays@focus.png"
+ },
+ {
+  "case": "caption-glass",
+  "shot": "caption",
+  "time": 5.6,
+  "png": "mac/caption-glass@caption.png"
+ },
+ {
+  "case": "caption-dark",
+  "shot": "caption",
+  "time": 5.6,
+  "png": "mac/caption-dark@caption.png"
+ },
+ {
+  "case": "caption-light",
+  "shot": "caption",
+  "time": 5.6,
+  "png": "mac/caption-light@caption.png"
+ },
+ {
+  "case": "caption-none",
+  "shot": "caption",
+  "time": 5.6,
+  "png": "mac/caption-none@caption.png"
+ },
+ {
+  "case": "ripple-ring",
+  "shot": "t0.10",
+  "time": 7.1,
+  "png": "mac/ripple-ring@t0.10.png"
+ },
+ {
+  "case": "ripple-ring",
+  "shot": "t0.25",
+  "time": 7.25,
+  "png": "mac/ripple-ring@t0.25.png"
+ },
+ {
+  "case": "ripple-ring",
+  "shot": "t0.40",
+  "time": 7.4,
+  "png": "mac/ripple-ring@t0.40.png"
+ },
+ {
+  "case": "ripple-glass",
+  "shot": "t0.10",
+  "time": 7.1,
+  "png": "mac/ripple-glass@t0.10.png"
+ },
+ {
+  "case": "ripple-glass",
+  "shot": "t0.25",
+  "time": 7.25,
+  "png": "mac/ripple-glass@t0.25.png"
+ },
+ {
+  "case": "ripple-glass",
+  "shot": "t0.40",
+  "time": 7.4,
+  "png": "mac/ripple-glass@t0.40.png"
+ },
+ {
+  "case": "ripple-double",
+  "shot": "t0.10",
+  "time": 7.1,
+  "png": "mac/ripple-double@t0.10.png"
+ },
+ {
+  "case": "ripple-double",
+  "shot": "t0.25",
+  "time": 7.25,
+  "png": "mac/ripple-double@t0.25.png"
+ },
+ {
+  "case": "ripple-double",
+  "shot": "t0.40",
+  "time": 7.4,
+  "png": "mac/ripple-double@t0.40.png"
+ },
+ {
+  "case": "ripple-pulse",
+  "shot": "t0.10",
+  "time": 7.1,
+  "png": "mac/ripple-pulse@t0.10.png"
+ },
+ {
+  "case": "ripple-pulse",
+  "shot": "t0.25",
+  "time": 7.25,
+  "png": "mac/ripple-pulse@t0.25.png"
+ },
+ {
+  "case": "ripple-pulse",
+  "shot": "t0.40",
+  "time": 7.4,
+  "png": "mac/ripple-pulse@t0.40.png"
+ },
+ {
+  "case": "ripple-glow",
+  "shot": "t0.10",
+  "time": 7.1,
+  "png": "mac/ripple-glow@t0.10.png"
+ },
+ {
+  "case": "ripple-glow",
+  "shot": "t0.25",
+  "time": 7.25,
+  "png": "mac/ripple-glow@t0.25.png"
+ },
+ {
+  "case": "ripple-glow",
+  "shot": "t0.40",
+  "time": 7.4,
+  "png": "mac/ripple-glow@t0.40.png"
+ },
+ {
+  "case": "ripple-focus",
+  "shot": "t0.10",
+  "time": 7.1,
+  "png": "mac/ripple-focus@t0.10.png"
+ },
+ {
+  "case": "ripple-focus",
+  "shot": "t0.25",
+  "time": 7.25,
+  "png": "mac/ripple-focus@t0.25.png"
+ },
+ {
+  "case": "ripple-focus",
+  "shot": "t0.40",
+  "time": 7.4,
+  "png": "mac/ripple-focus@t0.40.png"
+ }
+]
