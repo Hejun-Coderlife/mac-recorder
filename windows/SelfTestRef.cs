@@ -64,13 +64,29 @@ namespace ScreenRecorder
                         g = string.Format(CultureInfo.InvariantCulture, "  gpu({0}) vs cpu mean={1:0.00} cell={2:0.0}{3}", name, gm, gc, gpass ? "" : " ← 显卡和 CPU 不一致");
                     }
                     SideBySide(mp, wp, Path.Combine(side, png));
+                    // 遮挡、标注每帧多久（原画面上画；预览拖动、播放、导出每帧都要算一次）
+                    double ms = OverlayMs(dir, t);
                     ok &= pass;
-                    Line(string.Format(CultureInfo.InvariantCulture, "{0} {1}  mac vs win mean={2:0.00} cell={3:0.0}  ({4:0.0}s){5}", pass ? "PASS" : "FAIL", png, mean, cell, cpuS, g));
+                    Line(string.Format(CultureInfo.InvariantCulture, "{0} {1}  mac vs win mean={2:0.00} cell={3:0.0}  overlays {6:0.0} ms/frame  ({4:0.0}s){5}", pass ? "PASS" : "FAIL", png, mean, cell, cpuS, g, ms));
                 }
                 Line(ok ? "REFTEST OK" : "REFTEST FAILED");
             }
             catch (Exception ex) { Line("FAIL exception " + ex); ok = false; }
             return ok ? 0 : 1;
+        }
+
+        static double OverlayMs(string dir, double t)
+        {
+            var info = Studio.Probe(Path.Combine(dir, "raw.mp4"));
+            var track = Studio.LoadTrack(dir, info);
+            var ov = OverlayLayer.Make(StudioProject.Load(dir, track, info.Duration));
+            if (ov == null) return 0;
+            var src = Studio.DecodeFrame(Path.Combine(dir, "raw.mp4"), t, info.Width, info.Height, info.Matrix);
+            var dst = new byte[src.Length];
+            ov.Apply(src, dst, info.Width, info.Height, t, track.PixelsPerPoint);   // 第一次：字图进缓存
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            for (int i = 0; i < 5; i++) ov.Apply(src, dst, info.Width, info.Height, t, track.PixelsPerPoint);
+            return sw.Elapsed.TotalMilliseconds / 5;
         }
 
         static byte[] Pixels(string file, out int w, out int h)

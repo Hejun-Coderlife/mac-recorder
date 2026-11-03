@@ -12,7 +12,7 @@ namespace ScreenRecorder
     // 遮挡一块：x、y、w、h 是原画面里的比例（左上为原点）；字段名同 Mac 版
     sealed class Redaction
     {
-        public static readonly string[] Styles = { "blur", "mosaic", "solid", "frosted", "spotlight", "focus" };   // 后三种是 Mac 新加的（W6 前：毛玻璃按模糊画，聚光灯 / 聚焦先不画）
+        public static readonly string[] Styles = { "blur", "mosaic", "solid", "frosted", "spotlight", "focus" };   // 后三种是 Mac 新加的：毛玻璃、聚光灯（框外变暗）、聚焦（框外模糊）
         public string Id = Guid.NewGuid().ToString().ToUpperInvariant();
         public double Start, End;
         public double X, Y, W, H;
@@ -42,7 +42,14 @@ namespace ScreenRecorder
                 Extra = JsonR.Unknown(o, Known),
             };
         }
-        public static string Name(string s, Func<string, string, string> L) => s == "mosaic" ? L("马赛克", "Mosaic") : s == "solid" ? L("色块", "Solid") : L("模糊", "Blur");
+        public static string Name(string s, Func<string, string, string> L)
+        {
+            switch (s)
+            {
+                case "mosaic": return L("马赛克", "Mosaic"); case "solid": return L("色块", "Solid"); case "frosted": return L("毛玻璃", "Frosted");
+                case "spotlight": return L("聚光灯", "Spotlight"); case "focus": return L("聚焦", "Focus"); default: return L("模糊", "Blur");
+            }
+        }
     }
 
     // 标注：箭头从 (x, y) 指到 (x + w, y + h)；框 / 圈 / 高亮是这个矩形；文字的左上角在 (x, y)，大小按字算；字段名同 Mac 版
@@ -169,63 +176,148 @@ namespace ScreenRecorder
             return (Math.Max(0, x0), Math.Max(0, y0), Math.Min(W, x1), Math.Min(H, y1));
         }
 
+        // 照 Mac 版 redact()：效果从当前画面（前面的遮挡已经画上）算，在线性光里（同 Core Image），k = strength：
+        // blur 高斯 σ = (3 + 22k)·unit；mosaic 格子 max(2, (6 + 30k)·unit)、从框左下角排起、取格子中心那一点的颜色（CIPixellate）；solid 纯色；
+        // frosted 高斯 σ = (8 + 26k)·unit → 饱和度 ×1.15、亮度 +0.04 → 蒙白 (0.28 + 0.2k)；
+        // spotlight 框外蒙黑 (0.45 + 0.45k)；focus 框外高斯 σ = (4 + 22k)·unit；圆角 = min(corner·unit, 短边 / 2)
         static void Redact(byte[] src, byte[] dst, int W, int H, Redaction r, double unit)
         {
             var (x0, y0, x1, y1) = PixelRect(r, W, H);
             int rw = x1 - x0, rh = y1 - y0;
             if (rw < 2 || rh < 2) return;
-            if (r.Style == "spotlight" || r.Style == "focus") return;   // 处理的是框外面：W6 再做
             double k = Math.Min(Math.Max(r.Strength, 0), 1);
-            // 效果图（只算这一块）：BGR 三个通道
-            var eff = new float[rw * rh * 3];
-            if (r.Style == "blur" || r.Style == "frosted")
+            bool outside = r.Style == "spotlight" || r.Style == "focus";
+            // 效果算在哪块：框里的样式只算框，框外的样式算整幅
+            int ex0 = outside ? 0 : x0, ey0 = outside ? 0 : y0, ew = outside ? W : rw, eh = outside ? H : rh;
+            float[] eff;
+            switch (r.Style)
             {
-                double sigma = (3 + 22 * k) * unit;
-                int m = (int)Math.Ceiling(sigma * 3);
-                int ex0 = Math.Max(0, x0 - m), ey0 = Math.Max(0, y0 - m), ex1 = Math.Min(W, x1 + m), ey1 = Math.Min(H, y1 + m);   // 往外多取一圈（画面边上按边缘延伸，同 Mac 的 clampedToExtent）
-                int ew = ex1 - ex0, eh = ey1 - ey0;
-                for (int c = 0; c < 3; c++)
+                case "blur": eff = Blurred(dst, W, H, ex0, ey0, ew, eh, (3 + 22 * k) * unit); break;
+                case "focus": eff = Blurred(dst, W, H, ex0, ey0, ew, eh, (4 + 22 * k) * unit); break;
+                case "frosted":
                 {
-                    var ch = new float[ew * eh];
-                    for (int y = 0; y < eh; y++) { int so = ((ey0 + y) * W + ex0) * 4 + c; for (int x = 0; x < ew; x++) ch[y * ew + x] = src[so + x * 4]; }
-                    Sprites.Blur(ch, ew, eh, sigma);
-                    for (int y = 0; y < rh; y++) for (int x = 0; x < rw; x++) eff[(y * rw + x) * 3 + c] = ch[(y0 - ey0 + y) * ew + (x0 - ex0 + x)];
+                    eff = Blurred(dst, W, H, ex0, ey0, ew, eh, (8 + 26 * k) * unit);
+                    float wa = (float)(0.28 + 0.2 * k);
+                    for (int i = 0; i < ew * eh; i++)
+                    {
+                        float B = eff[i * 3], G = eff[i * 3 + 1], R = eff[i * 3 + 2], lum = 0.2125f * R + 0.7154f * G + 0.0721f * B;
+                        B = lum + 1.15f * (B - lum) + 0.04f; G = lum + 1.15f * (G - lum) + 0.04f; R = lum + 1.15f * (R - lum) + 0.04f;
+                        eff[i * 3] = B * (1 - wa) + wa; eff[i * 3 + 1] = G * (1 - wa) + wa; eff[i * 3 + 2] = R * (1 - wa) + wa;
+                    }
+                    break;
+                }
+                case "mosaic":
+                {
+                    double cell = Math.Max(2, (6 + 30 * k) * unit);
+                    var img = Glass.Load(dst, W, H, 0, 0, W, H);   // 取样可能落在框外（格子伸出框），按整幅取、画面外按边缘
+                    eff = new float[ew * eh * 3];
+                    Parallel.For(0, eh, y =>
+                    {
+                        // 格子从框的左下角排起（Core Image 左下原点），每格取格子中心那一点（双线性，同 CIPixellate）
+                        double fromBottom = y1 - (ey0 + y + 0.5);
+                        double cy = y1 - (Math.Floor(fromBottom / cell) + 0.5) * cell;
+                        for (int x = 0; x < ew; x++)
+                        {
+                            double cx = x0 + (Math.Floor((ex0 + x + 0.5 - x0) / cell) + 0.5) * cell;
+                            double fx = Math.Min(W - 1.0, Math.Max(0, cx - 0.5)), fy = Math.Min(H - 1.0, Math.Max(0, cy - 0.5));
+                            int ix = Math.Min(W - 2, (int)fx), iy = Math.Min(H - 2, (int)fy); float tx = (float)(fx - ix), ty = (float)(fy - iy);
+                            int i00 = (iy * W + ix) * 3, i01 = i00 + 3, i10 = i00 + W * 3, i11 = i10 + 3, o = (y * ew + x) * 3;
+                            for (int c = 0; c < 3; c++)
+                                eff[o + c] = (img[i00 + c] * (1 - tx) + img[i01 + c] * tx) * (1 - ty) + (img[i10 + c] * (1 - tx) + img[i11 + c] * tx) * ty;
+                        }
+                    });
+                    break;
+                }
+                case "spotlight":
+                    eff = null;   // 框外蒙黑：只和原来的颜色有关，下面查表
+                    break;
+                default:
+                {
+                    eff = new float[ew * eh * 3];
+                    float b = Lin.Of((float)r.Color.B), g = Lin.Of((float)r.Color.G), rr = Lin.Of((float)r.Color.R);
+                    for (int i = 0; i < ew * eh; i++) { eff[i * 3] = b; eff[i * 3 + 1] = g; eff[i * 3 + 2] = rr; }
+                    break;
                 }
             }
-            else if (r.Style == "mosaic")
-            {
-                // 格子从遮挡框的左上角排起；每格取格子里的平均色（格子伸出框外的部分照样取原画面，边上不会突兀）
-                int cell = (int)Math.Max(2, Math.Round((6 + 30 * k) * unit));
-                for (int cy = y0; cy < y1; cy += cell)
-                    for (int cx = x0; cx < x1; cx += cell)
-                    {
-                        int gx1 = Math.Min(W, cx + cell), gy1 = Math.Min(H, cy + cell);
-                        double sb = 0, sg = 0, sr = 0; int n = 0;
-                        for (int y = cy; y < gy1; y++) for (int x = cx; x < gx1; x++) { int i = (y * W + x) * 4; sb += src[i]; sg += src[i + 1]; sr += src[i + 2]; n++; }
-                        if (n == 0) continue;
-                        float b = (float)(sb / n), g = (float)(sg / n), rr = (float)(sr / n);
-                        for (int y = cy; y < Math.Min(y1, gy1); y++) for (int x = cx; x < Math.Min(x1, gx1); x++) { int o = ((y - y0) * rw + (x - x0)) * 3; eff[o] = b; eff[o + 1] = g; eff[o + 2] = rr; }
-                    }
-            }
-            else
-            {
-                float b = (float)(r.Color.B * 255), g = (float)(r.Color.G * 255), rr = (float)(r.Color.R * 255);
-                for (int i = 0; i < rw * rh; i++) { eff[i * 3] = b; eff[i * 3 + 1] = g; eff[i * 3 + 2] = rr; }
-            }
-            // 圆角遮罩（抗锯齿）：框外原样
+            // 圆角遮罩（系统的圆角矩形，抗锯齿）；没圆角就是整块
             double rad = Math.Min(r.Corner * unit, Math.Min(rw, rh) / 2.0);
             double cxr = x0 + rw / 2.0, cyr = y0 + rh / 2.0;
-            Parallel.For(0, rh, y =>
+            byte[] dark = null;
+            if (eff == null)
             {
-                for (int x = 0; x < rw; x++)
+                float keep = (float)(1 - (0.45 + 0.45 * k));
+                dark = new byte[256]; for (int i = 0; i < 256; i++) dark[i] = Lin.Byte(Lin.Of((byte)i) * keep);
+            }
+            Parallel.For(ey0, ey0 + eh, y =>
+            {
+                for (int x = ex0; x < ex0 + ew; x++)
                 {
-                    double px = x0 + x + 0.5, py = y0 + y + 0.5;
-                    double cov = rad > 0.5 ? Math.Min(1, Math.Max(0, 0.5 - RoundRectDist(px, py, cxr, cyr, rw / 2.0, rh / 2.0, rad))) : 1;
-                    if (cov <= 0) continue;
-                    int i = ((y0 + y) * W + x0 + x) * 4, o = (y * rw + x) * 3;
-                    for (int c = 0; c < 3; c++) dst[i + c] = (byte)Math.Round(Math.Min(255, Math.Max(0, eff[o + c] * cov + dst[i + c] * (1 - cov))));
+                    double m = 0;
+                    if (x >= x0 && x < x1 && y >= y0 && y < y1)
+                        m = rad > 0.5 ? Math.Min(1, Math.Max(0, 0.5 - RoundRectDist(x + 0.5, y + 0.5, cxr, cyr, rw / 2.0, rh / 2.0, rad))) : 1;
+                    double we = outside ? 1 - m : m;   // 效果占多少
+                    if (we <= 0) continue;
+                    int i = (y * W + x) * 4, o = ((y - ey0) * ew + (x - ex0)) * 3;
+                    if (dark != null)
+                    {
+                        if (we >= 1) { dst[i] = dark[dst[i]]; dst[i + 1] = dark[dst[i + 1]]; dst[i + 2] = dark[dst[i + 2]]; }
+                        else for (int c = 0; c < 3; c++) dst[i + c] = Lin.Byte((float)(Lin.Of(dark[dst[i + c]]) * we + Lin.Of(dst[i + c]) * (1 - we)));
+                        continue;
+                    }
+                    for (int c = 0; c < 3; c++) dst[i + c] = Lin.Byte((float)(eff[o + c] * we + Lin.Of(dst[i + c]) * (1 - we)));
                 }
             });
+        }
+
+        // 当前画面的一块（线性光）做高斯模糊：往外多取 3σ，画面外按边缘延伸（同 clampedToExtent）。
+        // σ 大时先按 f×f 求平均缩小、在小图上模糊（σ / f）、再双线性放大回来：看不出差别，聚焦（整幅、σ ≈ 17）从 80 ms 降到十几 ms
+        static float[] Blurred(byte[] img, int W, int H, int x0, int y0, int w, int h, double sigma)
+        {
+            int m = (int)Math.Ceiling(sigma * 3);
+            int f = Math.Max(1, (int)Math.Floor(sigma / 3));
+            int bx0 = x0 - m, by0 = y0 - m, bw = w + 2 * m, bh = h + 2 * m;
+            int dw = (bw + f - 1) / f, dh = (bh + f - 1) / f;
+            var chs = new float[3][];
+            for (int c = 0; c < 3; c++) chs[c] = new float[dw * dh];
+            float inv = 1f / (f * f);
+            Parallel.For(0, dh, y =>
+            {
+                for (int x = 0; x < dw; x++)
+                {
+                    float sb = 0, sg = 0, sr = 0;
+                    for (int yy = 0; yy < f; yy++)
+                    {
+                        int sy = Math.Min(H - 1, Math.Max(0, by0 + y * f + yy));
+                        for (int xx = 0; xx < f; xx++)
+                        {
+                            int sx = Math.Min(W - 1, Math.Max(0, bx0 + x * f + xx)), i = (sy * W + sx) * 4;
+                            sb += Lin.Of(img[i]); sg += Lin.Of(img[i + 1]); sr += Lin.Of(img[i + 2]);
+                        }
+                    }
+                    int o = y * dw + x; chs[0][o] = sb * inv; chs[1][o] = sg * inv; chs[2][o] = sr * inv;
+                }
+            });
+            double sd = Math.Sqrt(Math.Max(0.25, sigma * sigma - (f * f - 1) / 12.0)) / f;   // 求平均本身也糊了一点，扣掉
+            Parallel.For(0, 3, c => Sprites.Blur(chs[c], dw, dh, sd));
+            var o3 = new float[w * h * 3];
+            Parallel.For(0, h, y =>
+            {
+                double fy = Math.Min(dh - 1.0, Math.Max(0, (y + m + 0.5) / f - 0.5));
+                int iy = Math.Min(dh - 2, (int)fy); if (iy < 0) iy = 0; float ty = dh < 2 ? 0 : (float)(fy - iy);
+                int iy1 = Math.Min(dh - 1, iy + 1);
+                for (int x = 0; x < w; x++)
+                {
+                    double fx = Math.Min(dw - 1.0, Math.Max(0, (x + m + 0.5) / f - 0.5));
+                    int ix = Math.Min(dw - 2, (int)fx); if (ix < 0) ix = 0; float tx = dw < 2 ? 0 : (float)(fx - ix);
+                    int ix1 = Math.Min(dw - 1, ix + 1);
+                    for (int c = 0; c < 3; c++)
+                    {
+                        var a = chs[c];
+                        o3[(y * w + x) * 3 + c] = (a[iy * dw + ix] * (1 - tx) + a[iy * dw + ix1] * tx) * (1 - ty) + (a[iy1 * dw + ix] * (1 - tx) + a[iy1 * dw + ix1] * tx) * ty;
+                    }
+                }
+            });
+            return o3;
         }
 
         // 圆角矩形（中心 cx, cy、半宽 hw、半高 hh、圆角 r）的有符号距离
