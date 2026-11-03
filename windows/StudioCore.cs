@@ -510,11 +510,40 @@ namespace ScreenRecorder
         }
 
         // 点击波纹：白圈 + 一圈淡淡的深色描边，深浅背景上都看得见（128 像素，圆心 64、半径 52）
-        public static Sprite Ring()
+        // 各种点击波纹的底图（照 Mac 版 drawRipple：128×128，半径 52 的圆为基准，按时间缩放、淡出）；k = 圆圈类的线粗倍数
+        public static Sprite Ripple(string style, double k = 1)
+        {
+            switch (style)
+            {
+                case "pulse":   // 实心圆点：外面一圈淡淡的深色
+                    return Art((d, dx, dy, over) => { if (d <= 55) over(0, 0, 0, 0.18f); if (d <= 52) over(1, 1, 1, 0.85f); });
+                case "glow":    // 柔和的光晕：暖黄 90% → 0（半径 62）
+                    return Art((d, dx, dy, over) =>
+                    {
+                        if (d > 62) return;
+                        double t = d / 62;   // 系统渐变按颜色、透明度各自线性插值
+                        over((float)1, (float)(0.95 + (0.85 - 0.95) * t), (float)(0.6 + (0.3 - 0.6) * t), (float)(0.9 * (1 - t)));
+                    });
+                case "focus":   // 往里收的细圈（像对焦）：深色 7k 宽 + 蓝 4k 宽，半径 52 − 3k
+                {
+                    double fr = 52 - 3 * k;
+                    return Art((d, dx, dy, over) =>
+                    {
+                        if (Math.Abs(d - fr) <= 3.5 * k) over(0, 0, 0, 0.3f);
+                        if (Math.Abs(d - fr) <= 2 * k) over(0.2f, 0.6f, 1, 1);
+                    });
+                }
+                default: return Ring(k);   // ring / double
+            }
+        }
+
+        // 128×128 的小图，每像素 4×4 超采样；paint(离圆心多远, dx, dy, 叠一层(r, g, b, a))
+        static Sprite Art(Action<double, double, double, Action<float, float, float, float>> paint)
         {
             const int n = 128, ss = 4;
             var px = new float[n * n * 4];
-            for (int y = 0; y < n; y++)
+            Parallel.For(0, n, y =>
+            {
                 for (int x = 0; x < n; x++)
                 {
                     float b = 0, g = 0, r = 0, a = 0;
@@ -522,19 +551,29 @@ namespace ScreenRecorder
                         for (int sx = 0; sx < ss; sx++)
                         {
                             double dx = x + (sx + 0.5) / ss - 64, dy = y + (sy + 0.5) / ss - 64, d = Math.Sqrt(dx * dx + dy * dy);
-                            // 由下往上叠：淡白填充 → 深色宽描边 → 白色细描边
-                            float cr = 0, ca = 0;
-                            void Over(float col, float al) { cr = col * al + cr * (1 - al); ca = al + ca * (1 - al); }
-                            if (d <= 52) Over(1, 0.18f);
-                            if (Math.Abs(d - 52) <= 5) Over(0, 0.25f);
-                            if (Math.Abs(d - 52) <= 3) Over(1, 0.95f);
-                            r += cr; a += ca;
+                            float cb = 0, cg = 0, cr = 0, ca = 0;
+                            paint(d, dx, dy, (rr, gg, bb, al) => { cr = rr * al + cr * (1 - al); cg = gg * al + cg * (1 - al); cb = bb * al + cb * (1 - al); ca = al + ca * (1 - al); });
+                            b += cb; g += cg; r += cr; a += ca;
                         }
                     float m = 1f / (ss * ss);
                     int i = (y * n + x) * 4;
-                    px[i] = px[i + 1] = px[i + 2] = r * m; px[i + 3] = a * m;
+                    px[i] = b * m; px[i + 1] = g * m; px[i + 2] = r * m; px[i + 3] = a * m;
                 }
+            });
             return new Sprite { W = n, H = n, Px = px, Ppp = 1, HotX = 64, HotY = 64 };
+        }
+
+        public static Sprite Ring(double k = 1)
+        {
+            // 照 Mac 版 drawRing：淡白填充 → 深色宽描边（10k）→ 白色细描边（6k）；线粗了圆往里收，不出图
+            k = Math.Min(Math.Max(k, 0.4), 3);
+            double rr0 = 52 - Math.Max(0, (k - 1) * 4);
+            return Art((d, dx, dy, over) =>
+            {
+                if (d <= rr0) over(1, 1, 1, 0.18f);
+                if (Math.Abs(d - rr0) <= 5 * k) over(0, 0, 0, 0.25f);
+                if (Math.Abs(d - rr0) <= 3 * k) over(1, 1, 1, 0.95f);
+            });
         }
 
         // 从 BGRA（非预乘）字节建图
@@ -743,7 +782,31 @@ namespace ScreenRecorder
             return qx > 0 && qy > 0 ? Math.Sqrt(qx * qx + qy * qy) - r : Math.Max(qx, qy) - r;
         }
 
-        public struct Overlay { public Sprite S; public double X, Y, K, Alpha; }   // X、Y = 热点落在原画面的哪（像素，y 朝下）；K = 每个小图像素占几个原画面像素
+        // X、Y = 热点落在原画面的哪（像素，y 朝下）；K = 每个小图像素占几个原画面像素。
+        // S == null 时是玻璃波纹（照 Mac 版 rippleWarp）：以 (X, Y) 为圆心，WarpR ± WarpW（原画面像素）那一圈画面被弯折，Alpha = 强度（1 − u）
+        public struct Overlay { public Sprite S; public double X, Y, K, Alpha, WarpR, WarpW; }
+
+        // 玻璃波纹的取样位置（画布像素）：外圈往外鼓（CIBumpDistortion 半径 r + w、+0.55a），里圈往里收（半径 r − w、−0.45a）。
+        // 鼓包：离圆心 d < R 的点改到 圆心 + (p − 圆心) × (1 − (1 − d / R) × scale)²
+        public static void RippleMap(double px, double py, double cx, double cy, double r, double w, double a, out double sx, out double sy)
+        {
+            void Bump(ref double x, ref double y, double R, double scale)
+            {
+                double dx = x - cx, dy = y - cy, d = Math.Sqrt(dx * dx + dy * dy);
+                if (d >= R || R <= 0) return;
+                double p = 1 - (1 - d / R) * scale; p *= p;
+                x = cx + dx * p; y = cy + dy * p;
+            }
+            sx = px; sy = py;
+            Bump(ref sx, ref sy, Math.Max(1, r - w), -0.45 * a);   // 先过里圈（外面那层是对里圈结果再取样）
+            Bump(ref sx, ref sy, r + w, 0.55 * a);
+        }
+        // 那一圈亮边（白，线性光里叠）：r − w → r 从 0 到 16%(1 − u)，r → r + w 再淡到 0
+        public static double RippleBand(double d, double r, double w, double a)
+        {
+            double v = d < r ? (d - (r - w)) / w : 1 - (d - r) / w;
+            return Math.Max(0, Math.Min(1, v)) * 0.16 * a;
+        }
 
         // src：原画面 W×H BGRA；dst：画布 CW×CH BGRA
         public unsafe void Compose(byte[] src, FramePlan f, List<Overlay> overlays, byte[] dst)
@@ -821,6 +884,7 @@ namespace ScreenRecorder
             double z = f.z, sy = L.ch - f.sy, s = L.s;
             double ox = (cardL + o.X * s - f.sx) * z + CW / 2.0, oy = (cardT + o.Y * s - sy) * z + CH / 2.0;   // 热点在画布上的位置
             double K = o.K * s * z;                                                                                // 小图一个像素在画布上多大
+            if (o.S == null) { Warp(o, ox, oy, o.WarpR * s * z, o.WarpW * s * z, dst); return; }
             var sp = o.S;
             int x0 = (int)Math.Floor(ox - sp.HotX * K), y0 = (int)Math.Floor(oy - sp.HotY * K);
             int x1 = (int)Math.Ceiling(ox + (sp.W - sp.HotX) * K), y1 = (int)Math.Ceiling(oy + (sp.H - sp.HotY) * K);
@@ -843,14 +907,46 @@ namespace ScreenRecorder
                         b += sp.Px[i] * wgt; g += sp.Px[i + 1] * wgt; rr += sp.Px[i + 2] * wgt; a += sp.Px[i + 3] * wgt;
                     }
                     Tap(u0, v0, (1 - tu) * (1 - tv)); Tap(u0 + 1, v0, tu * (1 - tv)); Tap(u0, v0 + 1, (1 - tu) * tv); Tap(u0 + 1, v0 + 1, tu * tv);
-                    a *= al;
-                    if (a <= 0.001f) continue;
+                    if (a <= 0.0005f) continue;
+                    // 线性光里叠（同 Core Image）：小图是预乘 sRGB，先还原颜色再换线性
+                    float A = a * al, inv = 1 / a;
                     int di = (Y * CW + X) * 4;
-                    dst[di] = (byte)Math.Min(255, b * al * 255 + dst[di] * (1 - a) + 0.5f);
-                    dst[di + 1] = (byte)Math.Min(255, g * al * 255 + dst[di + 1] * (1 - a) + 0.5f);
-                    dst[di + 2] = (byte)Math.Min(255, rr * al * 255 + dst[di + 2] * (1 - a) + 0.5f);
+                    dst[di] = Lin.Byte(Lin.Of(Math.Min(1f, b * inv)) * A + Lin.Of(dst[di]) * (1 - A));
+                    dst[di + 1] = Lin.Byte(Lin.Of(Math.Min(1f, g * inv)) * A + Lin.Of(dst[di + 1]) * (1 - A));
+                    dst[di + 2] = Lin.Byte(Lin.Of(Math.Min(1f, rr * inv)) * A + Lin.Of(dst[di + 2]) * (1 - A));
                 }
             }
+        }
+
+        // 玻璃波纹：(cx, cy) 圆心、r ± w 那一圈（画布像素）按 RippleMap 从画面里重新取样，再叠亮边
+        byte[] warpCopy;
+        void Warp(Overlay o, double cx, double cy, double r, double w, byte[] dst)
+        {
+            double a = o.Alpha, R = r + w + 1;
+            if (a <= 0.01 || r <= 1) return;
+            int x0 = Math.Max(0, (int)Math.Floor(cx - R)), y0 = Math.Max(0, (int)Math.Floor(cy - R)), x1 = Math.Min(CW, (int)Math.Ceiling(cx + R)), y1 = Math.Min(CH, (int)Math.Ceiling(cy + R));
+            if (x0 >= x1 || y0 >= y1) return;
+            if (warpCopy == null || warpCopy.Length != dst.Length) warpCopy = new byte[dst.Length];
+            for (int Y = y0; Y < y1; Y++) Buffer.BlockCopy(dst, (Y * CW + x0) * 4, warpCopy, (Y * CW + x0) * 4, (x1 - x0) * 4);
+            var srcI = warpCopy;
+            Parallel.For(y0, y1, Y =>
+            {
+                for (int X = x0; X < x1; X++)
+                {
+                    double px = X + 0.5, py = Y + 0.5, d = Math.Sqrt((px - cx) * (px - cx) + (py - cy) * (py - cy));
+                    if (d >= r + w) continue;
+                    RippleMap(px, py, cx, cy, r, w, a, out double sx, out double sy);
+                    double fx = Math.Min(x1 - 1.001, Math.Max(x0, sx - 0.5)), fy = Math.Min(y1 - 1.001, Math.Max(y0, sy - 0.5));
+                    int ix = (int)fx, iy = (int)fy; float tx = (float)(fx - ix), ty = (float)(fy - iy);
+                    int i00 = (iy * CW + ix) * 4, i01 = i00 + 4, i10 = i00 + CW * 4, i11 = i10 + 4, di = (Y * CW + X) * 4;
+                    float band = (float)RippleBand(d, r, w, a);
+                    for (int c = 0; c < 3; c++)
+                    {
+                        float v = (Lin.Of(srcI[i00 + c]) * (1 - tx) + Lin.Of(srcI[i01 + c]) * tx) * (1 - ty) + (Lin.Of(srcI[i10 + c]) * (1 - tx) + Lin.Of(srcI[i11 + c]) * tx) * ty;
+                        dst[di + c] = Lin.Byte(band + v * (1 - band));
+                    }
+                }
+            });
         }
     }
 
@@ -862,7 +958,8 @@ namespace ScreenRecorder
         public readonly StudioLook Look;
         public readonly StudioStyle St;
         public readonly Compositor Cpu;
-        readonly Sprite arrow = Sprites.Arrow(), ring = Sprites.Ring();
+        readonly Sprite arrow = Sprites.Arrow();
+        readonly Sprite ripple;   // 这个样式的波纹底图（玻璃波纹没有）
         readonly Dictionary<int, Sprite> art = new Dictionary<int, Sprite>();
 
         public StudioScene(string dir, Track track, StudioLook look, StudioStyle st, Func<string, CursorShape, double, Sprite> loadCursor = null, Func<string, int, int, byte[]> loadImage = null, StudioLayout layout = null)
@@ -870,6 +967,7 @@ namespace ScreenRecorder
             Track = track; Look = look; St = st;
             Lay = layout ?? new StudioLayout(track, look);
             Cpu = new Compositor(Lay, look, loadImage);
+            ripple = look.RippleStyle == "glass" ? null : Sprites.Ripple(look.RippleStyle, look.RippleWidth);
             for (int i = 0; i < track.Cursors.Count; i++)
             {
                 var c = track.Cursors[i];
@@ -886,15 +984,38 @@ namespace ScreenRecorder
         {
             double t = i / (double)St.Fps, ppp = Track.PixelsPerPoint;
             var ov = new List<Compositor.Overlay>();
-            // 点击波纹：0.5 秒内从 6 点扩到 28 点、渐渐淡掉
+            // 点击波纹（照 Mac 版）：u = 经过时间 / 时长，e = 1 − (1 − u)³；每种 (从多大扩到多大（点）, 透明度)，double 是两圈错开 0.15 秒
             if (Look.Ripple)
+            {
+                string style = Look.RippleStyle;
+                double dur = style == "focus" ? 0.7 : style == "double" ? 0.65 : style == "glass" ? 0.6 : 0.5, kp = ppp * Look.CursorScale / 1.5;
                 foreach (var c in Track.Clicks)
-                    if (t >= c[0] && t < c[0] + 0.5)
+                    if (t >= c[0] && t < c[0] + dur)
                     {
-                        double u = (t - c[0]) / 0.5, e = 1 - Math.Pow(1 - u, 3);
-                        double rr = (6 + 22 * e) * ppp * Look.CursorScale / 1.5;
-                        ov.Add(new Compositor.Overlay { S = ring, X = c[1], Y = c[2], K = rr / 52, Alpha = 1 - u });
+                        double u = (t - c[0]) / dur, e = 1 - Math.Pow(1 - u, 3);
+                        if (style == "glass")
+                        {
+                            // 玻璃波纹：一圈折射波往外扩、慢慢变弱（没有边线），r = (6 + 38e)k、宽 (10 − 3u)k、强度 1 − u
+                            ov.Add(new Compositor.Overlay { X = c[1], Y = c[2], WarpR = (6 + 38 * e) * kp, WarpW = (10 - 3 * u) * kp, Alpha = 1 - u });
+                            continue;
+                        }
+                        var layers = new List<(double r, double a)>();
+                        switch (style)
+                        {
+                            case "double":
+                                layers.Add((6 + 24 * e, 1 - u));
+                                double u2 = Math.Max(0, (t - c[0] - 0.15) / (dur - 0.15)), e2 = 1 - Math.Pow(1 - u2, 3);
+                                if (u2 > 0) layers.Add((6 + 24 * e2, 1 - u2));
+                                break;
+                            case "pulse": layers.Add((10 + 14 * e, (1 - u) * 0.9)); break;
+                            case "glow": layers.Add((14 + 16 * e, (1 - u) * 0.85)); break;
+                            case "focus": layers.Add((46 - 30 * e, Math.Min(1, u * 4) * (1 - u))); break;   // 从大往点击处收
+                            default: layers.Add((6 + 22 * e, 1 - u)); break;
+                        }
+                        foreach (var (rad, al) in layers)
+                            ov.Add(new Compositor.Overlay { S = ripple, X = c[1], Y = c[2], K = rad * kp / 52, Alpha = al });
                     }
+            }
             if (f.shape >= 0 && f.alpha > 0.002)
             {
                 var sp = art.TryGetValue(f.shape, out var a) ? a : arrow;

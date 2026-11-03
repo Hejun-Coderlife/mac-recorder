@@ -18,8 +18,12 @@ namespace ScreenRecorder
 {
     static class SelfTestRef
     {
-        // 每张图允许的差（整幅平均、最差的一格）；字体（苹方 / 微软雅黑）和编码的差都在里面。算法改了、差超过这个就失败
-        public const double MaxMean = 6, MaxCell = 60, MaxGpuMean = 1.5, MaxGpuCell = 12;
+        // 每张图允许的差（整幅平均、最差的一格），按类定：字体（苹方 / 微软雅黑）和解码的差都在里面，画错了（没画、样式不对）会超。
+        // 2026-11-03 实测：波纹 3.3 / 11.8（没画波纹时 ≥ 20）、遮挡和形状 ≤ 3.4 / 13.4、文字标签 5.95 / 42.5、字幕 ≤ 4.7 / 79（全是字形差）
+        public static (double mean, double cell) Limit(string png) =>
+            png.StartsWith("ripple-") ? (4, 16) : png.StartsWith("caption-") ? (6, 90) : png.Contains("text-labels") ? (7, 55) : (4.5, 20);
+        // 显卡对 CPU：显卡版输出 NV12（色度一半分辨率），本来就差约 2.8 / 9.9
+        public const double MaxGpuMean = 3.5, MaxGpuCell = 12;
 
         public static int Run()
         {
@@ -53,7 +57,8 @@ namespace ScreenRecorder
                     StudioStill.Render(dir, t, wp, "cpu", 1920, CursorTracker.LoadCursor);
                     double cpuS = sw.Elapsed.TotalSeconds;
                     var (mean, cell) = Diff(mp, wp);
-                    bool pass = mean <= MaxMean && cell <= MaxCell;
+                    var (lm, lc) = Limit(png);
+                    bool pass = mean <= lm && cell <= lc;
                     string g = "";
                     if (gpu)
                     {

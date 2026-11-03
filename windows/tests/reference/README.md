@@ -62,4 +62,5 @@
 
 - 字体不同（Mac 苹方 / Windows 微软雅黑），字形对不上是正常的；比的是**样式**：底的形状、颜色、透明度、阴影、折射位置和强弱、线条粗细、动画到这一刻该多大
 - 每张都出一张「左 Mac | 右 Windows」并排图给用户看；也可以算一下差值，但最后以人眼为准
-- Windows 渲染的图放 `win/`，文件名和 `mac/` 一样；`win/` 和并排图要不要进仓库问用户
+- Windows 渲染的图放 `win/`，文件名和 `mac/` 一样；`win/` 和并排图不进仓库（`.gitignore`），GitHub Actions 的「W6 - 画面对照」一步把它们打包成附件 `reftest-mac-vs-windows`（`win/`、显卡版 `gpu/`、并排图 `side/`、差值 `ref_test.txt`）
+- 本机跑：`REFTEST=这个目录 STUDIO_COMPOSE=gpu 录屏.exe`，结果在 `%TEMP%ef_test.txt`，每张按类有差值门槛（`SelfTestRef.Limit`）

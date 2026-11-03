@@ -31,6 +31,7 @@ Texture2D<float> yT : register(t2);
 Texture2D<float2> uvT : register(t3);
 Texture2D<float4> spT : register(t4);
 Texture2D<float4> compT : register(t5);
+Texture2D<float4> warpT : register(t6);   // 玻璃波纹：弯折前那张画面的副本
 SamplerState lin : register(s0);    // 双线性、边缘外取边缘
 SamplerState linB : register(s1);   // 双线性、边缘外透明
 
@@ -77,14 +78,41 @@ float4 PSMain(float4 pos : SV_Position) : SV_Target
     return float4(lerp(bg, SrcAt(uv), saturate(cov)), 1);
 }
 
-// 波纹、鼠标：预乘透明，叠上去（同 CPU 版 Compositor.Draw）
+float3 ToLin(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
+float3 ToSrgb(float3 c) { c = saturate(c); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1 / 2.4) - 0.055; }
+
+// 波纹、鼠标：预乘透明，在线性光里叠上去（画到 sRGB 的写入口，显卡自己换算；同 CPU 版 Compositor.Draw、Mac 版 Core Image）
 float4 PSOverlay(float4 pos : SV_Position) : SV_Target
 {
     float u = (pos.x - ov.x) / ov.z + ovs.z;
     float v = (pos.y - ov.y) / ov.z + ovs.w;
-    float4 c = spT.Sample(linB, float2(u / ovs.x, v / ovs.y)) * ov.w;
-    if (c.a <= 0.001) discard;
-    return c;
+    float4 c = spT.Sample(linB, float2(u / ovs.x, v / ovs.y));
+    if (c.a <= 0.0005) discard;
+    float a = c.a * ov.w;
+    return float4(ToLin(saturate(c.rgb / c.a)) * a, a);
+}
+
+// 玻璃波纹（同 CPU 版 Compositor.RippleMap / RippleBand）：ov.xy = 圆心（画布像素），ovs.xyz = 半径 r、宽 w、强度 a
+float2 Bump(float2 q, float2 cc, float R, float scale)
+{
+    float2 d = q - cc; float l = length(d);
+    if (l >= R || R <= 0) return q;
+    float p = 1 - (1 - l / R) * scale;
+    return cc + d * p * p;
+}
+float3 LoadLin(int2 p) { return ToLin(warpT.Load(int3(clamp(p, int2(0, 0), int2(canvas) - 1), 0)).rgb); }
+float4 PSWarp(float4 pos : SV_Position) : SV_Target
+{
+    float2 cc = ov.xy; float r = ovs.x, w = ovs.y, a = ovs.z;
+    float d = distance(pos.xy, cc);
+    if (d >= r + w) discard;
+    float2 q = Bump(pos.xy, cc, max(1, r - w), -0.45 * a);
+    q = Bump(q, cc, r + w, 0.55 * a);
+    // 双线性取样，在线性光里插值
+    float2 f = q - 0.5; int2 i = int2(floor(f)); float2 t = f - i;
+    float3 v = lerp(lerp(LoadLin(i), LoadLin(i + int2(1, 0)), t.x), lerp(LoadLin(i + int2(0, 1)), LoadLin(i + int2(1, 1)), t.x), t.y);
+    float band = saturate(d < r ? (d - (r - w)) / w : 1 - (d - r) / w) * 0.16 * a;
+    return float4(ToSrgb(band + v * (1 - band)), 1);
 }
 
 // 运动模糊：把这一张按权重（p0）加进累加贴图
@@ -132,13 +160,13 @@ float2 PSUV(float4 pos : SV_Position) : SV_Target
         readonly ID3D11Device dev;
         readonly ID3D11DeviceContext ctx;
         readonly ID3D11VertexShader vsFull, vsQuad;
-        readonly ID3D11PixelShader psMain, psOverlay, psY, psUV, psAcc;
+        readonly ID3D11PixelShader psMain, psOverlay, psY, psUV, psAcc, psWarp;
         readonly ID3D11SamplerState sLin, sBorder;
         readonly ID3D11BlendState opaque, premul, additive;
         readonly ID3D11Buffer cb;
-        readonly ID3D11Texture2D bgTex, srcTex, yTex, uvTex, compTex, accTex, yOut, uvOut, yStage, uvStage;
-        readonly ID3D11ShaderResourceView bgSrv, srcSrv, ySrv, uvSrv, compSrv, accSrv;
-        readonly ID3D11RenderTargetView compRtv, accRtv, yRtv, uvRtv;
+        readonly ID3D11Texture2D bgTex, srcTex, yTex, uvTex, compTex, accTex, yOut, uvOut, yStage, uvStage, warpTex;
+        readonly ID3D11ShaderResourceView bgSrv, srcSrv, ySrv, uvSrv, compSrv, accSrv, warpSrv;
+        readonly ID3D11RenderTargetView compRtv, compRtvSrgb, accRtv, yRtv, uvRtv;
         readonly Dictionary<Sprite, (ID3D11Texture2D tex, ID3D11ShaderResourceView srv)> sprites = new Dictionary<Sprite, (ID3D11Texture2D, ID3D11ShaderResourceView)>();
         Consts c;
 
@@ -188,6 +216,7 @@ float2 PSUV(float4 pos : SV_Position) : SV_Target
             psY = dev.CreatePixelShader(Compile("PSY", "ps_4_0"));
             psUV = dev.CreatePixelShader(Compile("PSUV", "ps_4_0"));
             psAcc = dev.CreatePixelShader(Compile("PSAcc", "ps_4_0"));
+            psWarp = dev.CreatePixelShader(Compile("PSWarp", "ps_4_0"));
 
             sLin = dev.CreateSamplerState(new SamplerDescription(Filter.MinMagMipLinear, TextureAddressMode.Clamp, TextureAddressMode.Clamp, TextureAddressMode.Clamp, 0, 1, ComparisonFunction.Never, 0, 0));
             var transparent = new Color4(0, 0, 0, 0);
@@ -217,8 +246,13 @@ float2 PSUV(float4 pos : SV_Position) : SV_Target
                 uvTex = Tex(Format.R8G8_UNorm, W / 2, H / 2, BindFlags.ShaderResource); uvSrv = dev.CreateShaderResourceView(uvTex, null);
             }
             else { srcTex = Tex(Format.B8G8R8A8_UNorm, W, H, BindFlags.ShaderResource); srcSrv = dev.CreateShaderResourceView(srcTex, null); }
-            compTex = Tex(Format.R8G8B8A8_UNorm, CW, CH, BindFlags.ShaderResource | BindFlags.RenderTarget);
-            compSrv = dev.CreateShaderResourceView(compTex, null); compRtv = dev.CreateRenderTargetView(compTex, null);
+            // 画布：无类型格式，两个写入口——底图按 sRGB 数值写（UNorm）；波纹、鼠标走 UNorm_SRgb，显卡在线性光里叠（同 Core Image）
+            compTex = Tex(Format.R8G8B8A8_Typeless, CW, CH, BindFlags.ShaderResource | BindFlags.RenderTarget);
+            compSrv = dev.CreateShaderResourceView(compTex, new ShaderResourceViewDescription(compTex, ShaderResourceViewDimension.Texture2D, Format.R8G8B8A8_UNorm));
+            compRtv = dev.CreateRenderTargetView(compTex, new RenderTargetViewDescription(compTex, RenderTargetViewDimension.Texture2D, Format.R8G8B8A8_UNorm));
+            compRtvSrgb = dev.CreateRenderTargetView(compTex, new RenderTargetViewDescription(compTex, RenderTargetViewDimension.Texture2D, Format.R8G8B8A8_UNorm_SRgb));
+            warpTex = Tex(Format.R8G8B8A8_Typeless, CW, CH, BindFlags.ShaderResource);
+            warpSrv = dev.CreateShaderResourceView(warpTex, new ShaderResourceViewDescription(warpTex, ShaderResourceViewDimension.Texture2D, Format.R8G8B8A8_UNorm));
             // 运动模糊的累加贴图（半精度浮点，几张平均不掉精度）
             accTex = Tex(Format.R16G16B16A16_Float, CW, CH, BindFlags.ShaderResource | BindFlags.RenderTarget);
             accSrv = dev.CreateShaderResourceView(accTex, null); accRtv = dev.CreateRenderTargetView(accTex, null);
@@ -335,12 +369,31 @@ float2 PSUV(float4 pos : SV_Position) : SV_Target
             // 波纹、鼠标（坐标换算同 CPU 版 Compositor.Draw）
             if (overlays != null && overlays.Count > 0)
             {
-                ctx.OMSetBlendState(premul);
-                ctx.VSSetShader(vsQuad); ctx.PSSetShader(psOverlay);
                 double z = f.z, sy = L.ch - f.sy, s = L.s;
                 foreach (var o in overlays)
                 {
                     var sp = o.S;
+                    if (sp == null)
+                    {
+                        // 玻璃波纹：先把这时的画面复制一份，再从副本里按弯折后的位置取样
+                        if (o.Alpha <= 0.01 || o.WarpR * s * z <= 1) continue;
+                        ctx.OMSetRenderTargets((ID3D11RenderTargetView)null, null);
+                        ctx.CopyResource(warpTex, compTex);
+                        ctx.OMSetRenderTargets(compRtv, null);
+                        ctx.OMSetBlendState(opaque);
+                        c.ox = (float)((c.cardL + o.X * s - f.sx) * z + CW / 2.0);
+                        c.oy = (float)((c.cardT + o.Y * s - sy) * z + CH / 2.0);
+                        c.sw = (float)(o.WarpR * s * z); c.sh = (float)(o.WarpW * s * z); c.hx = (float)o.Alpha; c.hy = 0;
+                        SetConsts();
+                        ctx.VSSetShader(vsFull); ctx.PSSetShader(psWarp);
+                        ctx.PSSetShaderResource(6, warpSrv);
+                        ctx.Draw(3, 0);
+                        ctx.PSSetShaderResource(6, null);
+                        continue;
+                    }
+                    ctx.OMSetRenderTargets(compRtvSrgb, null);
+                    ctx.OMSetBlendState(premul);
+                    ctx.VSSetShader(vsQuad); ctx.PSSetShader(psOverlay);
                     c.ox = (float)((c.cardL + o.X * s - f.sx) * z + CW / 2.0);
                     c.oy = (float)((c.cardT + o.Y * s - sy) * z + CH / 2.0);
                     c.ok = (float)(o.K * s * z); c.oa = (float)o.Alpha;
@@ -391,8 +444,8 @@ float2 PSUV(float4 pos : SV_Position) : SV_Target
         public void Dispose()
         {
             foreach (var e in sprites.Values) { e.srv.Dispose(); e.tex.Dispose(); }
-            foreach (var d in new IDisposable[] { bgSrv, srcSrv, ySrv, uvSrv, compSrv, accSrv, compRtv, accRtv, yRtv, uvRtv, bgTex, srcTex, yTex, uvTex, compTex, accTex, yOut, uvOut, yStage, uvStage,
-                                                  cb, opaque, premul, additive, sLin, sBorder, vsFull, vsQuad, psMain, psOverlay, psY, psUV, psAcc, ctx, dev })
+            foreach (var d in new IDisposable[] { bgSrv, srcSrv, ySrv, uvSrv, compSrv, accSrv, warpSrv, compRtv, compRtvSrgb, accRtv, yRtv, uvRtv, bgTex, srcTex, yTex, uvTex, compTex, accTex, warpTex, yOut, uvOut, yStage, uvStage,
+                                                  cb, opaque, premul, additive, sLin, sBorder, vsFull, vsQuad, psMain, psOverlay, psY, psUV, psAcc, psWarp, ctx, dev })
                 d?.Dispose();
         }
     }

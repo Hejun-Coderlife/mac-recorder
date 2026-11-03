@@ -251,7 +251,8 @@ namespace ScreenRecorder
                     r.Check("zoomed mosaic: region changed", c3.InMean > 6, $"mean diff {c3.InMean:0.0}");
                     r.Check("zoomed mosaic: outside unchanged", c3.OutFrac < 0.003, $"{c3.OutFrac:0.0000}");
                     // 格子落在纯色色带上时打码前后一样，所以只要求：变化都在预测框里、左边对得上、占了大半宽度
-                    r.Check("zoomed mosaic: changes are inside the zoomed box, left edge matches", c3.X0 >= rm.x0 - 8 && c3.X1 <= rm.x1 + 8 && c3.Y0 >= rm.y0 - 8 && c3.Y1 <= rm.y1 + 8 && Math.Abs(c3.X0 - rm.x0) < 8 && c3.X1 - c3.X0 > (rm.x1 - rm.x0) * 0.6,
+                    // 马赛克照 Mac 版取格子中心那一点（CIPixellate），边上的格子可能正好取到和原来一样的颜色，所以比中心，不比左边
+                    r.Check("zoomed mosaic: changes are inside the zoomed box, centred on it", c3.X0 >= rm.x0 - 8 && c3.X1 <= rm.x1 + 8 && c3.Y0 >= rm.y0 - 8 && c3.Y1 <= rm.y1 + 8 && Math.Abs((c3.X0 + c3.X1) / 2.0 - (rm.x0 + rm.x1) / 2) < 12 && c3.X1 - c3.X0 > (rm.x1 - rm.x0) * 0.6,
                         "actual " + Fb(c3) + " predicted " + Fr(rm));
                     // 框
                     var rr = Out(boxR, 4.0);
