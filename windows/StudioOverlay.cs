@@ -135,6 +135,8 @@ namespace ScreenRecorder
         public bool IsEmpty => reds.Count == 0 && anns.Count == 0;
         // 文字标注画成一张小图（预乘 BGRA，Ppp = 1：一个小图像素 = 一个原画面像素）；null = 不画字（Mac 上的核心自测）
         public static Func<Annotation, double, Sprite> TextRenderer = PlainText;
+        // 箭头、框、圈、高亮：Windows 程序用 GDI+ 照 Mac 版画（OverlayGdi.Shape：5 种箭头、虚线、弧线）；null = 下面的简化画法（Mac 上的核心自测）
+        public static Func<Annotation, double, int, int, double, (Sprite sp, int x0, int y0)> ShapeRenderer;
 
         public OverlayLayer(StudioProject p) { reds = p.Redactions.ToList(); anns = p.Annotations.ToList(); }
         public static OverlayLayer Make(StudioProject p) { var o = new OverlayLayer(p); return o.IsEmpty ? null : o; }
@@ -337,6 +339,7 @@ namespace ScreenRecorder
                 if (ts == null) return (null, 0, 0);
                 return (ts, (int)Math.Round(a.X * W) - (int)ts.HotX, (int)Math.Round(a.Y * H) - (int)ts.HotY);
             }
+            if (ShapeRenderer != null) return ShapeRenderer(a, t, W, H, unit);
             double ax = a.X * W, ay = a.Y * H, bx = (a.X + a.W) * W, by = (a.Y + a.H) * H;
             double minx = Math.Min(ax, bx), miny = Math.Min(ay, by), maxx = Math.Max(ax, bx), maxy = Math.Max(ay, by);
             double pad = lw * 4 + 4;

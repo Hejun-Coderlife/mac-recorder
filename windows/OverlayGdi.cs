@@ -140,6 +140,126 @@ namespace ScreenRecorder
             }
         }
 
+        // ---- 箭头、框、圈、高亮（照 Mac 版 draw() 的前几个 case）：画成一张小图，返回它左上角在原画面里的位置 ----
+        // lw = 线宽像素；圆头圆角；箭头 5 种：plain / double（两头都有头）/ curved（二次曲线往左鼓 22%、48 段）/ thick（杆 2.4 倍粗、平头、头更大）/
+        // dashed（虚线 [2.2, 1.8] 倍线宽）；头部在画到最后 40% 时长出来，杆子收到头部根部。影子：箭头往下 0.4lw、blur 1.2lw；框 / 圈往下 0.3lw、blur lw；黑 35%。
+        // 高亮：圆角 min(6 点, 半宽) 的色块，透明度 = opacity（默认 35%），没有影子；其他的透明度乘在整张图上（同 c.setAlpha）
+        // 画完整的（箭头已经画出来、不在动）按样子缓存：预览拖动、播放、导出每帧只叠一次
+        static readonly Dictionary<string, (Sprite, int, int)> shapeCache = new Dictionary<string, (Sprite, int, int)>();
+        public static (Sprite sp, int x0, int y0) Shape(Annotation a, double t, int W, int H, double unit)
+        {
+            bool still = a.Kind != "arrow" || !a.DrawOn || OverlayAnim.DrawProgress(t, a.Start) >= 1;
+            string key = null;
+            if (still)
+            {
+                key = string.Join("|", a.Kind, a.X, a.Y, a.W, a.H, a.Width, a.Color.R, a.Color.G, a.Color.B, a.Arrow, a.Alpha, W, H, unit);
+                lock (shapeCache) if (shapeCache.TryGetValue(key, out var hit)) return hit;
+            }
+            var res = ShapeDraw(a, t, W, H, unit);
+            if (key != null) lock (shapeCache) { if (shapeCache.Count > 300) shapeCache.Clear(); shapeCache[key] = res; }
+            return res;
+        }
+
+        static (Sprite sp, int x0, int y0) ShapeDraw(Annotation a, double t, int W, int H, double unit)
+        {
+            double lw = Math.Max(1, a.Width * unit);
+            double ax = a.X * W, ay = a.Y * H, bx = (a.X + a.W) * W, by = (a.Y + a.H) * H;
+            double minx = Math.Min(ax, bx), miny = Math.Min(ay, by), maxx = Math.Max(ax, bx), maxy = Math.Max(ay, by);
+            string style = a.Arrow ?? "plain";
+            double pad = a.Kind == "arrow" ? lw * 6 : lw * 2;
+            double len = Math.Sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay));
+            // 弧形的控制点（左上原点：往「左」鼓 = 法线 (dy, −dx)）
+            double ctlx = (ax + bx) / 2, ctly = (ay + by) / 2;
+            if (len > 0) { ctlx += (by - ay) * 0.22; ctly += -(bx - ax) * 0.22; }
+            if (a.Kind == "arrow" && style == "curved" && len > 0) { minx = Math.Min(minx, ctlx); maxx = Math.Max(maxx, ctlx); miny = Math.Min(miny, ctly); maxy = Math.Max(maxy, ctly); }
+            int x0 = (int)Math.Floor(minx - pad), y0 = (int)Math.Floor(miny - pad), x1 = (int)Math.Ceiling(maxx + pad), y1 = (int)Math.Ceiling(maxy + pad);
+            int sw = x1 - x0, sh = y1 - y0;
+            if (sw < 2 || sh < 2 || (long)sw * sh > 40_000_000) return (null, 0, 0);
+            var o = new float[sw * sh * 4];
+            var col = Rgb(a.Color.R, a.Color.G, a.Color.B);
+            float ox = -x0, oy = -y0;
+            switch (a.Kind)
+            {
+                case "arrow":
+                {
+                    double u = a.DrawOn ? OverlayAnim.DrawProgress(t, a.Start) : 1;
+                    if (len <= 1) return (null, 0, 0);
+                    PointF At(double v)
+                    {
+                        if (style != "curved") return new PointF((float)(ax + (bx - ax) * v + ox), (float)(ay + (by - ay) * v + oy));
+                        double w = 1 - v;
+                        return new PointF((float)(w * w * ax + 2 * w * v * ctlx + v * v * bx + ox), (float)(w * w * ay + 2 * w * v * ctly + v * v * by + oy));
+                    }
+                    int steps = style == "curved" ? 48 : 1;
+                    var pts = new PointF[steps + 1];
+                    for (int i = 0; i <= steps; i++) pts[i] = At(i / (double)steps * u);
+                    bool thick = style == "thick";
+                    double head = Math.Min(len * 0.45, lw * (thick ? 6.0 : 4.2));
+                    double hs = head * Math.Min(1, Math.Max(0, (u - 0.6) / 0.4));
+                    float D(PointF p, PointF q) => (float)Math.Sqrt((p.X - q.X) * (p.X - q.X) + (p.Y - q.Y) * (p.Y - q.Y));
+                    var shaft = (PointF[])pts.Clone();
+                    PointF tip = pts[pts.Length - 1], prev = pts.Length > 2 ? pts[pts.Length - 3] : pts[0], p0 = pts[0];
+                    if (hs > 0.5 && D(tip, pts[0]) > head)
+                    {
+                        float d = D(tip, prev);
+                        if (d > 0) shaft[shaft.Length - 1] = new PointF((float)(tip.X - (tip.X - prev.X) / d * head * 0.6), (float)(tip.Y - (tip.Y - prev.Y) / d * head * 0.6));
+                    }
+                    if (style == "double" && hs > 0.5 && shaft.Length > 1)
+                    {
+                        var q = shaft[1]; float d = D(q, p0);
+                        if (d > 0) shaft[0] = new PointF((float)(p0.X + (q.X - p0.X) / d * head * 0.6), (float)(p0.Y + (q.Y - p0.Y) / d * head * 0.6));
+                    }
+                    PointF[] Head(PointF tp, PointF from, double size)
+                    {
+                        float d = D(tp, from);
+                        if (size <= 0.5 || d <= 0) return null;
+                        double dx = (tp.X - from.X) / d, dy = (tp.Y - from.Y) / d;
+                        double hx = tp.X - dx * size, hy = tp.Y - dy * size, wx = -dy * size * (thick ? 0.7 : 0.55), wy = dx * size * (thick ? 0.7 : 0.55);
+                        return new[] { tp, new PointF((float)(hx + wx), (float)(hy + wy)), new PointF((float)(hx - wx), (float)(hy - wy)) };
+                    }
+                    var h1 = Head(tip, prev, hs);
+                    var h2 = style == "double" && pts.Length > 1 ? Head(p0, pts[Math.Min(2, pts.Length - 1)], hs) : null;
+                    Shadowed(o, sw, sh, g =>
+                    {
+                        using (var pen = new Pen(col, (float)(thick ? lw * 2.4 : lw)))
+                        using (var b = new SolidBrush(col))
+                        {
+                            pen.LineJoin = LineJoin.Round;
+                            if (thick) { pen.StartCap = LineCap.Flat; pen.EndCap = LineCap.Flat; }
+                            else { pen.StartCap = LineCap.Round; pen.EndCap = LineCap.Round; }
+                            if (style == "dashed") { pen.DashCap = DashCap.Round; pen.DashPattern = new[] { 2.2f, 1.8f }; }
+                            if (shaft.Length == 2) g.DrawLine(pen, shaft[0], shaft[1]); else g.DrawLines(pen, shaft);
+                            if (h1 != null) g.FillPolygon(b, h1);
+                            if (h2 != null) g.FillPolygon(b, h2);
+                        }
+                    }, lw * 0.4, lw * 1.2, 0.35);
+                    break;
+                }
+                case "rect":
+                case "ellipse":
+                {
+                    var r = new RectangleF((float)(minx + ox), (float)(miny + oy), (float)(maxx - minx), (float)(maxy - miny));
+                    Shadowed(o, sw, sh, g =>
+                    {
+                        using (var pen = new Pen(col, (float)lw) { LineJoin = LineJoin.Round })
+                        {
+                            if (a.Kind == "rect") using (var p = Theme.Round(r, (float)Math.Min(lw * 1.5, Math.Min(r.Width, r.Height) / 2))) g.DrawPath(pen, p);
+                            else g.DrawEllipse(pen, r);
+                        }
+                    }, lw * 0.3, lw, 0.35);
+                    break;
+                }
+                default:   // highlight
+                {
+                    var r = new RectangleF((float)(minx + ox), (float)(miny + oy), (float)(maxx - minx), (float)(maxy - miny));
+                    Paint(o, sw, sh, g => { using (var p = Theme.Round(r, (float)Math.Min(6 * unit, Math.Min(r.Width, r.Height) / 2))) using (var b = new SolidBrush(Rgb(a.Color.R, a.Color.G, a.Color.B, a.Alpha))) g.FillPath(b, p); });
+                    break;
+                }
+            }
+            if (a.Kind != "highlight" && a.Alpha < 0.999) { float al = (float)a.Alpha; for (int i = 0; i < o.Length; i++) o[i] *= al; }
+            return (new Sprite { W = sw, H = sh, Px = o, Ppp = 1 }, x0, y0);
+        }
+
         // 画一层叠上去（sRGB 里「盖上去」，同 Core Graphics）
         static void Paint(float[] o, int W, int H, Action<Graphics> draw)
         {
@@ -158,8 +278,7 @@ namespace ScreenRecorder
             var layer = new float[W * H * 4];
             Over(layer, W, H, draw);
             var sh = new float[W * H];
-            int off = (int)Math.Round(dy);
-            for (int y = 0; y < H; y++) { int sy = y - off; if (sy < 0 || sy >= H) continue; for (int x = 0; x < W; x++) sh[y * W + x] = layer[(sy * W + x) * 4 + 3]; }
+            Over(null, W, H, draw, sh, 0, (float)dy);   // 影子：同一层往下挪 dy（可以是小数）再模糊
             Sprites.Blur(sh, W, H, blur / 2);
             var c = sc ?? Color.Black; float cb = c.B / 255f, cg = c.G / 255f, cr = c.R / 255f;
             for (int i = 0; i < W * H; i++)
