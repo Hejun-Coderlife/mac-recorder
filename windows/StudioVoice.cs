@@ -229,6 +229,111 @@ namespace ScreenRecorder
         public string AtSource(double s) => map.InCut(s) ? null : AtOut(map.Out(s));
     }
 
+    // ---- 字幕画到画布上（同 Mac 版 CaptionLayer）：预览、导出、GIF 共用；字幕图由 Windows 程序用 GDI+ 画（Renderer），按文字 + 样式缓存。
+    // 玻璃底：先把字幕后面那块画面做成透镜（和玻璃文字标签同一套 Glass.Lens），再叠上字幕图；都在线性光里叠（同 Core Image）。
+    // 没有 Renderer（Mac 上的 .NET 小工具）时导出照旧用 ASS ----
+    sealed class CaptionLayer
+    {
+        // 画一句字幕：返回预乘 BGRA 小图，HotX = HotY = 玻璃底四周给阴影留的边，BoxW / BoxH = 底条多大
+        public static Func<string, CaptionStyle, double, double, Sprite> Renderer;
+        readonly CaptionTrack track;
+        readonly CaptionStyle style;
+        readonly int cw, ch;
+        public CaptionLayer(CaptionTrack tr, CaptionStyle st, int cw, int ch) { track = tr; style = st; this.cw = cw; this.ch = ch; }
+        public static CaptionLayer Make(CaptionTrack tr, CaptionStyle st, int cw, int ch) => Renderer == null || tr == null || tr.IsEmpty ? null : new CaptionLayer(tr, st, cw, ch);
+
+        // 字幕图左上角放哪（左上原点）：拖过就按拖到的中心（Mac 版的 cx / cy）；不然水平居中，放底部时下沿离下边 edge（图高的 20% 伸到 edge 下面）
+        public (int x, int y) Place(double w, double h)
+        {
+            if (style.Extra.TryGetValue("cx", out var ox) && ox is double cx && style.Extra.TryGetValue("cy", out var oy) && oy is double cy)
+                return ((int)Math.Round(cx * cw - w / 2), (int)Math.Round(cy * ch - h / 2));
+            double e = style.Edge(cw, ch);
+            double yb = style.Position == "bottom" ? e - h * 0.2 : ch - e - h * 0.8;   // Mac：左下原点
+            return ((int)Math.Round((cw - w) / 2), (int)Math.Round(ch - Math.Round(yb) - h));
+        }
+
+        // outT = 成片时间；dst = 画布（BGRA 全范围，或 NV12 BT.709 有限范围——显卡版的输出）
+        public void Apply(byte[] dst, bool nv12, double outT)
+        {
+            var text = track.AtOut(outT);
+            if (string.IsNullOrEmpty(text)) return;
+            var sp = Renderer(text, style, cw, ch);
+            if (sp == null) return;
+            var (x0, y0) = Place(sp.W, sp.H);
+            if (!nv12) { Draw(dst, cw, ch, sp, x0, y0, 0, 0); return; }
+            // NV12：这一块（对齐到偶数）先转成 BGRA，照样画，再转回去
+            int rx = Math.Max(0, x0 & ~1), ry = Math.Max(0, y0 & ~1);
+            int rw = Math.Min(cw, (x0 + sp.W + 1) & ~1) - rx, rh = Math.Min(ch, (y0 + sp.H + 1) & ~1) - ry;
+            if (rw <= 0 || rh <= 0) return;
+            var tmp = Nv12.ToBgra(dst, cw, ch, rx, ry, rw, rh);
+            Draw(tmp, rw, rh, sp, x0 - rx, y0 - ry, rx, ry);
+            Nv12.FromBgra(tmp, rw, rh, dst, cw, ch, rx, ry);
+        }
+
+        void Draw(byte[] img, int W, int H, Sprite sp, int x0, int y0, int offX, int offY)
+        {
+            var area = Glass.Load(img, W, H, x0, y0, sp.W, sp.H);
+            if (style.Box == "glass" && sp.BoxW > 2)
+            {
+                int bx = x0 + (int)sp.HotX, by = y0 + (int)sp.HotY, bw = (int)Math.Round(sp.BoxW), bh = (int)Math.Round(sp.BoxH);
+                Glass.Lens(img, W, H, bx, by, bw, bh, bh / 2.0, 1, false, 1, area, x0, y0, sp.W, sp.H);
+            }
+            Glass.Composite(area, sp.W, sp.H, sp, 0, 0, 1);
+            Glass.Store(area, img, W, H, x0, y0, sp.W, sp.H);
+        }
+    }
+
+    // NV12（BT.709 有限范围）和 BGRA（全范围）互转一块：rx、ry、rw、rh 都是偶数
+    static class Nv12
+    {
+        public static byte[] ToBgra(byte[] nv, int w, int h, int rx, int ry, int rw, int rh)
+        {
+            var o = new byte[rw * rh * 4]; int uv = w * h;
+            System.Threading.Tasks.Parallel.For(0, rh, y =>
+            {
+                for (int x = 0; x < rw; x++)
+                {
+                    int X = rx + x, Y = ry + y;
+                    double Yv = (nv[Y * w + X] - 16) / 219.0;
+                    int c = uv + ((Y / 2) * (w / 2) + X / 2) * 2;
+                    double cb = (nv[c] - 128) / 224.0, cr = (nv[c + 1] - 128) / 224.0;
+                    double r = Yv + 1.5748 * cr, g = Yv - 0.187324 * cb - 0.468124 * cr, b = Yv + 1.8556 * cb;
+                    int i = (y * rw + x) * 4;
+                    o[i] = B(b); o[i + 1] = B(g); o[i + 2] = B(r); o[i + 3] = 255;
+                }
+            });
+            return o;
+        }
+        public static void FromBgra(byte[] bgra, int rw, int rh, byte[] nv, int w, int h, int rx, int ry)
+        {
+            int uv = w * h;
+            System.Threading.Tasks.Parallel.For(0, rh, y =>
+            {
+                for (int x = 0; x < rw; x++)
+                {
+                    int i = (y * rw + x) * 4; double b = bgra[i] / 255.0, g = bgra[i + 1] / 255.0, r = bgra[i + 2] / 255.0;
+                    nv[(ry + y) * w + rx + x] = B((16 + 219 * (0.2126 * r + 0.7152 * g + 0.0722 * b)) / 255);
+                }
+            });
+            System.Threading.Tasks.Parallel.For(0, rh / 2, yc =>
+            {
+                for (int xc = 0; xc < rw / 2; xc++)
+                {
+                    double su = 0, sv = 0;
+                    for (int dy = 0; dy < 2; dy++) for (int dx = 0; dx < 2; dx++)
+                        {
+                            int i = ((yc * 2 + dy) * rw + xc * 2 + dx) * 4; double b = bgra[i] / 255.0, g = bgra[i + 1] / 255.0, r = bgra[i + 2] / 255.0;
+                            double yy = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                            su += 128 + 224 * (b - yy) / 1.8556; sv += 128 + 224 * (r - yy) / 1.5748;
+                        }
+                    int d = uv + ((ry / 2 + yc) * (w / 2) + rx / 2 + xc) * 2;
+                    nv[d] = B(su / 4 / 255); nv[d + 1] = B(sv / 4 / 255);
+                }
+            });
+        }
+        static byte B(double v) => (byte)Math.Max(0, Math.Min(255, Math.Round(v * 255)));
+    }
+
     // ---- 识别出的一个个字 → 一句句字幕：按标点、停顿断句，太长的按最大停顿拆，一次只显示一行（同 Mac 版 CaptionSplit） ----
     static class CaptionSplit
     {

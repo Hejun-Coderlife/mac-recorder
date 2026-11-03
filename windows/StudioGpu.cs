@@ -241,7 +241,9 @@ float2 PSUV(float4 pos : SV_Position) : SV_Target
 
         static byte[] Compile(string entry, string profile)
         {
-            var hr = Compiler.Compile(Hlsl, entry, "studio.hlsl", profile, out Blob blob, out Blob err);
+            // 中文注释先换成空格：源码按系统编码交给编译器，中文 Windows（GBK）上有的字第二个字节是「\」，注释会把下一行吞掉（整个显卡版编不过、悄悄回到 CPU）
+            string src = System.Text.RegularExpressions.Regex.Replace(Hlsl, @"[^\x00-\x7F]", " ");
+            var hr = Compiler.Compile(src, entry, "studio.hlsl", profile, out Blob blob, out Blob err);
             if (hr.Failure || blob == null) throw new Exception("shader " + entry + ": " + (err != null ? Marshal.PtrToStringAnsi(err.BufferPointer) : hr.ToString()));
             var bytes = blob.AsBytes(); blob.Dispose(); err?.Dispose();
             return bytes;

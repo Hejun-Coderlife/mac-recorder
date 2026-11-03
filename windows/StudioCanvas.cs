@@ -471,6 +471,7 @@ namespace ScreenRecorder
         public readonly int CW, CH;
         public readonly CameraLayer Camera;
         public readonly KeyLayer Keys;
+        public CaptionLayer Captions;         // 字幕（叠在摄像头上面、键帽下面，同 Mac 版）
         readonly byte[] plainBgra;            // 不带卡片阴影的背景（分屏时屏幕画面缩小，露出来的地方）
         byte[] plainNv12, tmp;
         readonly bool ownsCamera = true;
@@ -484,8 +485,9 @@ namespace ScreenRecorder
         {
             var keys = KeyLayer.Make(track, p, map, cw, ch, captionsShown);
             var cam = CameraLayer.Make(dir, track, p, cw, ch);
-            if (keys == null && cam == null) return null;
-            return new Canvas(cw, ch, cam, keys, cam != null ? plainBackground?.Invoke() : null);
+            var caps = CaptionLayer.Make(new CaptionTrack(p.Captions, p.CaptionStyle.Show, map, p.TrimStart, p.TrimEnd), p.CaptionStyle, cw, ch);
+            if (keys == null && cam == null && caps == null) return null;
+            return new Canvas(cw, ch, cam, keys, cam != null ? plainBackground?.Invoke() : null) { Captions = caps };
         }
 
         // dst：合成好的画布（BGRA 或 NV12）；srcT = 这一帧在素材里的时间，outT = 成片时间（键帽按成片时间）
@@ -502,6 +504,7 @@ namespace ScreenRecorder
                     if (cam != null) { var card = Camera.Card(g, cam, fw, fh); if (card != null) Blend(dst, nv12, card, g.Alpha); }
                 }
             }
+            Captions?.Apply(dst, nv12, outT);
             if (Keys != null)
             {
                 var l = Keys.LayerAt(outT, out double a);

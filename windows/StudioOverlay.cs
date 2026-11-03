@@ -64,6 +64,19 @@ namespace ScreenRecorder
         public Dictionary<string, object> Extra = new Dictionary<string, object>();
         static readonly string[] Known = { "id", "start", "end", "kind", "x", "y", "w", "h", "color", "width", "text", "fontSize", "pill", "drawOn" };
 
+        public static readonly string[] TextLooks = { "pill", "glass", "glassDark", "dark", "gradient", "outline", "sticker", "bubble", "neon", "marker", "plain" };
+        public static readonly string[] ArrowStyles = { "plain", "double", "curved", "thick", "dashed" };
+        // Mac 版后加的可选字段：没有 = 旧行为。放在 Extra 里（原样存回），这里只是按名字读写
+        public string TextStyle { get => ExtraStr("textStyle", TextLooks); set => SetExtra("textStyle", value); }   // 文字标签样式
+        public string Arrow { get => ExtraStr("arrow", ArrowStyles); set => SetExtra("arrow", value); }            // 箭头样式
+        public bool? Oval { get => Extra.TryGetValue("oval", out var v) && v is bool b ? b : (bool?)null; set => SetExtra("oval", value); }   // 圈：true = 椭圆；没有 = 正圆
+        public double? Opacity { get => Extra.TryGetValue("opacity", out var v) && v is double d ? d : (double?)null; set => SetExtra("opacity", value); }
+        public string TextLook => TextStyle ?? (Pill ? "pill" : "plain");
+        // 不透明度：没有 = 高亮 35%、其他 100%（同 Mac 版 alpha）
+        public double Alpha => Math.Min(Math.Max(Opacity ?? (Kind == "highlight" ? 0.35 : 1), 0.05), 1);
+        string ExtraStr(string k, string[] allowed) => Extra.TryGetValue(k, out var v) && v is string s && allowed.Contains(s) ? s : null;
+        void SetExtra(string k, object v) { if (v == null) Extra.Remove(k); else Extra[k] = v; }
+
         public Annotation Clone() { var c = (Annotation)MemberwiseClone(); c.Extra = new Dictionary<string, object>(Extra); return c; }
         public void Write(JsonW w)
         {
@@ -133,7 +146,17 @@ namespace ScreenRecorder
                 double al = OverlayAnim.Alpha(t, a.Start, a.End);
                 if (al <= 0.002) continue;
                 var (sp, x0, y0) = Draw(a, t, W, H, unit);
-                if (sp != null) Blend(dst, W, H, sp, x0, y0, al);
+                if (sp == null) continue;
+                // 玻璃标签：先把标签后面那块画面做成透镜，再叠上体积感和字（同 Mac 版 glass()）
+                // 同 Mac 版：都在线性光里叠
+                var area = Glass.Load(dst, W, H, x0, y0, sp.W, sp.H);
+                if (a.Kind == "text" && (a.TextLook == "glass" || a.TextLook == "glassDark") && sp.BoxW > 2)
+                {
+                    int bx = x0 + (int)sp.HotX, by = y0 + (int)sp.HotY;
+                    Glass.Lens(dst, W, H, bx, by, (int)Math.Ceiling(sp.BoxW), (int)Math.Ceiling(sp.BoxH), Math.Ceiling(sp.BoxH) / 2, 1, a.TextLook == "glassDark", al, area, x0, y0, sp.W, sp.H);
+                }
+                Glass.Composite(area, sp.W, sp.H, sp, 0, 0, al);
+                Glass.Store(area, dst, W, H, x0, y0, sp.W, sp.H);
             }
             return true;
         }
@@ -220,7 +243,7 @@ namespace ScreenRecorder
             {
                 var ts = TextRenderer?.Invoke(a, unit);
                 if (ts == null) return (null, 0, 0);
-                return (ts, (int)Math.Round(a.X * W), (int)Math.Round(a.Y * H));
+                return (ts, (int)Math.Round(a.X * W) - (int)ts.HotX, (int)Math.Round(a.Y * H) - (int)ts.HotY);
             }
             double ax = a.X * W, ay = a.Y * H, bx = (a.X + a.W) * W, by = (a.Y + a.H) * H;
             double minx = Math.Min(ax, bx), miny = Math.Min(ay, by), maxx = Math.Max(ax, bx), maxy = Math.Max(ay, by);
@@ -367,7 +390,7 @@ namespace ScreenRecorder
             if (a.Kind == "text")
             {
                 var ts = TextRenderer?.Invoke(a, unit);
-                double tw = ts?.W ?? a.FontSize * unit * Math.Max(1, (a.Text ?? "").Length), th = ts?.H ?? a.FontSize * unit * 1.4;
+                double tw = ts != null ? (ts.BoxW > 0 ? ts.BoxW : ts.W) : a.FontSize * unit * Math.Max(1, (a.Text ?? "").Length), th = ts != null ? (ts.BoxH > 0 ? ts.BoxH : ts.H) : a.FontSize * unit * 1.4;
                 return (a.X, a.Y, tw / W, th / H);
             }
             return (Math.Min(a.X, a.X + a.W), Math.Min(a.Y, a.Y + a.H), Math.Abs(a.W), Math.Abs(a.H));

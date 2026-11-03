@@ -561,7 +561,6 @@ namespace ScreenRecorder
             var bd = bmp.LockBits(new Rectangle(0, 0, CW, CH), ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
             for (int y = 0; y < CH; y++) Marshal.Copy(dst, y * CW * 4, bd.Scan0 + y * bd.Stride, CW * 4);
             bmp.UnlockBits(bd);
-            DrawCaption(bmp, t);
             if (InvokeRequired) { try { BeginInvoke((Action)(() => SetShown(bmp))); } catch { bmp.Dispose(); } }
             else SetShown(bmp);
         }

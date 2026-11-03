@@ -91,6 +91,8 @@ namespace ScreenRecorder
             Studio.GpuFactory = (lay, cpu, info) => GpuComposer.TryCreate(lay, cpu, info, Environment.GetEnvironmentVariable("STUDIO_COMPOSE") == "gpu");
             KeyLayer.Renderer = KeyCapsGdi.Render;   // 键帽用 GDI+ 画真字
             OverlayLayer.TextRenderer = OverlayGdi.Text;   // 文字标注也是
+            CaptionLayer.Renderer = OverlayGdi.Caption;    // 字幕也是（预览、导出同一套，玻璃底要用）
+            if (Environment.GetEnvironmentVariable("REFTEST") != null) return SelfTestRef.Run();
             if (Environment.GetEnvironmentVariable("W5TEST") != null) return SelfTestW5.Run();
             if (Environment.GetEnvironmentVariable("W4TEST") != null) return SelfTestW4.Run();
             if (Environment.GetEnvironmentVariable("STUDIO") != null) return SelfTest.RenderOnly();

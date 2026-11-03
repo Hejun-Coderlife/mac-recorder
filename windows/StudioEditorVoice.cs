@@ -351,53 +351,5 @@ namespace ScreenRecorder
                     catch (Exception e) { exportStatus.Text = e.Message; }
                 }
         }
-
-        // ---- 预览上画字幕（成片里是 ffmpeg 的 ass 滤镜烧进去的；这里用 GDI+ 照同样的位置、字号、描边、底色条画） ----
-        static readonly string CaptionFont = new InstalledFontCollection().Families.Any(f => f.Name == "Microsoft YaHei") ? "Microsoft YaHei" : SystemFonts.MessageBoxFont.FontFamily.Name;
-        void DrawCaption(Bitmap bmp, double t)
-        {
-            var p = Project;
-            if (p.Captions.Count == 0 || !p.CaptionStyle.Show) return;
-            var text = new CaptionTrack(p.Captions, true, new TimeMap(p), p.TrimStart, p.TrimEnd).AtSource(t);
-            if (string.IsNullOrEmpty(text)) return;
-            var st = p.CaptionStyle;
-            int cw = bmp.Width, ch = bmp.Height;
-            float px = (float)st.FontPx(cw, ch), edge = (float)st.Edge(cw, ch);
-            bool box = st.Box != "none";
-            using (var g = Graphics.FromImage(bmp))
-            using (var fam = new FontFamily(CaptionFont))
-            {
-                g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-                var style = st.Weight == "regular" ? FontStyle.Regular : FontStyle.Bold;
-                var fmt = StringFormat.GenericTypographic;
-                // 太长就缩小字号放进 90% 宽
-                float padK = box ? 0.55f : 0.25f;
-                SizeF sz;
-                using (var f0 = new Font(fam, px, style, GraphicsUnit.Pixel)) sz = g.MeasureString(text, f0, int.MaxValue, fmt);
-                if (sz.Width + 2 * padK * px > cw * 0.9f) { px *= cw * 0.9f / (sz.Width + 2 * padK * px); }
-                using (var f = new Font(fam, px, style, GraphicsUnit.Pixel))
-                {
-                    sz = g.MeasureString(text, f, int.MaxValue, fmt);
-                    float padX = px * padK, padY = px * (box ? 0.28f : 0.22f);
-                    float w = sz.Width + padX * 2, h = sz.Height + padY * 2;
-                    float x = (cw - w) / 2, y = st.Position == "top" ? edge - h * 0.2f : ch - edge - h * 0.8f;
-                    if (box)
-                        using (var path = Theme.Round(new RectangleF(x, y, w, h), px * 0.28f))
-                        using (var b = new SolidBrush(st.Box == "dark" ? Color.FromArgb(153, 0, 0, 0) : Color.FromArgb(224, 255, 255, 255))) g.FillPath(b, path);
-                    using (var path = new GraphicsPath())
-                    {
-                        path.AddString(text, fam, (int)style, px, new PointF(x + padX, y + padY), fmt);
-                        if (st.Shadow && !box)
-                            using (var sh = (GraphicsPath)path.Clone())
-                            using (var sb = new SolidBrush(Color.FromArgb(140, 0, 0, 0)))
-                            { var mx = new Matrix(); mx.Translate(0, px * 0.05f); sh.Transform(mx); g.FillPath(sb, sh); }
-                        if (st.Outline && !box)
-                            using (var pen = new Pen(Color.FromArgb(217, 0, 0, 0), Math.Max(1, px * 0.12f)) { LineJoin = LineJoin.Round }) g.DrawPath(pen, path);
-                        var c = st.Color;
-                        using (var fill = new SolidBrush(Color.FromArgb((int)Math.Round(c.R * 255), (int)Math.Round(c.G * 255), (int)Math.Round(c.B * 255)))) g.FillPath(fill, path);
-                    }
-                }
-            }
-        }
     }
 }

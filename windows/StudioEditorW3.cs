@@ -32,9 +32,12 @@ namespace ScreenRecorder
             var p = Project;
             bool keys = p.Look.ShowKeys && Track.Shortcuts != null && Track.Shortcuts.Count > 0;
             bool cam = HasCamera && p.Camera != null && p.Camera.Show;
-            if (!keys && !cam) return;
             int CW = (int)sc.Lay.cw, CH = (int)sc.Lay.ch;
             var map = new TimeMap(p);
+            // 字幕：和导出同一套（CaptionLayer），玻璃底的透镜要拿到合成好的画布
+            var caps = CaptionLayer.Make(new CaptionTrack(p.Captions, p.CaptionStyle.Show, map, p.TrimStart, p.TrimEnd), p.CaptionStyle, CW, CH);
+            if (!keys && !cam && caps == null) return;
+            if (map.InCut(t)) caps = null;
             KeyLayer kl = keys ? KeyLayer.Make(Track, p, map, CW, CH, p.CaptionStyle.Show && p.Captions.Count > 0) : null;
             CameraLayer cl = null;
             if (cam)
@@ -44,6 +47,7 @@ namespace ScreenRecorder
                     if (camFrames != null) cl = new CameraLayer(p.Camera, p.Layouts, camFrames, Track.Camera.Offset, CW, CH);
                 }
             var canvas = Canvas.Shared(CW, CH, cl, kl, cl != null ? sc.Cpu.PlainBackground() : null);
+            canvas.Captions = caps;
             lock (camGate) canvas.Apply(dst, false, t, map.Out(t));
         }
 

@@ -459,6 +459,7 @@ namespace ScreenRecorder
         public int W, H;
         public float[] Px;                   // W*H*4，B G R A，预乘
         public double Ppp, HotX, HotY;
+        public double BoxW, BoxH;            // 文字标注：标签本身多大（小图四周还留了画阴影的边，HotX / HotY = 标签左上角在小图里的位置）
     }
 
     static class Sprites
@@ -1129,7 +1130,7 @@ namespace ScreenRecorder
             // 字幕：写一份 ASS（画布像素坐标、成片时间从开头算 0），编码前用 ass 滤镜烧进去
             string assFile = null, assF = "";
             var capTrack = new CaptionTrack(proj.Captions, proj.CaptionStyle.Show, map, proj.TrimStart, proj.TrimEnd);
-            if (!capTrack.IsEmpty)
+            if (!capTrack.IsEmpty && CaptionLayer.Renderer == null)   // Windows 程序：字幕在画布层里画（Canvas.Captions，同预览）；没有 GDI 的小工具才用 ASS
             {
                 string fontsDir = OperatingSystemIsWindows() ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Fonts") : "/System/Library/Fonts";
                 assFile = Path.Combine(Path.GetTempPath(), "studio-captions-" + Guid.NewGuid().ToString("N") + ".ass");
