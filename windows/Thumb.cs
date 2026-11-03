@@ -14,6 +14,7 @@ namespace ScreenRecorder
     // 截完 / 录完右下角浮出的缩略图（仿 macOS）：约 5 秒后自己消失，鼠标停在上面就不消失；
     // 拖出去 = 把文件拖进微信、资源管理器、剪辑软件；单击 = 用默认程序打开；悬停时右上角有 ×。
     // 截图：拖走了或点了 × 就不保存，没动它到时间 → 存到桌面。视频：本来就在桌面，× 只是关掉缩略图
+    // 往右划（跟 Mac 一样）：缩略图跟着手走，松手时划过 1/4 宽或甩得快 → 滑出去、截图马上存桌面；不够就弹回来
     sealed class Thumb : Form
     {
         public static readonly List<Thumb> Open = new List<Thumb>();
@@ -21,12 +22,14 @@ namespace ScreenRecorder
 
         public readonly Kind What;
         public string FilePath { get; private set; }     // 截图：先是临时文件，存到桌面后换成桌面路径
-        public string Outcome { get; private set; }      // 自测看结果：saved / dragged / dismissed / opened
+        public string Outcome { get; private set; }      // 自测看结果：saved / swiped / dragged / dismissed / opened
         readonly Bitmap preview;
         readonly Bitmap dragBitmap;                      // 截图拖出去时顺带的位图（有的程序只认图片不认文件）
         readonly Timer life = new Timer(), anim = new Timer { Interval = 15 };
         bool hovering, closing;
-        Point downAt; bool down;
+        Point downAt, downScreen; bool down;
+        bool swiping; int swipeFromX, lastX; double vx;   // vx：往右的速度（像素 / 毫秒）
+        readonly Stopwatch swipeClock = new Stopwatch();
         int targetX, targetY, startX; int animStep;
         const int AnimSteps = 14;
 
@@ -151,7 +154,7 @@ namespace ScreenRecorder
             foreach (var t in Open) { if (t == this) break; y -= t.Height + m / 2; }
             targetX = wa.Right - m - Width; targetY = y - Height;
             if (first) { startX = wa.Right; Location = new Point(startX, targetY); animStep = 0; anim.Start(); }
-            else if (!anim.Enabled) Location = new Point(targetX, targetY);
+            else if (!anim.Enabled && !swiping) Location = new Point(targetX, targetY);
         }
 
         static void Reflow() { foreach (var t in Open.ToList()) if (!t.closing) t.Layout_(false); }
@@ -230,6 +233,48 @@ namespace ScreenRecorder
             else if (!hovering) life.Start();   // 拖到一半放回来了：接着计时
         }
 
+        // ---- 往右划 ----
+        void SwipeBegin()
+        {
+            swiping = true; life.Stop();
+            if (anim.Enabled) { anim.Stop(); Location = new Point(targetX, targetY); }   // 还在滑进来就直接到位
+            swipeFromX = targetX; lastX = Cursor.Position.X; vx = 0; swipeClock.Restart();
+            SwipeMove();
+        }
+
+        void SwipeMove()
+        {
+            int x = Cursor.Position.X;
+            double ms = swipeClock.Elapsed.TotalMilliseconds;
+            if (ms > 0) { vx = vx * 0.5 + (x - lastX) / ms * 0.5; lastX = x; swipeClock.Restart(); }
+            Location = new Point(swipeFromX + Math.Max(0, x - downScreen.X), targetY);   // 只能往右，往左最多回到原位
+        }
+
+        void SwipeEnd()
+        {
+            if (!swiping) return;
+            swiping = false;
+            if (swipeClock.Elapsed.TotalMilliseconds > 120) vx = 0;   // 停住一会儿再松手不算甩
+            int dist = Left - swipeFromX;
+            if (dist > Width / 4 || (vx > 0.5 && dist > 0))
+            {
+                if (What == Kind.Image) SaveToDesktop();
+                Outcome = "swiped";
+                Leave_();   // 从当前位置接着滑出去
+            }
+            else
+            {
+                Location = new Point(targetX, targetY);
+                if (!hovering) life.Start();
+            }
+        }
+
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            if (swiping && MouseButtons != MouseButtons.Left) { down = false; SwipeEnd(); }   // 鼠标被别的抢走了也要收尾
+            base.OnMouseCaptureChanged(e);
+        }
+
         // ---- 鼠标 ----
         public Rectangle CloseBox
         {
@@ -247,24 +292,31 @@ namespace ScreenRecorder
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Left) { down = true; downAt = e.Location; }
+            if (e.Button == MouseButtons.Left) { down = true; downAt = e.Location; downScreen = Cursor.Position; }
             base.OnMouseDown(e);
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
             if (!hovering) { hovering = true; life.Stop(); Invalidate(); }
-            if (down && !closing)
+            if (swiping) SwipeMove();
+            else if (down && !closing)
             {
                 var d = SystemInformation.DragSize;
-                if (Math.Abs(e.X - downAt.X) > d.Width || Math.Abs(e.Y - downAt.Y) > d.Height) { down = false; DragOut(); }
+                int dx = e.X - downAt.X, dy = e.Y - downAt.Y;
+                if (Math.Abs(dx) > d.Width || Math.Abs(dy) > d.Height)
+                {
+                    if (dx > 0 && dx > Math.Abs(dy) * 1.2) SwipeBegin();   // 主要往右 = 划走；其它方向 = 拖文件
+                    else { down = false; DragOut(); }
+                }
             }
             base.OnMouseMove(e);
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
-            if (down && e.Button == MouseButtons.Left && !closing)
+            if (swiping && e.Button == MouseButtons.Left) { down = false; SwipeEnd(); }
+            else if (down && e.Button == MouseButtons.Left && !closing)
             {
                 down = false;
                 if (CloseBox.Contains(e.Location)) Dismiss(); else OpenIt();

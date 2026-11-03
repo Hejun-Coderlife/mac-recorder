@@ -212,6 +212,26 @@ namespace ScreenRecorder
                 Check(!File.Exists(Path.Combine(App.Desktop, Path.GetFileName(t3.FilePath))), "dragged shot not saved to Desktop");
                 drop.Close();
 
+                // 3b. 往右划：缩略图滑走，截图马上存到桌面（不用等时间到）
+                Thumb t4;
+                using (var bmp = Grab()) t4 = Shots.Deliver(bmp);
+                Pump(0.8);
+                var c4 = t4.PointToScreen(new System.Drawing.Point(t4.Width / 2, t4.Height / 2));
+                string tmp4 = t4.FilePath; int w4 = t4.Width;
+                var flick = new Thread(() =>
+                {
+                    Mouse.Move(c4.X, c4.Y); Thread.Sleep(150); Mouse.Down(); Thread.Sleep(80);
+                    for (int i = 1; i <= 8; i++) { Mouse.Move(c4.X + w4 * i / 12, c4.Y + i / 4); Thread.Sleep(12); }
+                    Mouse.Up();
+                }) { IsBackground = true };
+                flick.Start();
+                until = DateTime.Now.AddSeconds(1.2);   // 比停留时间（CI 里 1.5 秒）短：证明是划走的，不是到时间
+                while (!t4.IsDisposed && DateTime.Now < until) Pump(0.05);
+                Check(t4.IsDisposed && t4.Outcome == "swiped", $"swipe → {t4.Outcome} closed={t4.IsDisposed}");
+                Check(t4.FilePath.StartsWith(App.Desktop, StringComparison.OrdinalIgnoreCase) && File.Exists(t4.FilePath) && !File.Exists(tmp4), "swiped shot saved to Desktop: " + t4.FilePath);
+                if (File.Exists(t4.FilePath) && t4.FilePath.StartsWith(App.Desktop, StringComparison.OrdinalIgnoreCase)) File.Delete(t4.FilePath);
+                Mouse.Move(main.X + 20, main.Y + main.Height / 2); Pump(0.3);
+
                 // 4. 真拖一次选框（遮罩是真的弹出来）
                 System.Drawing.Bitmap picked = null; bool cancelled = false;
                 Shots.Start(b => picked = b);
