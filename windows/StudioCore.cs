@@ -2,7 +2,7 @@
 // 所以也能在 Mac 上用 .NET 8 跑（tools/StudioHarness）对着真素材调。
 // 和 Mac 版的区别：背景是纯白色（Mac 版透明）；出 H.264 mp4；读写视频交给同目录的 ffmpeg.exe（管道传 BGRA 原始帧）；
 // 合成默认走显卡（Windows 程序里的 StudioGpu.cs，D3D11），没有显卡时用这里的多线程逐像素算（双线性取样）；
-// 编码优先用显卡编码器（N 卡 / Intel / AMD / Windows 自带），都不行用 libx264。
+// 编码优先用显卡编码器（N 卡 / Intel / AMD / Windows 自带），都不行用 libx264（选了 HEVC：libx265）。
 // 轨迹文件 track.json 格式和 Mac 版一样，Mac 录的素材也能拿来生成。
 using System;
 using System.Collections.Concurrent;
@@ -1222,7 +1222,7 @@ namespace ScreenRecorder
 
             // 编码器：先挑能用的显卡编码器（N 卡 / Intel / AMD / Windows 自带），都不行用 libx264
             var sw0 = Stopwatch.StartNew();
-            string encoder = PickEncoder(log);
+            string encoder = PickEncoder(log, opt?.Hevc == true);
             bool hwdec = Environment.GetEnvironmentVariable("STUDIO_HWDEC") != "0" && HwDecodeWorks(raw);
             stats.ProbeSeconds = sw0.Elapsed.TotalSeconds;
             stats.Encoder = encoder; stats.HwDecode = hwdec;
@@ -1244,7 +1244,7 @@ namespace ScreenRecorder
             string lenS = len.ToString("0.######", CultureInfo.InvariantCulture);
             if (aud != null) log?.Invoke("audio graph: " + aud.Graph);
             string audio = aud == null ? "-map 0:v" : $"{aud.Inputs} -filter_complex \"{aud.Graph}\" -map 0:v -map \"[aout]\" -c:a aac -b:a 192k";
-            bool x264 = encoder == "libx264";
+            bool x264 = encoder == "libx264" || encoder == "libx265";   // CPU 编码器吃 yuv420p，显卡的吃 nv12
             string input = comp.Nv12Out
                 ? $"-f rawvideo -pix_fmt nv12 -s {CW}x{CH} -r {st.Fps} -color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709 -i pipe:0"
                 : $"-f rawvideo -pix_fmt bgra -s {CW}x{CH} -r {st.Fps} -i pipe:0";
@@ -1611,22 +1611,25 @@ namespace ScreenRecorder
 
         // ---- 编码器 ----
         static readonly string[] HwEncoders = { "h264_nvenc", "h264_qsv", "h264_amf", "h264_mf" };
-        static string pickedEncoder;
+        static readonly string[] HwHevcEncoders = { "hevc_nvenc", "hevc_qsv", "hevc_amf", "hevc_mf" };
+        static string pickedEncoder, pickedHevc;
 
-        // 按顺序真编一小段，能编的第一个就用（同一次运行里记住结果）
-        public static string PickEncoder(Action<string> log = null)
+        // 按顺序真编一小段，能编的第一个就用（同一次运行里记住结果）；hevc = 选了 HEVC
+        public static string PickEncoder(Action<string> log = null, bool hevc = false)
         {
-            var forced = Environment.GetEnvironmentVariable("STUDIO_ENCODER");
+            var forced = Environment.GetEnvironmentVariable(hevc ? "STUDIO_HEVC_ENCODER" : "STUDIO_ENCODER");
             if (!string.IsNullOrEmpty(forced)) return forced;
-            if (pickedEncoder != null) return pickedEncoder;
-            foreach (var e in HwEncoders)
+            if ((hevc ? pickedHevc : pickedEncoder) != null) return hevc ? pickedHevc : pickedEncoder;
+            string got = hevc ? "libx265" : "libx264";
+            foreach (var e in hevc ? HwHevcEncoders : HwEncoders)
             {
                 var sw = Stopwatch.StartNew();
                 bool ok = EncoderWorks(e);
                 log?.Invoke($"probe {e}: {(ok ? "ok" : "no")} ({sw.Elapsed.TotalSeconds:0.00}s)");
-                if (ok) return pickedEncoder = e;
+                if (ok) { got = e; break; }
             }
-            return pickedEncoder = "libx264";
+            if (hevc) pickedHevc = got; else pickedEncoder = got;
+            return got;
         }
 
         public static bool EncoderWorks(string encoder)
@@ -1648,6 +1651,13 @@ namespace ScreenRecorder
                 case "h264_qsv": return $"-c:v h264_qsv -preset faster {rc}";
                 case "h264_amf": return $"-c:v h264_amf -usage transcoding -quality balanced -rc vbr_peak {rc}";
                 case "h264_mf": return $"-c:v h264_mf -hw_encoding 1 -rate_control pc_vbr -b:v {rate} -g {fps * 2}";
+                // HEVC：同样的做法；-tag:v hvc1 让苹果的播放器、QuickTime 也认（同 Mac 版写出来的）
+                case "hevc_nvenc": return $"-c:v hevc_nvenc -preset p4 -rc vbr {rc} -tag:v hvc1";
+                case "hevc_qsv": return $"-c:v hevc_qsv -preset faster {rc} -tag:v hvc1";
+                case "hevc_amf": return $"-c:v hevc_amf -usage transcoding -quality balanced -rc vbr_peak {rc} -tag:v hvc1";
+                case "hevc_mf": return $"-c:v hevc_mf -hw_encoding 1 -rate_control pc_vbr -b:v {rate} -g {fps * 2} -tag:v hvc1";
+                // x265 比 x264 慢好几倍：用快一档的预设
+                case "libx265": return $"-c:v libx265 -preset {(cpuIsFree ? "superfast" : "ultrafast")} {rc} -x265-params log-level=error -tag:v hvc1";
                 // CPU 编码：合成在显卡上时 CPU 空着，用 veryfast；合成也在 CPU 上就用 superfast，别和合成抢
                 default: return $"-c:v libx264 -preset {(cpuIsFree ? "veryfast" : "superfast")} {rc}";
             }

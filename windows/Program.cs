@@ -62,7 +62,7 @@ namespace ScreenRecorder
         static int Main()
         {
             Runtime.Prepare();
-            if (Runtime.Dir != null) { Studio.Locate = Runtime.FfmpegPath; Whisper.Locate = () => Path.Combine(Runtime.Dir, "whisper-cli.exe"); }
+            if (Runtime.Dir != null) { Studio.Locate = Runtime.FfmpegPath; Whisper.Locate = () => Path.Combine(Runtime.Dir, "whisper-cli.exe"); LocalTts.Locate = () => Path.Combine(Runtime.Dir, "sherpa-onnx-offline-tts.exe"); }
             else UseLibFolder();
             App2.Lang = L;
             return Run();   // 分开写：Main 里不能直接碰到引用 ScreenRecorderLib 的类型，否则还没装好 AssemblyResolve 就去找 dll 了
@@ -94,6 +94,7 @@ namespace ScreenRecorder
             OverlayLayer.ShapeRenderer = OverlayGdi.Shape; // 箭头、框、圈、高亮也是
             CaptionLayer.Renderer = OverlayGdi.Caption;    // 字幕也是（预览、导出同一套，玻璃底要用）
             if (Environment.GetEnvironmentVariable("REFTEST") != null) return SelfTestRef.Run();
+            if (Environment.GetEnvironmentVariable("TTSTEST") != null) return SelfTestTts.Run();
             if (Environment.GetEnvironmentVariable("W5TEST") != null) return SelfTestW5.Run();
             if (Environment.GetEnvironmentVariable("W4TEST") != null) return SelfTestW4.Run();
             if (Environment.GetEnvironmentVariable("STUDIO") != null) return SelfTest.RenderOnly();

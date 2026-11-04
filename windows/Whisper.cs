@@ -145,7 +145,7 @@ namespace ScreenRecorder
         }
 
         // Windows 10 1903（build 18362）起，exe 清单里的 activeCodePage=UTF-8 才生效；Mac 测试工具里总是 UTF-8
-        static bool Utf8Args
+        internal static bool Utf8Args
         {
             get
             {

@@ -37,6 +37,12 @@ jobs:
           Expand-Archive whisper.zip -DestinationPath whisper
           $wcli = Get-ChildItem whisper -Recurse -Filter whisper-cli.exe | Select-Object -First 1
           if (-not $wcli) { throw "whisper-cli.exe not in the zip" }
+          # 文字转配音的本机 AI 声音：sherpa-onnx 的 Windows 64 位版（Apache-2.0；onnxruntime MIT），和 Mac 版同一个版本；静态 C 运行库（MT），不用装 VC++
+          Invoke-WebRequest "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-win-x64-shared-MT-Release.tar.bz2" -OutFile sherpa.tar.bz2
+          New-Item -ItemType Directory -Force sherpa | Out-Null
+          tar -xjf sherpa.tar.bz2 -C sherpa
+          $stts = Get-ChildItem sherpa -Recurse -Filter sherpa-onnx-offline-tts.exe | Select-Object -First 1
+          if (-not $stts) { throw "sherpa-onnx-offline-tts.exe not in the archive" }
           # whisper-cli 按系统代码页收命令行参数，中文提示词会变成 ??：给它换一份 activeCodePage=UTF-8 的清单（Win10 1903 起生效）
           $mt = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter mt.exe | Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $mt) { throw "mt.exe not found" }
@@ -49,6 +55,9 @@ jobs:
           '@ | Set-Content whisper-utf8.manifest -Encoding utf8
           & $mt.FullName -nologo -manifest whisper-utf8.manifest "-outputresource:$($wcli.FullName);#1"
           if ($LASTEXITCODE -ne 0) { throw "mt.exe failed" }
+          # sherpa-onnx-offline-tts 也一样：要念的字是命令行参数
+          & $mt.FullName -nologo -manifest whisper-utf8.manifest "-outputresource:$($stts.FullName);#1"
+          if ($LASTEXITCODE -ne 0) { throw "mt.exe failed (sherpa)" }
           Get-ChildItem $wcli.DirectoryName | Format-Table Name, Length
           # 录制引擎 + VC++ 运行库（ScreenRecorderLib 是 C++/CLI）+ ffmpeg 和它的许可证，各压成 .gz（7-Zip 最高压缩）嵌进 exe
           $files = @{
@@ -66,6 +75,11 @@ jobs:
           # whisper 的 CPU 版用 OpenMP（vcomp140.dll）：用户电脑不一定装了 VC++ 运行库，也随包带上
           if (Test-Path "C:\Windows\System32\vcomp140.dll") { $files["vcomp140.dll"] = "C:\Windows\System32\vcomp140.dll" }
           $files["whisper.cpp-LICENSE.txt"] = "windows/licenses/whisper.cpp-LICENSE.txt"
+          # 本机 AI 配音：程序 + onnxruntime + 许可证（声音模型第一次用时再下载）
+          $files["sherpa-onnx-offline-tts.exe"] = $stts.FullName
+          foreach ($d in "onnxruntime.dll", "onnxruntime_providers_shared.dll") { $files[$d] = Join-Path $stts.DirectoryName $d }
+          $files["sherpa-onnx-LICENSE.txt"] = "windows/licenses/sherpa-onnx-LICENSE.txt"
+          $files["onnxruntime-LICENSE.txt"] = "windows/licenses/onnxruntime-LICENSE.txt"
           # Studio 显卡合成（Vortice D3D11）和它依赖的托管 dll，也嵌进去
           foreach ($d in Get-ChildItem "$out/*.dll") { if ($d.Name -ne "ScreenRecorderLib.dll") { $files[$d.Name] = $d.FullName } }
           New-Item -ItemType Directory -Force windows/embed | Out-Null
@@ -124,7 +138,7 @@ jobs:
           Write-Host "runtime dirs: $($rt.Name -join ', ')"
           if ($rt.Count -ne 1) { throw "expected exactly one runtime dir" }
           Get-ChildItem $rt[0].FullName -Force | Format-Table Name, Length
-          foreach ($f in ".complete", "ScreenRecorderLib.dll", "vcruntime140.dll", "ffmpeg.exe", "ffmpeg-LICENSE.txt", "whisper-cli.exe", "whisper.cpp-LICENSE.txt") { if (!(Test-Path (Join-Path $rt[0].FullName $f))) { throw "runtime missing $f" } }
+          foreach ($f in ".complete", "ScreenRecorderLib.dll", "vcruntime140.dll", "ffmpeg.exe", "ffmpeg-LICENSE.txt", "whisper-cli.exe", "whisper.cpp-LICENSE.txt", "sherpa-onnx-offline-tts.exe", "onnxruntime.dll", "sherpa-onnx-LICENSE.txt") { if (!(Test-Path (Join-Path $rt[0].FullName $f))) { throw "runtime missing $f" } }
           $top = (Get-ChildItem $solo -Force | ForEach-Object Name) -join '|'
           if ($top -ne '录屏.exe') { throw "app folder should stay clean: $top" }
 
@@ -668,6 +682,25 @@ jobs:
         with:
           name: reftest-mac-vs-windows
           path: ${{ runner.temp }}/reftest
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tts-models
+          key: tts-kokoro-multi-lang-v1_1
+
+      - name: 文字转配音（规则、凭据管理器、系统声音、本机 AI 声音：模型下载 + 真念中文、剪辑窗口全部念 / 念一句替换 / 撤销）+ 导出前检查 + HEVC 导出
+        run: |
+          foreach ($k in "AUTOTEST", "AUTOSTUDIO", "AUTOINPUT", "AUTOAUDIO", "AUTOOUT", "STUDIO_COMPOSE", "STUDIO_ENCODER", "STUDIO") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $models = Join-Path $env:RUNNER_TEMP "tts-models"; New-Item -ItemType Directory -Force $models | Out-Null
+          if (Test-Path "$models/kokoro-multi-lang-v1_1/voices.bin") { Write-Host "model from cache" } else { Write-Host "no cached model: the app downloads it" }
+          $env:TTS_MODEL_ROOT = $models; $env:TTS_MODEL_SOURCE = "github"
+          $env:TTSTEST = (Join-Path $env:RUNNER_TEMP "studio/project"); $env:TTSSHOT = (Join-Path $env:RUNNER_TEMP "studio/editor/tts-box.png"); $env:APP_LANG = "zh"
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $p = Start-Process -FilePath "pkg\录屏.exe" -Wait -PassThru
+          foreach ($k in "TTSTEST", "TTSSHOT", "TTS_MODEL_ROOT", "TTS_MODEL_SOURCE", "APP_LANG") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $txt = Get-Content "$env:TEMP/tts_test.txt" -Raw -Encoding UTF8
+          Write-Host "exit=$($p.ExitCode) wall=$([int]$sw.Elapsed.TotalSeconds)s`n$txt"
+          if ($p.ExitCode -ne 0 -or -not $txt.StartsWith("OK")) { throw "text-to-speech tests failed" }
 
       - name: W3 - camera capture (a video file stands in for the camera) + do not disturb (banners off, restored, also after a crash)
         run: |

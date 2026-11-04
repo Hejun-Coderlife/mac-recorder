@@ -155,7 +155,7 @@ namespace ScreenRecorder
         readonly Panel capInspector = new Panel();
         readonly Label capTitle = new Label(), capTime = new Label();
         readonly TextBox capText = new TextBox();
-        readonly Button capSplit = new Button(), capMerge = new Button(), capDelete = new Button();
+        readonly Button capSplit = new Button(), capMerge = new Button(), capDelete = new Button(), capSpeak = new Button();
         string capEditing;
         void BuildCaptionInspector()
         {
@@ -169,7 +169,9 @@ namespace ScreenRecorder
             Flat(capSplit, L("在播放头处拆开", "Split at Playhead"), (s, e) => SplitCaption());
             Flat(capMerge, L("和下一句合并", "Merge with Next"), (s, e) => MergeCaption());
             Flat(capDelete, "🗑 " + L("删除", "Delete"), (s, e) => DeleteSelected());
-            flow.Controls.AddRange(new Control[] { capTitle, capTime, capText, capSplit, capMerge });
+            Flat(capSpeak, "🔊 " + L("念成配音", "Speak"), (s, e) => { if (SelectedCaption != null) SpeakCaptions(new[] { SelectedCaption }); });
+            tips.SetToolTip(capSpeak, L("把这句念出来，放到讲解轨上（声音在「字幕」菜单 →「文字转配音…」里选）", "Speak this caption onto the voice-over lane (choose the voice under Captions → Text to Speech…)"));
+            flow.Controls.AddRange(new Control[] { capTitle, capTime, capText, capSplit, capMerge, capSpeak });
             capInspector.Controls.Add(flow);
             capDelete.Dock = DockStyle.Right;
             capInspector.Controls.Add(capDelete);
@@ -246,6 +248,7 @@ namespace ScreenRecorder
             {
                 capTime.Text = Clock(c.Start) + " – " + Clock(c.End);
                 if (capEditing != c.Id && !capText.Focused && capText.Text != c.Text) capText.Text = c.Text;
+                capSpeak.Enabled = Speaking == null && !string.IsNullOrWhiteSpace(c.Text);
             }
             // 录讲解按钮：录的时候变红，显示时长和音量
             if (mic != null)
@@ -289,6 +292,10 @@ namespace ScreenRecorder
             Item(L("在播放头处加一句", "Add a caption at the playhead"), true, () => AddCaption(Time));
             Item(L("导出 .srt 字幕文件…", "Export .srt subtitles…"), Project.Captions.Count > 0, ExportSrt);
             Item(L("清空字幕", "Clear all captions"), Project.Captions.Count > 0, () => { Edit(p => p.Captions.Clear()); Select(null, null); });
+            m.Items.Add(new ToolStripSeparator());
+            // 文字转配音（同 Mac 版字幕菜单里的 SpeakBox）
+            Item(L("文字转配音…", "Text to Speech…"), true, ShowSpeakBox);
+            Item(L("全部字幕念成配音", "Speak All Captions"), Project.Captions.Count > 0 && Speaking == null, () => SpeakCaptions());
             if (Project.Captions.Count > 0) m.Items.Add(new ToolStripLabel(L("重新生成会替换现在的字幕（可以撤销 Ctrl+Z）", "Generating again replaces the current captions (undo with Ctrl+Z)")) { ForeColor = Theme.Secondary });
             m.Show(capBtn, new Point(0, capBtn.Height));
         }

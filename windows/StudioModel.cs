@@ -475,9 +475,10 @@ namespace ScreenRecorder
         public string Quality = "high";
         public bool Gif;
         public bool CopyToClipboard;
+        public bool Hevc;                      // 用 HEVC（H.265）：同画质码率给 H.264 的六成，文件小一半左右（同 Mac 版 codec = hevc）
 
-        public double BitsPerPixel => Quality == "small" ? 0.035 : Quality == "standard" ? 0.07 : 0.12;
-        public long MinRate => Quality == "small" ? 2_000_000 : Quality == "standard" ? 4_000_000 : 8_000_000;
+        public double BitsPerPixel => (Quality == "small" ? 0.035 : Quality == "standard" ? 0.07 : 0.12) * (Hevc ? 0.6 : 1);
+        public long MinRate => (Quality == "small" ? 2_000_000 : Quality == "standard" ? 4_000_000 : 8_000_000) * (Hevc ? 6 : 10) / 10;
 
         // 画布缩放：按原始画布算出来的宽高 → 目标（原始 = 1；4K 看长边 3840；其余看短边），不放大
         public double CanvasScale(double cw, double ch)
@@ -493,9 +494,9 @@ namespace ScreenRecorder
         }
 
         public string Summary(Func<string, string, string> L) =>
-            Gif ? "GIF" : (Resolution == "original" ? L("原始", "Original") : Resolution == "4k" ? "4K" : Resolution + "p") + " · " + Fps + L(" 帧", " fps");
+            Gif ? "GIF" : (Resolution == "original" ? L("原始", "Original") : Resolution == "4k" ? "4K" : Resolution + "p") + " · " + Fps + L(" 帧", " fps") + (Hevc ? " · HEVC" : "");
 
-        public string Save() => string.Join(",", Resolution, Fps, Quality, Gif ? 1 : 0, CopyToClipboard ? 1 : 0);
+        public string Save() => string.Join(",", Resolution, Fps, Quality, Gif ? 1 : 0, CopyToClipboard ? 1 : 0, Hevc ? "hevc" : "h264");
         public static ExportOptions Load(string s)
         {
             var o = new ExportOptions();
@@ -506,6 +507,7 @@ namespace ScreenRecorder
                 if (p[1] == "30" || p[1] == "60") o.Fps = int.Parse(p[1]);
                 if (Qualities.Contains(p[2])) o.Quality = p[2];
                 o.Gif = p[3] == "1"; o.CopyToClipboard = p[4] == "1";
+                o.Hevc = p.Length >= 6 && p[5] == "hevc";
             }
             return o;
         }

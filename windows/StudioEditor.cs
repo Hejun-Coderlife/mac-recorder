@@ -152,7 +152,7 @@ namespace ScreenRecorder
             exportStatus.AutoSize = true; exportStatus.Margin = new Padding(0, 9, 8, 0); exportStatus.ForeColor = Theme.Secondary;
             Flat(openBtn, L("打开", "Open"), (s, e) => { if (exported != null) Shell(exported); }); openBtn.Visible = false;
             Flat(showBtn, L("在资源管理器中显示", "Show in Explorer"), (s, e) => { if (exported != null) try { Process.Start("explorer.exe", $"/select,\"{exported}\""); } catch { } }); showBtn.Visible = false;
-            Primary(exportBtn, L("导出", "Export"), (s, e) => Export());
+            Primary(exportBtn, L("导出", "Export"), (s, e) => ExportChecked());
             Flat(cancelBtn, L("取消", "Cancel"), (s, e) => { exportCancel?.Cancel(); taskCancel?.Cancel(); }); cancelBtn.Visible = false;
             Flat(optBtn, "⚙ " + ExportOpt.Summary(L), (s, e) => ShowExportMenu());
             tips.SetToolTip(optBtn, L("导出设置：分辨率、帧率、画质、视频 / GIF、导出后复制到剪贴板", "Export settings: resolution, frame rate, quality, video / GIF, copy to clipboard"));
@@ -798,6 +798,8 @@ namespace ScreenRecorder
             Group(L("分辨率", "Resolution"), ExportOptions.Resolutions.Select(r => (r == "original" ? L("原始", "Original") : r == "4k" ? "4K" : r + "p" + (r == "1440" ? L("（推荐）", " (recommended)") : r == "1080" ? L("（发微信、抖音够用）", " (good for sharing)") : ""), o.Resolution == r, (Action)(() => o.Resolution = r))));
             Group(L("帧率", "Frame rate"), new[] { ("60", o.Fps == 60, (Action)(() => o.Fps = 60)), ("30", o.Fps == 30, () => o.Fps = 30) });
             Group(L("画质", "Quality"), new[] { (L("高", "High"), o.Quality == "high", (Action)(() => o.Quality = "high")), (L("标准", "Standard"), o.Quality == "standard", () => o.Quality = "standard"), (L("小文件", "Small file"), o.Quality == "small", () => o.Quality = "small") });
+            // 编码（同 Mac 版）：H.264 哪里都能放；HEVC 同画质文件小一半左右（老电脑、个别网站放不了）
+            if (!o.Gif) Group(L("编码", "Codec"), new[] { (L("H.264（哪里都能放）", "H.264 (plays everywhere)"), !o.Hevc, (Action)(() => o.Hevc = false)), (L("HEVC（文件小一半）", "HEVC (about half the size)"), o.Hevc, () => o.Hevc = true) });
             m.Items.Add(new ToolStripSeparator());
             var clip = new ToolStripMenuItem(L("导出后复制到剪贴板", "Copy to clipboard after export")) { Checked = o.CopyToClipboard };
             clip.Click += (s, e) => { o.CopyToClipboard = !o.CopyToClipboard; SaveExportOpt(); };

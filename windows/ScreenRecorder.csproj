@@ -37,5 +37,7 @@
     <!-- 自动更新解压 zip 用 -->
     <Reference Include="System.IO.Compression" />
     <Reference Include="System.IO.Compression.FileSystem" />
+    <!-- 文字转配音的「系统声音」（SAPI） -->
+    <Reference Include="System.Speech" />
   </ItemGroup>
 </Project>
