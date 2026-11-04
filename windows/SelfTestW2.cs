@@ -76,7 +76,8 @@ namespace ScreenRecorder
                 Check("preview is playing while recording", ed.Playing && ed.Time > 1.5, $"time {ed.Time:0.00}");
                 Shot("voice-recording");
                 Pump(2.4);   // 第一句约 4 秒才说完，多录一点，别因为启动快慢差 0.1 秒把最后一个字切掉
-                ed.ToggleVoice();
+                // 机器慢时预览先放到片尾、录音已经自己停了：这时再按就成了「开始录一段新的」（从 0 秒），只在还在录时才按
+                if (ed.RecordingVoice) ed.ToggleVoice();
                 Check("voice-over added to the project", PumpUntil(() => ed.VoiceAdded == 1, 30), ed.CaptionStatus);
                 var v = ed.Project.Voiceovers.FirstOrDefault();
                 Check("one clip, file saved as m4a", ed.Project.Voiceovers.Count == 1 && v != null && v.File.EndsWith(".m4a") && File.Exists(Path.Combine(dir, v.File)), v?.File ?? "");
