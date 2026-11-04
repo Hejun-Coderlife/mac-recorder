@@ -51,8 +51,8 @@ namespace ScreenRecorder
         public bool Ripple = true;             // 点击波纹
         public static readonly string[] RippleStyles = { "ring", "glass", "double", "pulse", "glow", "focus" };
         // 波纹样子、圆圈类的线粗（Mac 版加的，放在 Extra 里原样存；没有 = 白圈、1 倍）
-        public string RippleStyle => Extra.TryGetValue("rippleStyle", out var v) && v is string s && Array.IndexOf(RippleStyles, s) >= 0 ? s : "ring";
-        public double RippleWidth => Extra.TryGetValue("rippleWidth", out var v) && v is double d ? Math.Min(Math.Max(d, 0.4), 3) : 1;
+        public string RippleStyle { get => Extra.TryGetValue("rippleStyle", out var v) && v is string s && Array.IndexOf(RippleStyles, s) >= 0 ? s : "ring"; set => Extra["rippleStyle"] = value; }
+        public double RippleWidth { get => Extra.TryGetValue("rippleWidth", out var v) && v is double d ? Math.Min(Math.Max(d, 0.4), 3) : 1; set => Extra["rippleWidth"] = value; }
         public string Blur = "light";          // 运动模糊：只在镜头快速移动时有
         public static readonly string[] KeyPositions = { "bottom", "bottomLeft", "bottomRight" };
         public bool ShowKeys;                  // 画面上显示按的快捷键（Ctrl + Shift + C 这种键帽）

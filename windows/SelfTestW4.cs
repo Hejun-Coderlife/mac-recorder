@@ -152,6 +152,52 @@ namespace ScreenRecorder
             var ar = ed.Project.Annotations.LastOrDefault();
             Check("drag out an arrow (tail → head)", ar != null && ar.Kind == "arrow" && ar.W > 0.05 && ar.H < -0.05, ar == null ? "" : $"{ar.W:0.000},{ar.H:0.000}");
 
+            // 样式（同 Mac 版属性条）：文字 11 种、箭头 5 种、不透明度、圈正圆 / 椭圆
+            if (t != null)
+            {
+                ed.Select("ann", t.Id); Pump(0.3);
+                bool picked = ed.PickInInspector("look", "neon"); Pump(0.3);
+                var tn = ed.Project.Annotations.FirstOrDefault(x => x.Id == t.Id);
+                Check("text style picker: neon", picked && tn?.TextStyle == "neon" && tn.Pill && !ed.InspectorShows("arrow"), $"picked={picked} style={tn?.TextStyle} pill={tn?.Pill}");
+                ed.PickInInspector("look", "plain"); Pump(0.3);
+                tn = ed.Project.Annotations.FirstOrDefault(x => x.Id == t.Id);
+                Check("text style picker: plain also clears pill", tn?.TextStyle == "plain" && !tn.Pill, $"{tn?.TextStyle} {tn?.Pill}");
+                ed.PickInInspector("look", "glass"); Pump(0.3);
+            }
+            if (ar != null)
+            {
+                ed.Select("ann", ar.Id); Pump(0.3);
+                bool picked = ed.PickInInspector("arrow", "plain") && ed.PickInInspector("arrow", "curved"); Pump(0.3);
+                var an = ed.Project.Annotations.FirstOrDefault(x => x.Id == ar.Id);
+                Check("arrow style picker: curved", picked && an?.Arrow == "curved" && !ed.InspectorShows("look"), $"picked={picked} {an?.Arrow}");
+                ed.DragOpacity(50); Pump(0.3);
+                an = ed.Project.Annotations.FirstOrDefault(x => x.Id == ar.Id);
+                Check("opacity slider: 50%", an?.Opacity != null && Math.Abs(an.Opacity.Value - 0.5) < 1e-6 && Math.Abs(an.Alpha - 0.5) < 1e-6, $"{an?.Opacity}");
+            }
+            // 圈：斜着拖出来也是正圆（原画面像素宽 = 高，按拖得远的方向定直径）；点「椭圆」再拖就随便；点回「正圆」按宽定直径、中心不动
+            ed.StartTool("ellipse"); Pump(0.2);
+            Drag(PV(0.30, 0.25), PV(0.42, 0.30));
+            var el = ed.Project.Annotations.LastOrDefault();
+            double Wp = ed.Track.Width, Hp = ed.Track.Height;
+            Check("drag out a circle: stays round", el != null && el.Kind == "ellipse" && el.W > 0.05 && Math.Abs(el.W * Wp - el.H * Hp) < 1.5 && el.Oval == null && ed.InspectorShows("oval"),
+                el == null ? "" : $"{el.W * Wp:0.0}x{el.H * Hp:0.0}px oval={el.Oval}");
+            if (el != null)
+            {
+                var ob = ed.OvalButton(true);
+                In.Move(ob.PointToScreen(new Point(ob.Width / 2, ob.Height / 2))); Pump(0.15); In.Click(); Pump(0.4);
+                el = ed.Project.Annotations.FirstOrDefault(x => x.Id == el.Id);
+                Check("click 椭圆: oval = true", el?.Oval == true, $"{el?.Oval}");
+                ed.EditAnnTest(el.Id, a => a.H *= 0.5); Pump(0.2);
+                double cy = el.Y + el.H * 0.25;   // 改扁之后的中心
+                var cb = ed.OvalButton(false);
+                In.Move(cb.PointToScreen(new Point(cb.Width / 2, cb.Height / 2))); Pump(0.15); In.Click(); Pump(0.4);
+                el = ed.Project.Annotations.FirstOrDefault(x => x.Id == el.Id);
+                Check("click 正圆: round again, width kept, centre kept", el != null && el.Oval == null && Math.Abs(el.W * Wp - el.H * Hp) < 1.5 && Math.Abs(el.Y + el.H / 2 - cy) < 0.002,
+                    el == null ? "" : $"{el.W * Wp:0.0}x{el.H * Hp:0.0}px cy {el.Y + el.H / 2:0.0000} vs {cy:0.0000}");
+            }
+            // 点击波纹样子 6 种（右边「鼠标」里），存成 Mac 的字段名
+            ed.EditLook(l => { l.RippleStyle = "glass"; l.RippleWidth = 2; }); Pump(0.3);
+
             // 3) 背景音乐：加一首、在音乐轨上往右拖
             var clip = ed.AddMusic(tone); Pump(0.8);
             Check("add music: copied into music\\ and placed on the music lane", clip != null && File.Exists(Path.Combine(dir, clip.File.Replace('/', '\\'))) && Math.Abs(clip.FileLength - 3) < 0.1 && ed.SelectedMusic == clip.Id,
@@ -189,11 +235,13 @@ namespace ScreenRecorder
             // 6) 关掉存回工程，新字段都在
             ed.Close(); Pump(0.8);
             var saved = StudioProject.FromJson(File.ReadAllText(StudioProject.PathIn(dir)));
-            Check("project saved with redactions / annotations / music / cut", saved.Redactions.Count == 1 && saved.Annotations.Count == 3 && saved.Music.Clips.Count == 1 && saved.Cuts.Any(x => x.Speed && x.Rate == 4),
+            Check("project saved with redactions / annotations / music / cut", saved.Redactions.Count == 1 && saved.Annotations.Count == 4 && saved.Music.Clips.Count == 1 && saved.Cuts.Any(x => x.Speed && x.Rate == 4),
                 $"red {saved.Redactions.Count} ann {saved.Annotations.Count} music {saved.Music.Clips.Count} cuts {saved.Cuts.Count}");
+            Check("project saved with styles (textStyle / arrow / opacity / rippleStyle)", saved.Annotations.Any(x => x.TextStyle == "glass") && saved.Annotations.Any(x => x.Arrow == "curved" && x.Opacity == 0.5) &&
+                saved.Look.RippleStyle == "glass" && saved.Look.RippleWidth == 2, "");
             Check("project saved with zoom speed + cursor loop", Math.Abs(saved.Look.ZoomSpeed - 1.7) < 1e-6 && saved.Look.CursorLoop && Math.Abs(saved.Look.CursorLoopSec - 1.5) < 1e-6 && (saved.Segments.Count == 0 || saved.Segments[0].Speed == 0.6), "");
             var json = File.ReadAllText(StudioProject.PathIn(dir));
-            Check("saved JSON uses the Mac field names", new[] { "\"redactions\"", "\"annotations\"", "\"music\"", "\"zoomSpeed\"", "\"cursorLoop\"", "\"cursorLoopSec\"", "\"duckDB\"", "\"trimIn\"" }.All(k => json.Contains(k)), "");
+            Check("saved JSON uses the Mac field names", new[] { "\"redactions\"", "\"annotations\"", "\"music\"", "\"zoomSpeed\"", "\"cursorLoop\"", "\"cursorLoopSec\"", "\"duckDB\"", "\"trimIn\"", "\"textStyle\"", "\"arrow\"", "\"opacity\"", "\"rippleStyle\"", "\"rippleWidth\"" }.All(k => json.Contains(k)), "");
             // 截图用的工程：留着（截图自己再摆）
             try { File.Delete(StudioProject.PathIn(dir)); } catch { }
         }

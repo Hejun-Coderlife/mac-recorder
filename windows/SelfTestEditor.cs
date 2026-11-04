@@ -98,6 +98,20 @@ namespace ScreenRecorder
                             p.Music.Clips.Add(new MusicClip { File = "music/tone.wav", Name = "tone", Start = 2, TrimIn = 0, TrimOut = 3, FileLength = 3 });
                     });
                     if (w4 == "overlays") { ed.Select("ann", ed.Project.Annotations[2].Id); ed.Seek(3.0); ed.ScrollStyleTo(App.L("推近", "Zoom")); }
+                    // styles-text / styles-arrow / styles-oval / styles-red：属性条里的样式（文字霓虹、弧形箭头 50%、椭圆、聚光灯 + 圆角）；右边滚到「鼠标」看波纹样子
+                    else if (w4.StartsWith("styles-"))
+                    {
+                        ed.Edit(p =>
+                        {
+                            p.Annotations[2].TextStyle = "neon"; p.Annotations[1].Arrow = "curved"; p.Annotations[1].Opacity = 0.5;
+                            p.Annotations.Add(new Annotation { Start = 2, End = 6, Kind = "ellipse", X = 0.12, Y = 0.3, W = 0.2, H = 0.18, Oval = true, Color = Annotation.Palette[3] });
+                            p.Redactions[1].Style = "spotlight"; p.Redactions[1].Corner = 24;
+                            p.Look.RippleStyle = "glass";
+                        });
+                        string sel = w4 == "styles-red" ? null : ed.Project.Annotations[w4 == "styles-text" ? 2 : w4 == "styles-arrow" ? 1 : 4].Id;
+                        if (sel != null) ed.Select("ann", sel); else ed.Select("red", ed.Project.Redactions[1].Id);
+                        ed.Seek(3.0); ed.ScrollStyleTo(App.L("鼠标", "Cursor"));
+                    }
                     else if (w4 == "music") { ed.Select("music", ed.Project.Music.Clips.FirstOrDefault()?.Id); ed.Seek(3.0); ed.ScrollStyleTo(App.L("声音", "Sound")); }
                     else { ed.Seek(2.2); ed.SuggestSpeed(); PumpUntil(() => !ed.Suggesting, 60); ed.ScrollStyleTo(App.L("鼠标", "Cursor")); }
                     Pump(3);

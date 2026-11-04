@@ -50,6 +50,16 @@ namespace ScreenRecorder
                 case "spotlight": return L("聚光灯", "Spotlight"); case "focus": return L("聚焦", "Focus"); default: return L("模糊", "Blur");
             }
         }
+        public static string Hint(string s, Func<string, string, string> L)
+        {
+            switch (s)
+            {
+                case "mosaic": return L("框里打马赛克", "Pixelates inside the box"); case "solid": return L("框里盖一块纯色", "Covers the box with a color");
+                case "frosted": return L("框里像磨砂玻璃：模糊再蒙一层白", "Frosted glass: blurred and lightened");
+                case "spotlight": return L("框外面变暗，突出框里", "Darkens everything outside the box"); case "focus": return L("框外面模糊，突出框里", "Blurs everything outside the box");
+                default: return L("框里模糊", "Blurs inside the box");
+            }
+        }
     }
 
     // 标注：箭头从 (x, y) 指到 (x + w, y + h)；框 / 圈 / 高亮是这个矩形；文字的左上角在 (x, y)，大小按字算；字段名同 Mac 版
@@ -107,6 +117,25 @@ namespace ScreenRecorder
         public static string Name(string k, Func<string, string, string> L)
         {
             switch (k) { case "arrow": return L("箭头", "Arrow"); case "rect": return L("框", "Box"); case "ellipse": return L("圈", "Circle"); case "highlight": return L("高亮", "Highlight"); default: return L("文字", "Text"); }
+        }
+        // 名字同 Mac 版 textLookName / arrowName
+        public static string TextLookName(string t, Func<string, string, string> L)
+        {
+            switch (t)
+            {
+                case "glass": return L("玻璃（浅）", "Glass"); case "glassDark": return L("玻璃（深）", "Dark glass"); case "dark": return L("深色", "Dark");
+                case "gradient": return L("渐变", "Gradient"); case "outline": return L("描边", "Outline"); case "sticker": return L("贴纸", "Sticker");
+                case "bubble": return L("对话气泡", "Bubble"); case "neon": return L("霓虹", "Neon"); case "marker": return L("荧光笔", "Marker");
+                case "plain": return L("只有字", "Plain"); default: return L("彩色胶囊", "Pill");
+            }
+        }
+        public static string ArrowName(string s, Func<string, string, string> L)
+        {
+            switch (s)
+            {
+                case "double": return L("双向", "Double"); case "curved": return L("弧形", "Curved"); case "thick": return L("粗箭头", "Bold");
+                case "dashed": return L("虚线", "Dashed"); default: return L("普通", "Plain");
+            }
         }
     }
 

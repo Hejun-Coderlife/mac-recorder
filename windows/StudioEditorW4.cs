@@ -257,6 +257,21 @@ namespace ScreenRecorder
                 }
                 if (r != null) { r.X = x0; r.Y = y0; r.W = w; r.H = h; }
                 if (a != null) { a.X = x0; a.Y = y0; if (a.Kind != "text" || mode != "move") { a.W = w; a.H = h; } }
+                // 圈默认是正圆：画的时候按拖得远的那个方向定直径；拉把手时也保持正圆（同 Mac 版）
+                if (a != null && a.Kind == "ellipse" && a.Oval != true)
+                {
+                    if (mode == "create")
+                    {
+                        double W = ptrack.Width, H = Math.Max(ptrack.Height, 1), side = Math.Max(Math.Abs(nx - b.x) * W, Math.Abs(ny - b.y) * H);
+                        a.W = side / W; a.H = side / H; a.X = nx < b.x ? b.x - a.W : b.x; a.Y = ny < b.y ? b.y - a.H : b.y;
+                    }
+                    else if (mode.Length == 2 && mode[0] == 'h')
+                    {
+                        int k = mode[1] - '0';
+                        int hx = new[] { -1, 0, 1, 1, 1, 0, -1, -1 }[k], hy = new[] { -1, -1, -1, 0, 1, 1, 1, 0 }[k];
+                        KeepCircle(a, hx < 0, hy < 0, hx == 0 || hy == 0, hy == 0);
+                    }
+                }
             });
             // 每一步都从拖之前的工程重做：新建的那个要带着拖到的大小，松手时补默认大小那步才不会把它打回原形
             if (ovNew is Redaction nr && Project.Redactions.FirstOrDefault(x => x.Id == id) is Redaction cr) ovNew = cr.Clone();
@@ -276,6 +291,7 @@ namespace ScreenRecorder
                     var r = p.Redactions.FirstOrDefault(x => x.Id == id); var a = p.Annotations.FirstOrDefault(x => x.Id == id);
                     if (r != null && (r.W < 0.01 || r.H < 0.01)) { r.W = 0.2; r.H = 0.12; r.X = Math.Min(Math.Max(0, r.X - 0.1), 0.8); r.Y = Math.Min(Math.Max(0, r.Y - 0.06), 0.88); }
                     if (a != null && a.Kind == "arrow" && Math.Abs(a.W) < 0.01 && Math.Abs(a.H) < 0.01) { a.W = 0.12; a.H = -0.1; }
+                    else if (a != null && a.Kind == "ellipse" && (a.W < 0.01 || a.H < 0.01)) { a.W = 0.16; a.H = 0.16 * ptrack.Width / Math.Max(ptrack.Height, 1); a.X -= a.W / 2; a.Y -= a.H / 2; }   // 正圆，直径 = 宽的 16%，点的地方是圆心（同 Mac 版）
                     else if (a != null && a.Kind != "text" && a.Kind != "arrow" && (a.W < 0.01 || a.H < 0.01)) { a.W = 0.2; a.H = 0.14; a.X = Math.Min(Math.Max(0, a.X - 0.1), 0.8); a.Y = Math.Min(Math.Max(0, a.Y - 0.07), 0.86); }
                     if (a != null && a.Kind == "text") { a.W = 0; a.H = 0; }
                 });
@@ -344,12 +360,14 @@ namespace ScreenRecorder
         readonly Panel redInspector = new Panel(), annInspector = new Panel(), musInspector = new Panel(), sugBar = new Panel();
         readonly Label redTitle = new Label(), redTime = new Label(), annTitle = new Label(), annTime = new Label(), musTitle = new Label(), musTime = new Label(), sugLabel = new Label();
         readonly Dictionary<string, Button> redStyles = new Dictionary<string, Button>();
-        readonly TrackBar redStrength = new TrackBar(), annWidth = new TrackBar(), annFont = new TrackBar();
+        readonly TrackBar redStrength = new TrackBar(), redCorner = new TrackBar(), annWidth = new TrackBar(), annFont = new TrackBar(), annOpacity = new TrackBar();
         readonly Button redColor = new Button(), redDelete = new Button(), annDelete = new Button(), annDup = new Button(), musDelete = new Button(), sugAccept = new Button(), sugIgnore = new Button(), musChoose = new Button();
+        readonly Button annColorPick = new Button(), annCircle = new Button(), annOval = new Button();
         readonly List<Button> annColors = new List<Button>();
         readonly TextBox annText = new TextBox();
-        readonly CheckBox annPill = new CheckBox(), annDraw = new CheckBox();
-        readonly Label annWidthL = new Label(), annFontL = new Label(), redStrengthL = new Label();
+        readonly ComboBox annLook = new ComboBox(), annArrow = new ComboBox();
+        readonly CheckBox annDraw = new CheckBox();
+        readonly Label annWidthL = new Label(), annFontL = new Label(), annOpacityL = new Label(), annOpacityV = new Label(), redStrengthL = new Label(), redCornerL = new Label();
         bool syncingW4;
 
         void BuildW4Inspectors(Panel tlArea)
@@ -367,6 +385,7 @@ namespace ScreenRecorder
             {
                 var b = new Button(); var s0 = st;
                 Flat(b, Redaction.Name(st, L), (s, e) => EditRed(r => r.Style = s0));
+                tips.SetToolTip(b, Redaction.Hint(st, L));
                 redStyles[st] = b; rf.Controls.Add(b);
             }
             redStrengthL.Text = L("强度", "Strength"); redStrengthL.AutoSize = true; redStrengthL.Margin = new Padding(8, 8, 4, 0); rf.Controls.Add(redStrengthL);
@@ -376,6 +395,12 @@ namespace ScreenRecorder
             rf.Controls.Add(redStrength);
             Flat(redColor, L("颜色…", "Color…"), (s, e) => { var r = Project.Redactions.FirstOrDefault(x => x.Id == SelectedRed); if (r == null) return; using (var d = new ColorDialog { Color = ToColor(r.Color), FullOpen = true }) if (d.ShowDialog(this) == DialogResult.OK) { var c = FromColor(d.Color); EditRed(x => x.Color = c); } });
             rf.Controls.Add(redColor);
+            // 圆角 0–80（同 Mac 版）
+            redCornerL.Text = L("圆角", "Corners"); redCornerL.AutoSize = true; redCornerL.Margin = new Padding(8, 8, 4, 0); rf.Controls.Add(redCornerL);
+            Bar(redCorner, 0, 80, 80);
+            redCorner.Scroll += (s, e) => { if (syncingW4) return; var id = SelectedRed; double v = redCorner.Value; DragBegin(); DragUpdate(p => { var r = p.Redactions.FirstOrDefault(x => x.Id == id); if (r != null) r.Corner = v; }); };
+            redCorner.MouseUp += (s, e) => DragEnd(); redCorner.KeyUp += (s, e) => DragEnd();
+            rf.Controls.Add(redCorner);
             Flat(redDelete, "🗑 " + L("删除", "Delete"), (s, e) => DeleteSelected()); redDelete.Dock = DockStyle.Right;
             redInspector.Controls.Add(rf); redInspector.Controls.Add(redDelete);
 
@@ -390,8 +415,25 @@ namespace ScreenRecorder
                 b.Click += (s, e) => EditAnn(a => a.Color = cc);
                 annColors.Add(b); af.Controls.Add(b);
             }
-            annWidthL.Text = L("粗细", "Width"); annWidthL.AutoSize = true; annWidthL.Margin = new Padding(8, 8, 4, 0); af.Controls.Add(annWidthL);
-            Bar(annWidth, 1, 20, 90);
+            Flat(annColorPick, "…", (s, e) => { var a = Project.Annotations.FirstOrDefault(x => x.Id == SelectedAnn); if (a == null) return; using (var d = new ColorDialog { Color = ToColor(a.Color), FullOpen = true }) if (d.ShowDialog(this) == DialogResult.OK) { var c = FromColor(d.Color); EditAnn(x => x.Color = c); } });
+            annColorPick.Width = 28; tips.SetToolTip(annColorPick, L("别的颜色…", "Other color…"));
+            af.Controls.Add(annColorPick);
+            ComboBox Pick(ComboBox cb, string[] values, Func<string, string> name, int w, Action<string> set)
+            {
+                cb.DropDownStyle = ComboBoxStyle.DropDownList; cb.Width = w; cb.Margin = new Padding(6, 5, 4, 0);
+                foreach (var v in values) cb.Items.Add(name(v));
+                cb.SelectionChangeCommitted += (s, e) => { if (!syncingW4 && cb.SelectedIndex >= 0) set(values[cb.SelectedIndex]); };
+                cb.Tag = values;
+                return cb;
+            }
+            // 圈：正圆 / 椭圆（改回正圆时按宽定直径、中心不动，同 Mac 版）
+            Flat(annCircle, L("正圆", "Circle"), (s, e) => SetOval(false)); annCircle.Margin = new Padding(6, 3, 0, 0);
+            Flat(annOval, L("椭圆", "Oval"), (s, e) => SetOval(true)); annOval.Margin = new Padding(0, 3, 4, 0);
+            af.Controls.Add(annCircle); af.Controls.Add(annOval);
+            // 箭头样式：普通 / 双向 / 弧形 / 粗箭头 / 虚线（普通不写进工程，同 Mac 版）
+            af.Controls.Add(Pick(annArrow, Annotation.ArrowStyles, v => Annotation.ArrowName(v, L), 90, v => EditAnn(a => a.Arrow = v == "plain" ? null : v)));
+            annWidthL.Text = L("线宽", "Width"); annWidthL.AutoSize = true; annWidthL.Margin = new Padding(8, 8, 4, 0); af.Controls.Add(annWidthL);
+            Bar(annWidth, 1, 16, 80);
             annWidth.Scroll += (s, e) => { if (syncingW4) return; var id = SelectedAnn; double v = annWidth.Value; DragBegin(); DragUpdate(p => { var a = p.Annotations.FirstOrDefault(x => x.Id == id); if (a != null) a.Width = v; }); };
             annWidth.MouseUp += (s, e) => DragEnd(); annWidth.KeyUp += (s, e) => DragEnd();
             af.Controls.Add(annWidth);
@@ -400,17 +442,23 @@ namespace ScreenRecorder
             annText.Leave += (s, e) => CommitAnnText();
             af.Controls.Add(annText);
             annFontL.Text = L("字号", "Size"); annFontL.AutoSize = true; annFontL.Margin = new Padding(4, 8, 4, 0); af.Controls.Add(annFontL);
-            Bar(annFont, 12, 96, 90);
+            Bar(annFont, 12, 160, 80);
             annFont.Scroll += (s, e) => { if (syncingW4) return; var id = SelectedAnn; double v = annFont.Value; DragBegin(); DragUpdate(p => { var a = p.Annotations.FirstOrDefault(x => x.Id == id); if (a != null) a.FontSize = v; }); };
             annFont.MouseUp += (s, e) => DragEnd(); annFont.KeyUp += (s, e) => DragEnd();
             af.Controls.Add(annFont);
-            annPill.Text = L("底色", "Pill"); annPill.AutoSize = true; annPill.Margin = new Padding(4, 8, 4, 0);
-            annPill.CheckedChanged += (s, e) => { if (!syncingW4) EditAnn(a => a.Pill = annPill.Checked); };
-            af.Controls.Add(annPill);
+            // 文字样式 11 种；pill 跟着写（不是「只有字」就算有底色），老版本读到也大致对
+            af.Controls.Add(Pick(annLook, Annotation.TextLooks, v => Annotation.TextLookName(v, L), 100, v => EditAnn(a => { a.TextStyle = v; a.Pill = v != "plain"; })));
             annDraw.Text = L("画出来", "Draw on"); annDraw.AutoSize = true; annDraw.Margin = new Padding(4, 8, 4, 0);
             tips.SetToolTip(annDraw, L("箭头出现时像笔画出来那样", "The arrow draws itself in when it appears"));
             annDraw.CheckedChanged += (s, e) => { if (!syncingW4) EditAnn(a => a.DrawOn = annDraw.Checked); };
             af.Controls.Add(annDraw);
+            // 不透明度 10–100%（没设过 = 高亮 35%、其他 100%）
+            annOpacityL.Text = L("不透明度", "Opacity"); annOpacityL.AutoSize = true; annOpacityL.Margin = new Padding(8, 8, 4, 0); af.Controls.Add(annOpacityL);
+            Bar(annOpacity, 10, 100, 80);
+            annOpacity.Scroll += (s, e) => OpacityScrolled();
+            annOpacity.MouseUp += (s, e) => DragEnd(); annOpacity.KeyUp += (s, e) => DragEnd();
+            af.Controls.Add(annOpacity);
+            annOpacityV.AutoSize = false; annOpacityV.Width = 38; annOpacityV.Height = 20; annOpacityV.ForeColor = Theme.Secondary; annOpacityV.Margin = new Padding(0, 8, 4, 0); af.Controls.Add(annOpacityV);
             Flat(annDup, "⧉", (s, e) => DuplicateOverlay()); tips.SetToolTip(annDup, L("复制一个（Ctrl+D）", "Duplicate (Ctrl+D)"));
             af.Controls.Add(annDup);
             Flat(annDelete, "🗑 " + L("删除", "Delete"), (s, e) => DeleteSelected()); annDelete.Dock = DockStyle.Right;
@@ -439,6 +487,45 @@ namespace ScreenRecorder
 
         void EditRed(Action<Redaction> change) { var id = SelectedRed; Edit(p => { var r = p.Redactions.FirstOrDefault(x => x.Id == id); if (r != null) change(r); }); Touch(); }
         void EditAnn(Action<Annotation> change) { var id = SelectedAnn; Edit(p => { var a = p.Annotations.FirstOrDefault(x => x.Id == id); if (a != null) change(a); }); Touch(); }
+
+        void OpacityScrolled()
+        {
+            if (syncingW4) return;
+            var id = SelectedAnn; double v = annOpacity.Value / 100.0; annOpacityV.Text = annOpacity.Value + "%";
+            DragBegin(); DragUpdate(p => { var a = p.Annotations.FirstOrDefault(x => x.Id == id); if (a != null) a.Opacity = v; });
+        }
+
+        // 自测用：在属性条的下拉框里选一项（"look" 文字样式 / "arrow" 箭头样式）、拖不透明度、拿正圆 / 椭圆按钮去点
+        public bool PickInInspector(string which, string value)
+        {
+            var cb = which == "look" ? annLook : annArrow;
+            if (!cb.Visible || !(cb.Tag is string[] values)) return false;
+            int i = Array.IndexOf(values, value); if (i < 0) return false;
+            cb.Focus(); cb.SelectedIndex = i;
+            cb.GetType().GetMethod("OnSelectionChangeCommitted", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).Invoke(cb, new object[] { EventArgs.Empty });
+            return true;
+        }
+        public void DragOpacity(int percent) { annOpacity.Value = Math.Min(100, Math.Max(10, percent)); OpacityScrolled(); DragEnd(); }
+        public Button OvalButton(bool oval) => oval ? annOval : annCircle;
+        public void EditAnnTest(string id, Action<Annotation> change) => Edit(p => { var a = p.Annotations.FirstOrDefault(x => x.Id == id); if (a != null) change(a); });
+        public bool InspectorShows(string which) => which == "look" ? annLook.Visible : which == "arrow" ? annArrow.Visible : which == "oval" ? annOval.Visible : annOpacity.Visible;
+
+        // 圈 → 椭圆 / 正圆；改回正圆时按宽定直径，中心不动（同 Mac 版）
+        public void SetOval(bool oval) => EditAnn(a =>
+        {
+            a.Oval = oval ? true : (bool?)null;
+            if (!oval) { double cy = a.Y + a.H / 2; KeepCircle(a, false, false, true, true); a.Y = cy - a.H / 2; }
+        });
+
+        // 正圆：原画面里宽高一样多像素。拖角按大的一边、拖边按那条边；左 / 上边被拖时右 / 下边不动（同 Mac 版 keepCircle）
+        void KeepCircle(Annotation a, bool movedLeft, bool movedTop, bool edgeOnly, bool horizontal)
+        {
+            double W = ptrack.Width, H = Math.Max(ptrack.Height, 1), right = a.X + a.W, bottom = a.Y + a.H;
+            double side = edgeOnly ? (horizontal ? a.W * W : a.H * H) : Math.Max(a.W * W, a.H * H);
+            a.W = side / W; a.H = side / H;
+            if (movedLeft) a.X = right - a.W;
+            if (movedTop) a.Y = bottom - a.H;
+        }
 
         string annEditing;
         public void EditAnnotationText()
@@ -472,6 +559,7 @@ namespace ScreenRecorder
                     foreach (var kv in redStyles) { bool on = kv.Key == r.Style; kv.Value.BackColor = on ? Theme.Accent : Theme.Control; kv.Value.ForeColor = on ? Color.White : Theme.Text; }
                     int sv = (int)Math.Round(r.Strength * 100); if (!IsDragging && redStrength.Value != sv) redStrength.Value = Math.Min(100, Math.Max(0, sv));
                     redStrength.Visible = redStrengthL.Visible = r.Style != "solid"; redColor.Visible = r.Style == "solid";
+                    int cv = (int)Math.Round(r.Corner); if (!IsDragging && redCorner.Value != Math.Min(80, Math.Max(0, cv))) redCorner.Value = Math.Min(80, Math.Max(0, cv));
                 }
                 var a = Project.Annotations.FirstOrDefault(x => x.Id == SelectedAnn);
                 annInspector.Visible = a != null;
@@ -482,12 +570,19 @@ namespace ScreenRecorder
                     for (int i = 0; i < annColors.Count; i++) { bool on = Annotation.Palette[i].Same(a.Color); annColors[i].FlatAppearance.BorderSize = on ? 3 : 1; annColors[i].FlatAppearance.BorderColor = on ? Theme.Accent : Theme.Line; }
                     bool text = a.Kind == "text";
                     annWidth.Visible = annWidthL.Visible = !text && a.Kind != "highlight";
-                    annText.Visible = annFont.Visible = annFontL.Visible = annPill.Visible = text;
-                    annDraw.Visible = a.Kind == "arrow";
-                    int wv = (int)Math.Round(a.Width); if (!IsDragging && annWidth.Value != Math.Min(20, Math.Max(1, wv))) annWidth.Value = Math.Min(20, Math.Max(1, wv));
-                    int fv = (int)Math.Round(a.FontSize); if (!IsDragging && annFont.Value != Math.Min(96, Math.Max(12, fv))) annFont.Value = Math.Min(96, Math.Max(12, fv));
+                    annText.Visible = annFont.Visible = annFontL.Visible = annLook.Visible = text;
+                    annDraw.Visible = annArrow.Visible = a.Kind == "arrow";
+                    annCircle.Visible = annOval.Visible = a.Kind == "ellipse";
+                    bool oval = a.Oval == true;
+                    foreach (var (bt, on) in new[] { (annCircle, !oval), (annOval, oval) }) { bt.BackColor = on ? Theme.Accent : Theme.Control; bt.ForeColor = on ? Color.White : Theme.Text; }
+                    annLook.SelectedIndex = Array.IndexOf(Annotation.TextLooks, a.TextLook);
+                    annArrow.SelectedIndex = Math.Max(0, Array.IndexOf(Annotation.ArrowStyles, a.Arrow ?? "plain"));
+                    int wv = (int)Math.Round(a.Width); if (!IsDragging && annWidth.Value != Math.Min(16, Math.Max(1, wv))) annWidth.Value = Math.Min(16, Math.Max(1, wv));
+                    int fv = (int)Math.Round(a.FontSize); if (!IsDragging && annFont.Value != Math.Min(160, Math.Max(12, fv))) annFont.Value = Math.Min(160, Math.Max(12, fv));
+                    int ov = (int)Math.Round(a.Alpha * 100); if (!IsDragging && annOpacity.Value != Math.Min(100, Math.Max(10, ov))) annOpacity.Value = Math.Min(100, Math.Max(10, ov));
+                    annOpacityV.Text = ov + "%";
                     if (annEditing == null && annText.Text != a.Text) annText.Text = a.Text;
-                    annPill.Checked = a.Pill; annDraw.Checked = a.DrawOn;
+                    annDraw.Checked = a.DrawOn;
                 }
                 var m = Project.Music.Clips.FirstOrDefault(x => x.Id == SelectedMusic);
                 musInspector.Visible = m != null;

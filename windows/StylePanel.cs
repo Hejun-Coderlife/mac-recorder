@@ -339,6 +339,11 @@ namespace ScreenRecorder
             var hide = Check(L("不动时自动隐藏", "Hide when idle"), l => l.HideIdleCursor, (l, v) => l.HideIdleCursor = v);
             var after = Slider(L("隐藏前", "After"), 1, 5, l => l.HideAfter, (l, v) => l.HideAfter = v, v => L($"{v:0.0} 秒", $"{v:0.0}s"));
             var ripple = Check(L("点击波纹", "Click ripple"), l => l.Ripple, (l, v) => l.Ripple = v);
+            tips.SetToolTip(ripple, L("每次点击时在鼠标处冒一下，让观众看清点了哪里", "A little effect at each click so viewers see where you clicked"));
+            // 波纹样子 6 种、圆圈类的线粗（同 Mac 版）
+            var rippleStyle = Chips(new[] { ("ring", L("圆圈", "Ring")), ("glass", L("玻璃", "Glass")), ("double", L("双圈", "Double")), ("pulse", L("圆点", "Dot")), ("glow", L("光晕", "Glow")), ("focus", L("对焦", "Focus")) }, 3,
+                l => l.RippleStyle, (l, v) => l.RippleStyle = v);
+            var rippleWidth = Slider(L("线粗", "Thickness"), 0.4, 3, l => l.RippleWidth, (l, v) => l.RippleWidth = v, v => $"{v:0.0}×");
             var sound = Check(L("点击音效", "Click sound"), l => l.ClickSound, (l, v) => l.ClickSound = v);
             tips.SetToolTip(sound, L("每次点击处加一声轻响（预览和导出都有；选声音时会响一下给你听）", "Adds a soft click at each click (in the preview and the export; picking a sound plays it)"));
             var names = new[] { ("soft", L("轻点", "Soft tap")), ("mouse", L("鼠标咔哒", "Mouse click")), ("thock", L("低沉", "Deep thock")), ("wood", L("木头", "Wood")), ("pop", L("气泡", "Pop")), ("tick", L("清脆滴答", "Crisp tick")) };
@@ -358,6 +363,8 @@ namespace ScreenRecorder
             {
                 loopSec.Visible = loopZoom.Visible = Look.CursorLoop;
                 after.Visible = Look.HideIdleCursor;
+                rippleStyle.Visible = Look.Ripple;
+                rippleWidth.Visible = Look.Ripple && (Look.RippleStyle == "ring" || Look.RippleStyle == "double" || Look.RippleStyle == "focus");
                 soundRow.Visible = Look.ClickSound;
                 int i = Array.FindIndex(names, n => n.Item1 == Look.ClickStyle);
                 if (box.SelectedIndex != i) box.SelectedIndex = Math.Max(0, i);
@@ -365,7 +372,7 @@ namespace ScreenRecorder
             return Box(
                 Slider(L("大小", "Size"), 0.5, 3, l => l.CursorScale, (l, v) => l.CursorScale = v, v => $"{v:0.0}×"),
                 Slider(L("顺滑", "Smoothing"), 0, 1, l => l.Smoothing, (l, v) => l.Smoothing = v, v => v < 0.01 ? L("不平滑", "Off") : $"{Math.Round(v * 100)}%"),
-                hide, after, ripple, sound, soundRow, loop, loopSec, loopZoom);
+                hide, after, ripple, rippleStyle, rippleWidth, sound, soundRow, loop, loopSec, loopZoom);
         }
 
         // ---- 声音：一键静音录到的声音、电脑声音 / 麦克风各自的音量（0–200%）、点击声音量；改了预览声音会在后台重做（约一两秒） ----
