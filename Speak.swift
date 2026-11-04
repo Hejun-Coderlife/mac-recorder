@@ -69,7 +69,11 @@ enum Speech {
         set { UserDefaults.standard.set(newValue.rawValue, forKey: "ttsEngine") }
     }
     static func voice(_ e: TTSEngine) -> String {
-        UserDefaults.standard.string(forKey: "ttsVoice.\(e.rawValue)") ?? (e == .system ? "" : e.voices.first?.0 ?? "")
+        // 存的声音已经不在列表里（比如豆包从 1.0 换到 2.0）就用列表第一个
+        let v = UserDefaults.standard.string(forKey: "ttsVoice.\(e.rawValue)")
+        if e == .system { return v ?? "" }
+        if let v, e.voices.contains(where: { $0.0 == v }) { return v }
+        return e.voices.first?.0 ?? ""
     }
     static func setVoice(_ e: TTSEngine, _ v: String) { UserDefaults.standard.set(v, forKey: "ttsVoice.\(e.rawValue)") }
 }

@@ -34,11 +34,12 @@ enum TTSEngine: String, CaseIterable, Identifiable {
     @MainActor var voices: [(String, String)] {
         switch self {
         case .local: LocalTTS.voices
-        case .volc: [("zh_female_shuangkuaisisi_moon_bigtts", L("爽快思思（女）", "Sisi (female)")), ("zh_male_wennuanahu_moon_bigtts", L("温暖阿虎（男）", "Ahu (male)")),
-                     ("zh_female_tianmeixiaoyuan_moon_bigtts", L("甜美小源（女）", "Xiaoyuan (female)")), ("zh_male_shaonianzixin_moon_bigtts", L("少年梓辛（男）", "Zixin (male)")),
-                     ("zh_female_wanwanxiaohe_moon_bigtts", L("湾湾小何（台湾腔）", "Xiaohe (Taiwanese)")), ("zh_male_jingqiangkanye_moon_bigtts", L("京腔侃爷（北京话）", "Kanye (Beijing)")),
-                     ("zh_male_M392_conversation_wvae_bigtts", L("对话男声", "Conversational male")),
-                     ("BV001_streaming", L("通用女声（免费）", "Standard female (free)")), ("BV002_streaming", L("通用男声（免费）", "Standard male (free)"))]
+        // 豆包语音合成 2.0（seed-tts-2.0 只认 2.0 的声音，名字以 _uranus_bigtts 结尾）
+        case .volc: [("zh_female_vv_uranus_bigtts", L("Vivi 2.0（女）", "Vivi 2.0 (female)")), ("zh_female_xiaohe_uranus_bigtts", L("小何 2.0（女）", "Xiaohe 2.0 (female)")),
+                     ("zh_male_m191_uranus_bigtts", L("云舟 2.0（男）", "Yunzhou 2.0 (male)")), ("zh_male_taocheng_uranus_bigtts", L("小天 2.0（男）", "Xiaotian 2.0 (male)")),
+                     ("zh_male_liufei_uranus_bigtts", L("刘飞 2.0（男）", "Liufei 2.0 (male)")), ("zh_female_sophie_uranus_bigtts", L("魅力苏菲 2.0（女）", "Sophie 2.0 (female)")),
+                     ("zh_female_qingxinnvsheng_uranus_bigtts", L("清新女声 2.0", "Fresh female 2.0")), ("zh_female_tianmeixiaoyuan_uranus_bigtts", L("甜美小源 2.0（女）", "Xiaoyuan 2.0 (female)")),
+                     ("en_male_tim_uranus_bigtts", "Tim (EN)"), ("en_female_dacey_uranus_bigtts", "Dacey (EN)")]
         case .azure: [("zh-CN-YunxiNeural", L("云希（男，年轻）", "Yunxi (male)")), ("zh-CN-YunjianNeural", L("云健（男，浑厚）", "Yunjian (male)")),
                       ("zh-CN-YunyangNeural", L("云扬（男，播音）", "Yunyang (male, news)")), ("zh-CN-XiaoxiaoNeural", L("晓晓（女，温暖）", "Xiaoxiao (female)")),
                       ("zh-CN-XiaoyiNeural", L("晓伊（女，活泼）", "Xiaoyi (female)")), ("zh-CN-XiaochenNeural", L("晓辰（女，自然）", "Xiaochen (female)")),
@@ -218,17 +219,19 @@ enum CloudTTS {
         var ext = "wav"
         switch e {
         case .volc:
-            // 豆包语音合成（V1 HTTP）：AppID 填在 region 那一格，Access Token 是 key；头里是「Bearer;」加 token
+            // 豆包语音合成 2.0（V3 HTTP 单向流式，旧版控制台的 APP ID + Access Token）：AppID 填在 region 那一格，Access Token 是 key
             let appid = TTSKeys.get(e, "region")
             guard !appid.isEmpty else { throw fail(L("还要填火山引擎的 AppID", "Enter your Volcengine AppID too")) }
-            req = URLRequest(url: URL(string: "https://openspeech.bytedance.com/api/v1/tts")!)
-            req.setValue("Bearer;\(key)", forHTTPHeaderField: "Authorization")
+            req = URLRequest(url: URL(string: "https://openspeech.bytedance.com/api/v3/tts/unidirectional")!)
+            req.setValue(appid, forHTTPHeaderField: "X-Api-App-Id")
+            req.setValue(key, forHTTPHeaderField: "X-Api-Access-Key")
+            req.setValue("seed-tts-2.0", forHTTPHeaderField: "X-Api-Resource-Id")
+            req.setValue(UUID().uuidString, forHTTPHeaderField: "X-Api-Request-Id")
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try JSONSerialization.data(withJSONObject: [
-                "app": ["appid": appid, "token": "access_token", "cluster": "volcano_tts"],
                 "user": ["uid": "recorder"],
-                "audio": ["voice_type": voice, "encoding": "wav", "speed_ratio": min(max(speed, 0.5), 2)],
-                "request": ["reqid": UUID().uuidString, "text": text, "operation": "query"],
+                "req_params": ["text": text, "speaker": voice,
+                               "audio_params": ["format": "pcm", "sample_rate": Volc.rate, "speech_rate": Int(((min(max(speed, 0.5), 2)) - 1) * 100)]],   // 100 = 2 倍，-50 = 0.5 倍
             ])
         case .azure:
             let region = TTSKeys.get(e, "region").isEmpty ? "eastasia" : TTSKeys.get(e, "region")
@@ -257,15 +260,10 @@ enum CloudTTS {
         req.httpMethod = "POST"; req.timeoutInterval = 60
         let (data, resp) = try await URLSession.shared.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if e == .volc && (code == 401 || code == 403) { throw fail(L("火山引擎：AppID 或 Access Token 不对（要用「豆包语音合成模型2.0」页面底部的那两个）", "Volcengine: wrong AppID or Access Token")) }
         guard code == 200 else { throw fail("\(e.name)：HTTP \(code) " + String(decoding: data.prefix(300), as: UTF8.self)) }
         var audio = data
-        if e == .volc {
-            guard let j = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw fail(L("火山引擎返回的不对", "Bad response from Volcengine")) }
-            guard (j["code"] as? Int) == 3000, let b = (j["data"] as? String).flatMap({ Data(base64Encoded: $0) }) else {
-                throw fail("火山引擎：\(j["code"] ?? "") \(j["message"] ?? "")")
-            }
-            audio = b
-        }
+        if e == .volc { audio = try Volc.decode(data) }
         if e == .qwen {
             // 千问返回的是 JSON，里面给音频文件的地址
             guard let j = try JSONSerialization.jsonObject(with: data) as? [String: Any], let o = j["output"] as? [String: Any],
@@ -276,6 +274,43 @@ enum CloudTTS {
         let out = base.deletingPathExtension().appendingPathExtension(ext)
         try audio.write(to: out)
         return out
+    }
+}
+
+// 豆包 2.0 返回一串 JSON（分块传输）：每块 {"code":0,"data":"base64 的 pcm"}，最后一块 code 20000000；拼起来加 WAV 头
+enum Volc {
+    static let rate = 24000
+    static func decode(_ data: Data) throws -> Data {
+        var pcm = Data(), done = false
+        for chunk in jsonObjects(data) {
+            guard let j = try? JSONSerialization.jsonObject(with: chunk) as? [String: Any] else { continue }
+            let code = (j["code"] as? Int) ?? -1
+            if code == 0 { if let b = (j["data"] as? String).flatMap({ Data(base64Encoded: $0) }) { pcm.append(b) } }
+            else if code == 20000000 { done = true }
+            else { throw CloudTTS.fail(L("火山引擎：", "Volcengine: ") + "\(code) \(j["message"] ?? "")" + (code == 45000000 ? L("（这个声音没开通，或者服务没开通「豆包语音合成模型2.0」）", " (voice or the Doubao TTS 2.0 service isn't enabled)") : "")) }
+        }
+        guard !pcm.isEmpty else { throw CloudTTS.fail(L("火山引擎没返回声音", "Volcengine returned no audio") + (done ? "" : "：" + String(decoding: data.prefix(200), as: UTF8.self))) }
+        return wav(pcm)
+    }
+    // 把连在一起的 {…}{…}（中间可能有换行）切成一个个 JSON
+    static func jsonObjects(_ d: Data) -> [Data] {
+        var out: [Data] = [], depth = 0, inStr = false, esc = false, start = 0
+        for (i, c) in d.enumerated() {
+            if inStr { if esc { esc = false } else if c == 0x5C { esc = true } else if c == 0x22 { inStr = false }; continue }
+            if c == 0x22 { inStr = true }
+            else if c == 0x7B { if depth == 0 { start = i }; depth += 1 }
+            else if c == 0x7D { depth -= 1; if depth == 0 { out.append(d.subdata(in: start..<(i + 1))) } }
+        }
+        return out
+    }
+    static func wav(_ pcm: Data) -> Data {
+        var h = Data()
+        func u32(_ v: Int) { var x = UInt32(v).littleEndian; h.append(Data(bytes: &x, count: 4)) }
+        func u16(_ v: Int) { var x = UInt16(v).littleEndian; h.append(Data(bytes: &x, count: 2)) }
+        h.append(Data("RIFF".utf8)); u32(36 + pcm.count); h.append(Data("WAVEfmt ".utf8))
+        u32(16); u16(1); u16(1); u32(rate); u32(rate * 2); u16(2); u16(16)
+        h.append(Data("data".utf8)); u32(pcm.count)
+        return h + pcm
     }
 }
 
