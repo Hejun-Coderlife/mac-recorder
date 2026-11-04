@@ -414,12 +414,15 @@ namespace ScreenRecorder
                 if (dnd.Checked) Dnd.Begin();
                 StartCameraRecording(proj);
                 proj?.Tracker.Start();   // 比画面早一点开始记，第一帧前后都有鼠标位置
+                // 录的时候自己的窗口不出现在画面里（Windows 10 2004 及以后）；平时不设，用户才截得到它（同 Mac 版）
+                SetWindowDisplayAffinity(Handle, 0x11);
                 s.Start();
             }
             catch (Exception e)
             {
                 proj?.Tracker.Stop();
                 DesktopIcons.Restore(); Dnd.Restore(); AbortCameraRecording();
+                SetWindowDisplayAffinity(Handle, 0);
                 if (proj != null) try { Directory.Delete(proj.Dir, true); } catch { }
                 Say(L("开始录制失败：", "Couldn't start recording: ") + e.Message, true);
                 return;
@@ -449,6 +452,7 @@ namespace ScreenRecorder
             bool wasStopping = busy;
             var s = session; var proj = project;
             session = null; project = null; busy = false; timer.Stop();
+            SetWindowDisplayAffinity(Handle, 0);   // 录完了：又能截到主窗口
             DesktopIcons.Restore(); Dnd.Restore();
             StopCameraRecording(proj, s.Source, s.FirstFrameAt);
             UpdateUi();
@@ -544,8 +548,6 @@ namespace ScreenRecorder
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            // 自己的窗口不出现在录出来的画面里（Windows 10 2004 及以后）
-            SetWindowDisplayAffinity(Handle, 0x11);
             // 快捷键被别的程序占了（比如 QQ）：窗口底部写一行，右下角再弹个通知，告诉用户怎么改
             var taken = new System.Collections.Generic.List<string>();
             if (!Register(HotkeyId, RecordKey)) taken.Add(L($"录屏快捷键 {RecordKey}", $"Record shortcut {RecordKey}"));

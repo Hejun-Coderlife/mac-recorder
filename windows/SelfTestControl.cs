@@ -19,6 +19,7 @@ namespace ScreenRecorder
 {
     static class SelfTestControl
     {
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetWindowDisplayAffinity(IntPtr h, out uint affinity);
         static string Env(string k) => Environment.GetEnvironmentVariable(k);
         static string Tmp(string f) => Path.Combine(Path.GetTempPath(), f);
 
@@ -162,6 +163,15 @@ namespace ScreenRecorder
                 // 普通录制 2 秒：返回文件（CTL_NOREC=1 跳过：在别人正用着的电脑上跑时别录屏）
                 if (Env("CTL_NOREC") != "1")
                 {
+                    // 主窗口只在录的时候不让截图捕获（平时用户要截得到它）
+                    uint Aff() { uint a = 9; ControlServer.Host.Invoke((Action)(() => GetWindowDisplayAffinity(ControlServer.Host.Handle, out a))); return a; }
+                    uint idle = Aff();
+                    var (s1, _, s1Err) = m.Call("start_recording", new Dictionary<string, object> { ["studio"] = false, ["microphone"] = false, ["system_audio"] = false });
+                    uint during = Aff();
+                    var (s2, _, _) = m.Call("stop_recording");
+                    uint after = Aff();
+                    Check("main window hidden from capture only while recording", !s1Err && idle == 0 && during == 0x11 && after == 0, $"idle {idle:x} during {during:x} after {after:x}");
+                    if (s2.TryGetValue("file", out var f2) && f2 is string ff) try { File.Delete(ff); } catch { }
                     var (sr, _, srErr) = m.Call("start_recording", new Dictionary<string, object> { ["seconds"] = 2.0, ["studio"] = false, ["microphone"] = false, ["system_audio"] = false });
                     var recFile = sr.TryGetValue("file", out var rf) ? rf as string : null;
                     Check("start_recording 2 s (plain) → file", !srErr && recFile != null && File.Exists(recFile), JsonOut.Write(sr));

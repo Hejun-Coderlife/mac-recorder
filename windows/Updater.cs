@@ -80,13 +80,23 @@ namespace ScreenRecorder
         {
             Settings.SetString("lastUpdateCheck", DateTime.UtcNow.Ticks.ToString());
             string json;
-            using (var c = Client())
+            try
             {
-                c.Headers[HttpRequestHeader.Accept] = "application/vnd.github+json";
-                // CI 自测时带上令牌，免得共享 IP 撞上 GitHub 的匿名限额
-                var token = Environment.GetEnvironmentVariable("UPDATE_TOKEN");
-                if (!string.IsNullOrEmpty(token)) c.Headers[HttpRequestHeader.Authorization] = "Bearer " + token;
-                json = await c.DownloadStringTaskAsync($"https://api.github.com/repos/{Repo}/releases/latest");
+                if (Environment.GetEnvironmentVariable("UPDATE_FORCE_PAGE") == "1") throw new WebException("forced page fallback (self-test)");
+                using (var c = Client())
+                {
+                    c.Headers[HttpRequestHeader.Accept] = "application/vnd.github+json";
+                    // CI 自测时带上令牌，免得共享 IP 撞上 GitHub 的匿名限额
+                    var token = Environment.GetEnvironmentVariable("UPDATE_TOKEN");
+                    if (!string.IsNullOrEmpty(token)) c.Headers[HttpRequestHeader.Authorization] = "Bearer " + token;
+                    json = await c.DownloadStringTaskAsync($"https://api.github.com/repos/{Repo}/releases/latest");
+                }
+            }
+            catch (WebException)
+            {
+                // 接口不让查（403：匿名每小时 60 次，同一个网络出口的电脑共用，门店、公司里很容易用完；2026-11-04 实测）：
+                // 改走网页 releases/latest 的跳转拿版本号，下载地址按固定格式拼（网页没有这个限额）
+                return await Task.Run(() => CheckByPage());
             }
             var tag = Regex.Match(json, "\"tag_name\"\\s*:\\s*\"([^\"]+)\"").Groups[1].Value;
             var urls = Regex.Matches(json, "\"browser_download_url\"\\s*:\\s*\"([^\"]+)\"").Cast<Match>().Select(m => m.Groups[1].Value).ToList();
@@ -95,6 +105,36 @@ namespace ScreenRecorder
             if (tag == "" || url == null) return null;
             var v = Parse(tag);
             return Compare(v, Current) > 0 ? new Release { Tag = tag, Version = v, Url = url } : null;
+        }
+
+        public static string LastCheckSource = "api";   // 自测：这次是从接口还是网页查到的
+
+        static Release CheckByPage()
+        {
+            LastCheckSource = "page";
+            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+            var q = (HttpWebRequest)WebRequest.Create($"https://github.com/{Repo}/releases/latest");
+            q.Method = "HEAD"; q.AllowAutoRedirect = false; q.UserAgent = "ScreenRecorder-Windows/" + Show(Current); q.Timeout = 20000;
+            string loc;
+            using (var r = (HttpWebResponse)q.GetResponse()) loc = r.Headers["Location"] ?? "";
+            var m = Regex.Match(loc, @"/releases/tag/([^/?#]+)");
+            if (!m.Success) return null;
+            var tag = Uri.UnescapeDataString(m.Groups[1].Value);
+            var v = Parse(tag);
+            if (Compare(v, Current) <= 0) return null;
+            // 这一版有没有 Windows 的 exe（只发了 Mac 的就当没有新版）
+            foreach (var name in new[] { ExeAsset, AssetName })
+            {
+                var url = $"https://github.com/{Repo}/releases/download/{tag}/{name}";
+                try
+                {
+                    var h = (HttpWebRequest)WebRequest.Create(url);
+                    h.Method = "HEAD"; h.AllowAutoRedirect = true; h.UserAgent = q.UserAgent; h.Timeout = 20000;
+                    using (var r = (HttpWebResponse)h.GetResponse()) if ((int)r.StatusCode == 200) return new Release { Tag = tag, Version = v, Url = url };
+                }
+                catch (WebException) { }
+            }
+            return null;
         }
 
         public static string AppDir => Path.GetDirectoryName(System.Windows.Forms.Application.ExecutablePath);
@@ -232,7 +272,7 @@ namespace ScreenRecorder
                 if (r == null) { File.WriteAllText(result, "UPTODATE current=" + Show(Current) + "\r\n"); return 0; }
                 if (!CanWriteAppDir()) { File.WriteAllText(result, "FAIL app folder not writable: " + AppDir + "\r\n"); return 1; }
                 var v = StageAsync(r, _ => { }).GetAwaiter().GetResult();
-                File.WriteAllText(result, $"STAGED tag={r.Tag} version={Show(v)} current={Show(Current)} from={r.Url} staged={StagedVersion != null}\r\n");
+                File.WriteAllText(result, $"STAGED tag={r.Tag} version={Show(v)} current={Show(Current)} from={r.Url} source={LastCheckSource} staged={StagedVersion != null}\r\n");
                 if (!ApplyStaged(Environment.GetEnvironmentVariable("UPDATE_NORELAUNCH") == null)) throw new Exception("apply failed");
                 File.AppendAllText(result, $"REPLACED OK updatedTo={Settings.GetString("updatedTo", "")} stageLeft={Directory.Exists(StageDir)}\r\n");
                 return 0;

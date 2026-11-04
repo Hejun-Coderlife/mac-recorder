@@ -194,6 +194,16 @@ jobs:
           if ($txt -notmatch "stageLeft=False") { throw "staged copy not cleaned up" }
           if ($txt -notmatch "updatedTo=$([regex]::Escape($tag))") { throw "updatedTo should be $tag" }
           foreach ($k in "UPDATE_TEST", "UPDATE_FAKE_VERSION", "UPDATE_NORELAUNCH", "UPDATE_TOKEN") { Remove-Item "env:$k" }
+          # GitHub 接口 403（匿名限额用完）时走网页 releases/latest 的跳转：同样换成线上最新版
+          $dirp = Join-Path $env:RUNNER_TEMP "pagefallback"; New-Item -ItemType Directory -Force $dirp | Out-Null
+          Copy-Item "pkg\录屏.exe" "$dirp\录屏.exe"
+          $env:UPDATE_TEST = "1"; $env:UPDATE_FAKE_VERSION = "1.0"; $env:UPDATE_NORELAUNCH = "1"; $env:UPDATE_FORCE_PAGE = "1"
+          $p = Start-Process -FilePath "$dirp\录屏.exe" -Wait -PassThru
+          foreach ($k in "UPDATE_TEST", "UPDATE_FAKE_VERSION", "UPDATE_NORELAUNCH", "UPDATE_FORCE_PAGE") { Remove-Item "env:$k" }
+          $txt = Get-Content "$env:TEMP\update_test.txt" -Raw
+          Write-Host "page fallback: exit=$($p.ExitCode)`n$txt"
+          if ($p.ExitCode -ne 0 -or $txt -notmatch "source=page" -or $txt -notmatch "REPLACED OK") { throw "page fallback update failed" }
+          if ((Get-FileHash "$dirp\录屏.exe").Hash -ne $expected) { throw "page fallback: 录屏.exe is not the release build" }
           # 下次启动删 .old
           $dir2 = Join-Path $env:RUNNER_TEMP "old"; New-Item -ItemType Directory -Force $dir2 | Out-Null
           Copy-Item pkg/录屏.exe $dir2; Set-Content "$dir2\录屏.exe.old" "old"
