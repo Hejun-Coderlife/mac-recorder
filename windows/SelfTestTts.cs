@@ -56,6 +56,41 @@ namespace ScreenRecorder
                 TtsKeys.Set("openai", "key", ""); var gone = TtsKeys.Get("openai");
                 Check("key saved in Credential Manager, then removed", got == "sk-test-键" && gone == "", $"'{got}' '{gone}'");
                 Tts.Rate = 9; Check("speed clamped to 0.5–1.6", Tts.Rate == 1.6, $"{Tts.Rate}"); Tts.Rate = 1;
+                // ---- 豆包语音合成 2.0：分块 JSON → pcm → WAV（同 Mac 版 Volc.decode）----
+                {
+                    var p1 = new byte[480]; var p2 = new byte[960];
+                    for (int i = 0; i < p1.Length; i++) p1[i] = (byte)(i * 7); for (int i = 0; i < p2.Length; i++) p2[i] = (byte)(i * 3 + 1);
+                    // 第二块的 message 里带 { }、引号、反斜杠，块和块之间有的有换行、有的没有
+                    var stream = "{\"code\":0,\"message\":\"\",\"data\":\"" + Convert.ToBase64String(p1) + "\"}\n" +
+                                 "{\"code\":0,\"message\":\"a{b}c \\\"q\\\" \\\\ {\",\"data\":\"" + Convert.ToBase64String(p2) + "\"}" +
+                                 "{\"code\":20000000,\"message\":\"ok\",\"data\":\"\"}\r\n";
+                    var bytes = Encoding.UTF8.GetBytes(stream);
+                    var objs = Volc.JsonObjects(bytes);
+                    var wav = Volc.Decode(bytes);
+                    var vf = Path.Combine(tmp, "volc.wav"); File.WriteAllBytes(vf, wav);
+                    bool same = wav.Length == 44 + p1.Length + p2.Length && wav.Skip(44).Take(p1.Length).SequenceEqual(p1) && wav.Skip(44 + p1.Length).SequenceEqual(p2);
+                    Check("Doubao 2.0: chunked JSON split (braces / quotes inside strings), pcm joined in order, 24 kHz 16-bit mono WAV header",
+                          objs.Count == 3 && same && Encoding.ASCII.GetString(wav, 0, 4) == "RIFF" && BitConverter.ToInt32(wav, 24) == 24000 && BitConverter.ToInt16(wav, 22) == 1 && BitConverter.ToInt16(wav, 34) == 16
+                          && Math.Abs(Tts.Length(vf) - (p1.Length + p2.Length) / 48000.0) < 1e-9, $"{objs.Count} chunks, {wav.Length} bytes");
+                    string e45 = Throws(() => Volc.Decode(Encoding.UTF8.GetBytes("{\"code\":0,\"data\":\"" + Convert.ToBase64String(p1) + "\"}{\"code\":45000000,\"message\":\"speaker permission denied {x}\"}")));
+                    Check("Doubao 2.0: 45000000 → error with code, message and the 'not enabled' hint", e45.Contains("45000000") && e45.Contains("speaker permission denied {x}") && (e45.Contains("没开通") || e45.Contains("isn't enabled")), e45);
+                    string eEmpty = Throws(() => Volc.Decode(Encoding.UTF8.GetBytes("{\"code\":20000000,\"message\":\"ok\"}")));
+                    Check("Doubao 2.0: no audio → error", eEmpty != "", eEmpty);
+                    // 存的老声音（1.0 的 *_moon_bigtts、BV001_streaming）不在 2.0 列表里：用第一个
+                    string oldV = Settings.GetString("ttsVoice.volc", null);
+                    Tts.SetVoice("volc", "zh_female_shuangkuaisisi_moon_bigtts"); var v1 = Tts.Voice("volc");
+                    Tts.SetVoice("volc", "BV001_streaming"); var v2 = Tts.Voice("volc");
+                    Tts.SetVoice("volc", "zh_male_m191_uranus_bigtts"); var v3 = Tts.Voice("volc");
+                    Tts.SetVoice("volc", oldV ?? "");
+                    Check("Doubao 2.0: voices are *_uranus_bigtts; an old 1.0 voice falls back to the first", Tts.Voices("volc").All(x => x.id.EndsWith("_uranus_bigtts")) && Tts.Voices("volc").Count == 10
+                          && v1 == "zh_female_vv_uranus_bigtts" && v2 == "zh_female_vv_uranus_bigtts" && v3 == "zh_male_m191_uranus_bigtts", $"{v1} {v2} {v3}");
+                    // 假 key 真打一次接口：401 → 中文提示 AppID / Access Token 不对
+                    string oldK = TtsKeys.Get("volc"), oldR = TtsKeys.Get("volc", "region");
+                    TtsKeys.Set("volc", "key", "fake-token-" + Guid.NewGuid().ToString("N").Substring(0, 6)); TtsKeys.Set("volc", "region", "1234567890");
+                    string e401 = Throws(() => CloudTts.Synth("volc", "你好", "zh_female_vv_uranus_bigtts", 1, Path.Combine(tmp, "v.wav")));
+                    TtsKeys.Set("volc", "key", oldK); TtsKeys.Set("volc", "region", oldR);
+                    Check("Doubao 2.0: real request with a fake key → 'wrong AppID or Access Token'", e401.Contains("AppID 或 Access Token 不对") || e401.Contains("wrong AppID or Access Token"), e401);
+                }
                 Check("cloud engine without a key says so", Throws(() => CloudTts.Synth("qwen", "hi", "Cherry", 1, Path.Combine(tmp, "x.wav"))).Contains("key"), "");
 
                 // ---- 系统声音：念一句英文 ----

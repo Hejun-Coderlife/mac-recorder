@@ -53,12 +53,13 @@ namespace ScreenRecorder
             {
                 case "local": return LocalTts.Voices;
                 case "volc":
+                    // 豆包语音合成 2.0（seed-tts-2.0 只认 2.0 的声音，名字以 _uranus_bigtts 结尾），同 Mac 版
                     return new List<(string, string)> {
-                        ("zh_female_shuangkuaisisi_moon_bigtts", L("爽快思思（女）", "Sisi (female)")), ("zh_male_wennuanahu_moon_bigtts", L("温暖阿虎（男）", "Ahu (male)")),
-                        ("zh_female_tianmeixiaoyuan_moon_bigtts", L("甜美小源（女）", "Xiaoyuan (female)")), ("zh_male_shaonianzixin_moon_bigtts", L("少年梓辛（男）", "Zixin (male)")),
-                        ("zh_female_wanwanxiaohe_moon_bigtts", L("湾湾小何（台湾腔）", "Xiaohe (Taiwanese)")), ("zh_male_jingqiangkanye_moon_bigtts", L("京腔侃爷（北京话）", "Kanye (Beijing)")),
-                        ("zh_male_M392_conversation_wvae_bigtts", L("对话男声", "Conversational male")),
-                        ("BV001_streaming", L("通用女声（免费）", "Standard female (free)")), ("BV002_streaming", L("通用男声（免费）", "Standard male (free)")) };
+                        ("zh_female_vv_uranus_bigtts", L("Vivi 2.0（女）", "Vivi 2.0 (female)")), ("zh_female_xiaohe_uranus_bigtts", L("小何 2.0（女）", "Xiaohe 2.0 (female)")),
+                        ("zh_male_m191_uranus_bigtts", L("云舟 2.0（男）", "Yunzhou 2.0 (male)")), ("zh_male_taocheng_uranus_bigtts", L("小天 2.0（男）", "Xiaotian 2.0 (male)")),
+                        ("zh_male_liufei_uranus_bigtts", L("刘飞 2.0（男）", "Liufei 2.0 (male)")), ("zh_female_sophie_uranus_bigtts", L("魅力苏菲 2.0（女）", "Sophie 2.0 (female)")),
+                        ("zh_female_qingxinnvsheng_uranus_bigtts", L("清新女声 2.0", "Fresh female 2.0")), ("zh_female_tianmeixiaoyuan_uranus_bigtts", L("甜美小源 2.0（女）", "Xiaoyuan 2.0 (female)")),
+                        ("en_male_tim_uranus_bigtts", "Tim (EN)"), ("en_female_dacey_uranus_bigtts", "Dacey (EN)") };
                 case "azure":
                     return new List<(string, string)> {
                         ("zh-CN-YunxiNeural", L("云希（男，年轻）", "Yunxi (male)")), ("zh-CN-YunjianNeural", L("云健（男，浑厚）", "Yunjian (male)")),
@@ -81,7 +82,14 @@ namespace ScreenRecorder
             get { var e = Settings.GetString("ttsEngine", "local"); return Engines.Contains(e) ? e : "local"; }
             set => Settings.SetString("ttsEngine", value);
         }
-        public static string Voice(string e) => Settings.GetString("ttsVoice." + e, e == "system" ? "" : Voices(e).FirstOrDefault().id ?? "");
+        // 存的声音已经不在列表里（比如豆包从 1.0 换到 2.0）就用列表第一个，同 Mac 版
+        public static string Voice(string e)
+        {
+            var v = Settings.GetString("ttsVoice." + e, null);
+            if (e == "system") return v ?? "";
+            var list = Voices(e);
+            return v != null && list.Any(x => x.id == v) ? v : list.FirstOrDefault().id ?? "";
+        }
         public static void SetVoice(string e, string v) => Settings.SetString("ttsVoice." + e, v ?? "");
         public static double Rate
         {
@@ -396,6 +404,7 @@ namespace ScreenRecorder
     // ---- 云端声音（同 Mac 版 CloudTTS）----
     static class CloudTts
     {
+        public static string VolcUrl;   // 自测用：换成本机假服务器
         static Exception Fail(string s) => new Exception(s);
         // 念成音频文件，返回文件（扩展名按格式）
         public static string Synth(string e, string text, string voice, double speed, string basePath)
@@ -410,17 +419,21 @@ namespace ScreenRecorder
             {
                 case "volc":
                 {
-                    // 豆包语音合成（V1 HTTP）：AppID 填在 region 那一格，Access Token 是 key；头里是「Bearer;」加 token
+                    // 豆包语音合成 2.0（V3 HTTP 单向流式，旧版控制台的 APP ID + Access Token，同 Mac 版）：AppID 填在 region 那一格，Access Token 是 key。
+                    // 火山引擎新账号只能开「豆包语音合成模型2.0」，以前的 V1 接口（/api/v1/tts + volcano_tts + *_moon_bigtts）调不通
                     var appid = TtsKeys.Get(e, "region");
                     if (appid == "") throw Fail(L("还要填火山引擎的 AppID", "Enter your Volcengine AppID too"));
-                    url = "https://openspeech.bytedance.com/api/v1/tts";
-                    headers["Authorization"] = "Bearer;" + key;
+                    url = VolcUrl ?? "https://openspeech.bytedance.com/api/v3/tts/unidirectional";
+                    headers["X-Api-App-Id"] = appid; headers["X-Api-Access-Key"] = key;
+                    headers["X-Api-Resource-Id"] = "seed-tts-2.0"; headers["X-Api-Request-Id"] = Guid.NewGuid().ToString();
                     body = J(new Dictionary<string, object>
                     {
-                        ["app"] = new Dictionary<string, object> { ["appid"] = appid, ["token"] = "access_token", ["cluster"] = "volcano_tts" },
                         ["user"] = new Dictionary<string, object> { ["uid"] = "recorder" },
-                        ["audio"] = new Dictionary<string, object> { ["voice_type"] = voice, ["encoding"] = "wav", ["speed_ratio"] = sp },
-                        ["request"] = new Dictionary<string, object> { ["reqid"] = Guid.NewGuid().ToString(), ["text"] = text, ["operation"] = "query" },
+                        ["req_params"] = new Dictionary<string, object>
+                        {
+                            ["text"] = text, ["speaker"] = voice,
+                            ["audio_params"] = new Dictionary<string, object> { ["format"] = "pcm", ["sample_rate"] = Volc.Rate, ["speech_rate"] = (int)((sp - 1) * 100) },   // 100 = 2 倍，-50 = 0.5 倍
+                        },
                     });
                     break;
                 }
@@ -453,16 +466,10 @@ namespace ScreenRecorder
                 default: throw Fail("bad engine");
             }
             var (code, data) = Post(url, ctype, headers, Encoding.UTF8.GetBytes(body));
+            if (e == "volc" && (code == 401 || code == 403)) throw Fail(L("火山引擎：AppID 或 Access Token 不对（要用「豆包语音合成模型2.0」页面底部的那两个）", "Volcengine: wrong AppID or Access Token"));
             if (code != 200) throw Fail($"{Tts.Name(e)}：HTTP {code} " + Head(data));
             var audio = data;
-            if (e == "volc")
-            {
-                Dictionary<string, object> j;
-                try { j = (Dictionary<string, object>)Json.Parse(Encoding.UTF8.GetString(data)); } catch { throw Fail(L("火山引擎返回的不对", "Bad response from Volcengine")); }
-                if (!(j.TryGetValue("code", out var c) && Convert.ToInt32(c) == 3000 && j.TryGetValue("data", out var d) && d is string b64))
-                    throw Fail($"火山引擎：{(j.TryGetValue("code", out var c2) ? c2 : "")} {(j.TryGetValue("message", out var msg) ? msg : "")}");
-                audio = Convert.FromBase64String(b64);
-            }
+            if (e == "volc") audio = Volc.Decode(data);
             if (e == "qwen")
             {
                 // 千问返回的是 JSON，里面给音频文件的地址
@@ -527,6 +534,56 @@ namespace ScreenRecorder
             }
         }
         static string Head(byte[] d) { var s = Encoding.UTF8.GetString(d, 0, Math.Min(d.Length, 300)); return s; }
+    }
+
+    // 豆包 2.0 返回一串 JSON（分块传输）：每块 {"code":0,"data":"base64 的 pcm"}，最后一块 code 20000000；拼起来加 WAV 头（同 Mac 版 enum Volc）
+    static class Volc
+    {
+        public const int Rate = 24000;
+        public static byte[] Decode(byte[] data)
+        {
+            var pcm = new MemoryStream(); bool done = false;
+            foreach (var chunk in JsonObjects(data))
+            {
+                Dictionary<string, object> j;
+                try { j = Json.Parse(Encoding.UTF8.GetString(chunk)) as Dictionary<string, object>; } catch { continue; }
+                if (j == null) continue;
+                long code = j.TryGetValue("code", out var c) && c is double cd ? (long)cd : -1;
+                if (code == 0) { if (j.TryGetValue("data", out var d) && d is string b64 && b64 != "") { var b = Convert.FromBase64String(b64); pcm.Write(b, 0, b.Length); } }
+                else if (code == 20000000) done = true;
+                else
+                    throw new Exception(L("火山引擎：", "Volcengine: ") + $"{code} {(j.TryGetValue("message", out var m) ? m : "")}" +
+                                        (code == 45000000 ? L("（这个声音没开通，或者服务没开通「豆包语音合成模型2.0」）", " (voice or the Doubao TTS 2.0 service isn't enabled)") : ""));
+            }
+            if (pcm.Length == 0)
+                throw new Exception(L("火山引擎没返回声音", "Volcengine returned no audio") + (done ? "" : "：" + Encoding.UTF8.GetString(data, 0, Math.Min(200, data.Length))));
+            return Wav(pcm.ToArray());
+        }
+
+        // 把连在一起的 {…}{…}（中间可能有换行）切成一个个 JSON；字符串里的括号、转义跳过
+        public static List<byte[]> JsonObjects(byte[] d)
+        {
+            var outL = new List<byte[]>(); int depth = 0, start = 0; bool inStr = false, esc = false;
+            for (int i = 0; i < d.Length; i++)
+            {
+                byte c = d[i];
+                if (inStr) { if (esc) esc = false; else if (c == 0x5C) esc = true; else if (c == 0x22) inStr = false; continue; }
+                if (c == 0x22) inStr = true;
+                else if (c == 0x7B) { if (depth == 0) start = i; depth++; }
+                else if (c == 0x7D && depth > 0) { depth--; if (depth == 0) { var o = new byte[i + 1 - start]; Array.Copy(d, start, o, 0, o.Length); outL.Add(o); } }
+            }
+            return outL;
+        }
+
+        // 24000Hz、单声道、16 位 pcm 前面加 44 字节 WAV 头
+        public static byte[] Wav(byte[] pcm)
+        {
+            var ms = new MemoryStream(); var w = new BinaryWriter(ms);
+            w.Write(Encoding.ASCII.GetBytes("RIFF")); w.Write(36 + pcm.Length); w.Write(Encoding.ASCII.GetBytes("WAVEfmt "));
+            w.Write(16); w.Write((short)1); w.Write((short)1); w.Write(Rate); w.Write(Rate * 2); w.Write((short)2); w.Write((short)16);
+            w.Write(Encoding.ASCII.GetBytes("data")); w.Write(pcm.Length); w.Write(pcm); w.Flush();
+            return ms.ToArray();
+        }
     }
 
     // ---- Windows 自带声音（System.Speech / SAPI）----
