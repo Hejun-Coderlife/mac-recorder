@@ -204,7 +204,7 @@ final class Recorder: NSObject, ObservableObject {
             let me = Bundle.main.bundleIdentifier
             let wins = c.windows.filter { w in
                 w.windowLayer == 0 && w.frame.width >= 200 && w.frame.height >= 150 &&
-                w.owningApplication?.bundleIdentifier != me && !(w.title ?? "").isEmpty
+                (w.owningApplication?.bundleIdentifier != me || Self.capturable(w)) && !(w.title ?? "").isEmpty   // 本程序的剪辑窗口、AI 控制窗口也能单独录
             }.sorted { ($0.owningApplication?.applicationName ?? "") < ($1.owningApplication?.applicationName ?? "") }
             for w in wins {
                 list.append(Source(id: "w\(w.windowID)", title: w.owningApplication?.applicationName ?? L("窗口", "Window"),
