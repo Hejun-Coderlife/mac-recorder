@@ -217,6 +217,7 @@ struct AIConnectView: View {
     }
 
     private static var window: NSWindow?
+    @MainActor static var currentWindow: NSWindow? { window }
     @MainActor static func show() {
         if let w = window { w.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
         let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 580, height: 820), styleMask: [.titled, .closable], backing: .buffered, defer: false)

@@ -274,19 +274,22 @@ final class Recorder: NSObject, ObservableObject {
         }
         // 画面范围
         let filter: SCContentFilter
+        var filterSig: [CGWindowID] = [], filterDisplay: SCDisplay?
         var crop: CGRect?
         let area: () -> CGRect?               // 录的范围在全局坐标里的位置（点，左上角为原点），给鼠标轨迹换算用
         if sel == "r" {
             guard let r = region, let d = c.displays.first(where: { $0.displayID == r.display }) else {
                 say(L("那块屏幕不见了，重新选一下区域", "That screen is gone, select the area again"), error: true); return
             }
-            filter = await displayFilter(d, content: c, keepBubble: camera && !studio)
+            (filter, filterSig) = await displayFilter(d, content: c, keepBubble: camera && !studio)
+            filterDisplay = d
             crop = r.rect
             let a = r.rect.offsetBy(dx: CGDisplayBounds(r.display).minX, dy: CGDisplayBounds(r.display).minY)
             area = { a }
         } else if sel.hasPrefix("d"), let d = c.displays.first(where: { "d\($0.displayID)" == sel }) {
             // 整个屏幕：把本程序自己的窗口排除掉（普通录制开着摄像头时小窗留着，直接录进画面）
-            filter = await displayFilter(d, content: c, keepBubble: camera && !studio)
+            (filter, filterSig) = await displayFilter(d, content: c, keepBubble: camera && !studio)
+            filterDisplay = d
             let a = CGDisplayBounds(d.displayID)
             area = { a }
         } else if let w = c.windows.first(where: { "w\($0.windowID)" == sel }) {
@@ -366,6 +369,18 @@ final class Recorder: NSObject, ObservableObject {
             return
         }
         stream = s; writer = w; lastFile = url; tracker = tr; project = dir
+        if let fd = filterDisplay {   // 整屏 / 区域：窗口开关时跟着更新排除名单
+            let keepBubble = camera && !studio
+            Task { @MainActor [weak self] in
+                var sig = filterSig
+                while let self, self.stream === s {
+                    try? await Task.sleep(for: .seconds(0.3))
+                    guard self.stream === s else { break }
+                    let (f, n) = await self.displayFilter(fd, content: c, keepBubble: keepBubble)
+                    if n != sig, self.stream === s { try? await s.updateContentFilter(f); sig = n }
+                }
+            }
+        }
         recording = true; startedAt = Date(); elapsed = 0; say("")
         Focus.begin()   // 开了「录制时开启勿扰」：不弹通知
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
@@ -376,18 +391,32 @@ final class Recorder: NSObject, ObservableObject {
         NSSound(named: "Tink")?.play()
     }
 
-    // 录整个屏幕 / 区域的范围：排除本程序；开了「隐藏桌面图标」再排除访达画桌面图标的那层窗口
-    private func displayFilter(_ d: SCDisplay, content c: SCShareableContent, keepBubble: Bool = false) async -> SCContentFilter {
+    // 录整个屏幕 / 区域的范围：排除本程序的主窗口、状态栏、录制浮层（剪辑窗口、AI 控制窗口和它们弹出的面板 / 菜单照常录，
+    // 这样能用录屏录「怎么剪辑」的教程）；输入法候选条不录；开了「隐藏桌面图标」再排除访达画桌面图标的那层窗口。
+    // 录制中每 0.3 秒按当前窗口重算一次（之后才打开的面板也能进画面），返回的 sig 用来判断要不要更新
+    private func displayFilter(_ d: SCDisplay, content c: SCShareableContent, keepBubble: Bool = false) async -> (SCContentFilter, [CGWindowID]) {
         let me = Bundle.main.bundleIdentifier
         let bubbleID = keepBubble ? CameraBubble.shared.windowID : nil
-        let fresh = bubbleID != nil ? try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) : nil
-        guard hideDesktopIcons, let all = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else {
-            let keep = (fresh ?? c).windows.filter { $0.windowID == bubbleID }
-            return SCContentFilter(display: d, excludingApplications: c.applications.filter { $0.bundleIdentifier == me || Self.isInputMethod($0.bundleIdentifier) }, exceptingWindows: keep)
+        let all = (try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)) ?? c
+        func mine(_ w: SCWindow) -> Bool { w.owningApplication?.bundleIdentifier == me }
+        let keep = all.windows.filter { mine($0) && ($0.windowID == bubbleID || Self.capturable($0)) }
+        if !hideDesktopIcons {
+            let apps = all.applications.filter { $0.bundleIdentifier == me || Self.isInputMethod($0.bundleIdentifier) }
+            return (SCContentFilter(display: d, excludingApplications: apps, exceptingWindows: keep), keep.map(\.windowID).sorted())
         }
-        let skip = all.windows.filter { ($0.owningApplication?.bundleIdentifier == me && $0.windowID != bubbleID) || Self.isDesktopIcons($0) || Self.isInputMethod($0.owningApplication?.bundleIdentifier ?? "") }
-        return SCContentFilter(display: d, excludingWindows: skip)
+        let keepIDs = Set(keep.map(\.windowID))
+        let skip = all.windows.filter { (mine($0) && !keepIDs.contains($0.windowID)) || Self.isDesktopIcons($0) || Self.isInputMethod($0.owningApplication?.bundleIdentifier ?? "") }
+        return (SCContentFilter(display: d, excludingWindows: skip), skip.map(\.windowID).sorted() + [0] + keepIDs.sorted())
     }
+    // 本程序的这个窗口录不录：剪辑窗口、AI 控制窗口，以及挂在它们上面的面板 / 弹出框 / 表单录；
+    // 主窗口、状态栏、录制用的浮层不录。找不到对应 NSWindow 的（右键菜单等）按层级：菜单层以上算弹出菜单，录
+    static func capturable(_ sw: SCWindow) -> Bool {
+        guard var w = NSApp.window(withWindowNumber: Int(sw.windowID)) else { return sw.windowLayer >= Int(CGWindowLevelForKey(.popUpMenuWindow)) }
+        while let up = w.parent ?? w.sheetParent { w = up }
+        let editors = StudioEditor.open.values.compactMap(\.window)
+        return editors.contains(w) || w === AIConnectView.currentWindow
+    }
+
     // 输入法的候选条、输入法切换提示：不录进去（打出来的字照样录到，那是在被打字的程序里）
     // 系统自带（拼音、注音、日文…）、系统输入提示，以及常见第三方：搜狗、微信输入法、百度、讯飞、QQ、手心、RIME（鼠须管）
     nonisolated static func isInputMethod(_ id: String) -> Bool {
