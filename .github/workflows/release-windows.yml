@@ -1,0 +1,44 @@
+# 发布 Windows 版：把某一次 windows.yml 编好、自测全过的 ScreenRecorder-Windows-x64（exe + zip）直接发成新版本，
+# 文件在 GitHub 服务器之间传，不经过本地电脑（国内上传下载 150MB 很慢）。
+# 用法：gh workflow run release-windows.yml -f run_id=<windows.yml 那次的编号> -f tag=v1.6.1 -f title="…" -f notes_path=<仓库里的说明文件>
+name: Release Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id: { description: "windows.yml 那一次的 run id（必须是 success）", required: true }
+      tag: { description: "版本号，比如 v1.6.1", required: true }
+      title: { description: "发布标题", required: true }
+      notes_path: { description: "发布说明文件（仓库里的路径）", required: true }
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 确认那次编译自测全过、版本号对得上
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          set -e
+          c=$(gh run view "${{ inputs.run_id }}" --repo "${{ github.repository }}" --json conclusion,workflowName -q '.workflowName + " " + .conclusion')
+          echo "run: $c"
+          case "$c" in *" success") ;; *) echo "那次编译没有全部通过"; exit 1 ;; esac
+      - uses: actions/download-artifact@v4
+        with:
+          name: ScreenRecorder-Windows-x64
+          path: dist
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: 发布
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          set -e
+          ls -la dist
+          sha=$(gh run view "${{ inputs.run_id }}" --repo "${{ github.repository }}" --json headSha -q .headSha)
+          gh release create "${{ inputs.tag }}" dist/ScreenRecorder.exe dist/ScreenRecorder-Windows-x64.zip \
+            --repo "${{ github.repository }}" --target "$sha" --title "${{ inputs.title }}" --notes-file "${{ inputs.notes_path }}" --latest
+          gh release view "${{ inputs.tag }}" --repo "${{ github.repository }}" --json assets -q '.assets[] | "\(.name) \(.size)"'
