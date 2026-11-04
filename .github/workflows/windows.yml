@@ -702,6 +702,16 @@ jobs:
           Write-Host "exit=$($p.ExitCode) wall=$([int]$sw.Elapsed.TotalSeconds)s`n$txt"
           if ($p.ExitCode -ne 0 -or -not $txt.StartsWith("OK")) { throw "text-to-speech tests failed" }
 
+      - name: AI 控制（MCP：录屏.exe --mcp 子进程真发 JSON-RPC，10 个工具、坏口令、ctl 命令行、接上 JSON / TOML 配置）
+        run: |
+          foreach ($k in "AUTOTEST", "AUTOSTUDIO", "AUTOINPUT", "AUTOAUDIO", "AUTOOUT", "STUDIO_COMPOSE", "STUDIO_ENCODER", "STUDIO") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $env:CTLTEST = (Join-Path $env:RUNNER_TEMP "studio/project"); $env:CTLSHOT = (Join-Path $env:RUNNER_TEMP "studio/editor/ai-control.png"); $env:APP_LANG = "zh"
+          $p = Start-Process -FilePath "pkg/录屏.exe" -Wait -PassThru
+          foreach ($k in "CTLTEST", "CTLSHOT", "APP_LANG") { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+          $txt = Get-Content "$env:TEMP/ctl_test.txt" -Raw -Encoding UTF8
+          Write-Host "exit=$($p.ExitCode)`n$txt"
+          if ($p.ExitCode -ne 0 -or -not $txt.StartsWith("OK")) { throw "AI control tests failed" }
+
       - name: W3 - camera capture (a video file stands in for the camera) + do not disturb (banners off, restored, also after a crash)
         run: |
           $cam = Join-Path $env:RUNNER_TEMP "studio/w3cam"; New-Item -ItemType Directory -Force $cam | Out-Null

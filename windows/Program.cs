@@ -61,6 +61,13 @@ namespace ScreenRecorder
         [STAThread]
         static int Main()
         {
+            // AI 控制：「--mcp」当 MCP 服务、「ctl 工具名 '{json}'」当命令行（都不开界面，把调用转给正在运行的录屏）
+            var argv = Environment.GetCommandLineArgs().Skip(1).ToArray();
+            if (argv.Length > 0 && (argv[0] == "--mcp" || argv[0] == "ctl"))
+            {
+                App2.Lang = L;
+                return argv[0] == "--mcp" ? McpBridge.Run() : ControlCli.Run(argv.Skip(1).ToArray());
+            }
             Runtime.Prepare();
             if (Runtime.Dir != null) { Studio.Locate = Runtime.FfmpegPath; Whisper.Locate = () => Path.Combine(Runtime.Dir, "whisper-cli.exe"); LocalTts.Locate = () => Path.Combine(Runtime.Dir, "sherpa-onnx-offline-tts.exe"); }
             else UseLibFolder();
@@ -95,6 +102,7 @@ namespace ScreenRecorder
             CaptionLayer.Renderer = OverlayGdi.Caption;    // 字幕也是（预览、导出同一套，玻璃底要用）
             if (Environment.GetEnvironmentVariable("REFTEST") != null) return SelfTestRef.Run();
             if (Environment.GetEnvironmentVariable("TTSTEST") != null) return SelfTestTts.Run();
+            if (Environment.GetEnvironmentVariable("CTLTEST") != null) return SelfTestControl.Run();
             if (Environment.GetEnvironmentVariable("W5TEST") != null) return SelfTestW5.Run();
             if (Environment.GetEnvironmentVariable("W4TEST") != null) return SelfTestW4.Run();
             if (Environment.GetEnvironmentVariable("STUDIO") != null) return SelfTest.RenderOnly();

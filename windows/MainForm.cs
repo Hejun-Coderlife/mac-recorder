@@ -177,9 +177,14 @@ namespace ScreenRecorder
             updateLink.LinkClicked += (s, e) => onLink?.Invoke();
             checkLink.AutoSize = true; checkLink.Anchor = AnchorStyles.Right; checkLink.Text = L("检查更新", "Check for Updates");
             checkLink.LinkClicked += (s, e) => CheckUpdates(true);
+            // 「AI 控制」：让 Claude 这类 AI 来录屏、剪辑、导出（同 Mac 版）
+            var aiLink = new LinkLabel { AutoSize = true, Anchor = AnchorStyles.Right, Text = "✦ " + L("AI 控制", "AI Control"), Margin = new Padding(0, 0, 14, 0) };
+            aiLink.LinkClicked += (s, e) => AIConnectForm.ShowFor(this);
+            tips.SetToolTip(aiLink, L("让 Claude、Cursor 这些 AI 用一句话录屏、剪辑、加标注、导出", "Let AI apps like Claude or Cursor record, edit, annotate and export for you"));
             upd.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             upd.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            upd.Controls.Add(updateLink, 0, 0); upd.Controls.Add(checkLink, 1, 0);
+            upd.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            upd.Controls.Add(updateLink, 0, 0); upd.Controls.Add(aiLink, 1, 0); upd.Controls.Add(checkLink, 2, 0);
             upd.Margin = new Padding(0, 4, 0, 0);
             root.Controls.Add(upd);
 
@@ -287,6 +292,7 @@ namespace ScreenRecorder
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
+            ControlServer.Start(this);   // AI 控制的本机控制口
             var done = Updater.TakeUpdatedTo();
             if (done != null) ShowUpdate(L($"已更新到 v{done}", $"Updated to v{done}"), null);
             else if (Updater.StagedVersion is Version v) ShowReady(v);
@@ -493,6 +499,7 @@ namespace ScreenRecorder
                 {
                     busy = false; UpdateUi();
                     if (err != null) { Say(L("保存 Studio 素材失败：", "Couldn't save the Studio footage: ") + err, true); return; }
+                    CtlLastProject = proj.Dir;
                     ShowEditor(proj.Dir, proj.Out);
                 }));
             });
@@ -640,6 +647,7 @@ namespace ScreenRecorder
             UnregisterHotKey(Handle, ShotHotkeyId);
             DesktopIcons.Restore(); Dnd.Restore();
             CloseCamera();
+            ControlServer.Stop();
             base.OnFormClosing(e);
         }
 

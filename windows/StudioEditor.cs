@@ -737,7 +737,7 @@ namespace ScreenRecorder
         {
             if (exporting || capBusy || RecordingVoice) return;
             saveTimer.Stop(); SaveNow();
-            exporting = true; exported = null;
+            exporting = true; exported = null; LastExportError = null; LastExportCancelled = false;
             exportBtn.Enabled = false; optBtn.Enabled = false; exportBar.Visible = true; exportBar.Value = 0; cancelBtn.Visible = true;
             openBtn.Visible = showBtn.Visible = false;
             exportStatus.Text = ""; exportStatus.ForeColor = Theme.Secondary;
@@ -758,6 +758,7 @@ namespace ScreenRecorder
                     {
                         exporting = false; exportBtn.Enabled = true; optBtn.Enabled = true; exportBar.Visible = false; cancelBtn.Visible = false;
                         if (cancelled) { exportStatus.Text = L("已取消导出", "Export cancelled"); LastExportCancelled = true; return; }
+                        LastExportError = err;
                         if (err != null) { exportStatus.Text = L("导出失败：", "Export failed: ") + err; exportStatus.ForeColor = Color.FromArgb(200, 30, 30); return; }
                         exported = outPath;
                         string how = stats != null && (stats.Gpu || stats.Encoder != "libx264") ? L("显卡", "GPU") : "CPU";
@@ -775,6 +776,7 @@ namespace ScreenRecorder
             });
         }
         public bool LastExportCancelled;
+        public string LastExportError;     // 最近一次导出失败的原因（AI 控制用）
         public void ScrollStyleTo(string what) => style.ScrollTo(what);
         public void CancelExport() => exportCancel?.Cancel();
 
