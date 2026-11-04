@@ -66,26 +66,53 @@ import AppKit
     func check(manual: Bool) async {
         if manual { state = .working(L("正在检查更新…", "Checking for updates…")) }
         do {
-            var req = URLRequest(url: URL(string: "https://api.github.com/repos/\(repo)/releases/\(env["UPDATE_RELEASE"] ?? "latest")")!)   // 自测可指定 tags/v1.2
-            req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-            req.timeoutInterval = 20
-            let (data, _) = try await URLSession.shared.data(for: req)
-            struct Rel: Decodable { let tag_name: String; let assets: [Asset] }
-            struct Asset: Decodable { let name: String; let browser_download_url: URL }
-            let rel = try JSONDecoder().decode(Rel.self, from: data)
-            let v = rel.tag_name.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
-            guard Self.newer(v, than: current), let a = rel.assets.first(where: { $0.name == asset }) else {
+            let (v, dl) = try await latestRelease()
+            guard Self.newer(v, than: current), let url = dl else {
                 if manual { state = .upToDate } else if case .working = state { state = .idle }
                 return
             }
             if let s = stagedVersion, !Self.newer(v, than: s) { state = .ready(s); return }   // 已经下好了
-            try await stage(a.browser_download_url, version: v, manual: manual)
+            try await stage(url, version: v, manual: manual)
             state = .ready(v)
         } catch {
             // 后台查不到、下不动就算了，下次再试；手动检查才提示
             if manual { state = .failed(L("更新失败：", "Update failed: ") + error.localizedDescription) }
             else if case .working = state { state = .idle }
         }
+    }
+
+    // 最新版的版本号 + 安装包地址（这一版没有 Mac 安装包时地址为 nil）
+    private func latestRelease() async throws -> (String, URL?) {
+        let which = env["UPDATE_RELEASE"] ?? "latest"   // 自测可指定 tags/v1.2
+        if env["UPDATE_FORCE_WEB"] == nil {
+            var req = URLRequest(url: URL(string: "https://api.github.com/repos/\(repo)/releases/\(which)")!)
+            req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+            req.timeoutInterval = 20
+            struct Rel: Decodable { let tag_name: String; let assets: [Asset] }
+            struct Asset: Decodable { let name: String; let browser_download_url: URL }
+            if let r = try? await URLSession.shared.data(for: req),
+               (r.1 as? HTTPURLResponse)?.statusCode == 200,
+               let rel = try? JSONDecoder().decode(Rel.self, from: r.0) {
+                let v = rel.tag_name.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+                return (v, rel.assets.first(where: { $0.name == asset })?.browser_download_url)
+            }
+        }
+        // 接口不让查（403：匿名每小时 60 次，同一个网络出口的电脑共用，很容易用完）：
+        // 改走网页 releases/latest 的跳转（→ /releases/tag/vX.Y）拿版本号，下载地址按固定格式拼（网页没有这个限额）
+        let page = which == "latest" ? "https://github.com/\(repo)/releases/latest" : "https://github.com/\(repo)/releases/\(which.replacingOccurrences(of: "tags/", with: "tag/"))"
+        var req = URLRequest(url: URL(string: page)!)
+        req.httpMethod = "HEAD"; req.timeoutInterval = 20
+        let (_, resp) = try await URLSession.shared.data(for: req)
+        guard let final = resp.url, let i = final.pathComponents.firstIndex(of: "tag"), i + 1 < final.pathComponents.count
+        else { throw Self.fail(L("查不到最新版本", "Couldn't find the latest version")) }
+        let tag = final.pathComponents[i + 1]
+        let v = tag.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+        // 先 HEAD 确认这一版里有 Mac 安装包，没有就当没有新版
+        let dl = URL(string: "https://github.com/\(repo)/releases/download/\(tag)/\(asset)")!
+        var head = URLRequest(url: dl)
+        head.httpMethod = "HEAD"; head.timeoutInterval = 20
+        let ok = ((try? await URLSession.shared.data(for: head))?.1 as? HTTPURLResponse)?.statusCode == 200
+        return (v, ok ? dl : nil)
     }
 
     // 下载 → 挂载 dmg（或解 zip）→ 拷出 .app → 核对签名、程序、版本 → 放到 stageDir
@@ -151,7 +178,7 @@ import AppKit
         NSApp.terminate(nil)
     }
 
-    // 自测：UPDATE_TEST=1 [UPDATE_FAKE_VERSION=1.0] [UPDATE_RELEASE=tags/v1.2] → 后台那套流程：查、下载、放好，再模拟退出换上去；结果写 /tmp/update_test.txt 后退出
+    // 自测：UPDATE_TEST=1 [UPDATE_FAKE_VERSION=1.0] [UPDATE_RELEASE=tags/v1.2] [UPDATE_FORCE_WEB=1 跳过接口走网页] → 后台那套流程：查、下载、放好，再模拟退出换上去；结果写 /tmp/update_test.txt 后退出
     static func selfTest() -> Bool {
         guard ProcessInfo.processInfo.environment["UPDATE_TEST"] != nil else { return false }
         Task { @MainActor in
