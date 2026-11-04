@@ -216,7 +216,7 @@ namespace ScreenRecorder
             try { File.Copy(newExe, exe); }
             catch { try { if (File.Exists(exe)) File.Delete(exe); File.Move(old, exe); } catch { } throw; }
             try { Directory.Delete(Path.GetDirectoryName(newExe), true); } catch { }
-            if (relaunch) Process.Start(new ProcessStartInfo(exe) { UseShellExecute = true, WorkingDirectory = AppDir });
+            if (relaunch) Process.Start(new ProcessStartInfo(exe, "--relaunch") { UseShellExecute = true, WorkingDirectory = AppDir });   // 新的等这个退完再开（只开一个主窗口）
         }
 
         // 自测（不弹窗）：UPDATE_TEST=1 [UPDATE_FAKE_VERSION=1.0] [UPDATE_NORELAUNCH=1] [UPDATE_TOKEN=令牌] [UPDATE_EXE=本地 exe | UPDATE_ZIP=本地 zip]

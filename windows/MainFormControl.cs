@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Windows.Forms;
 
 namespace ScreenRecorder
 {
@@ -26,5 +27,14 @@ namespace ScreenRecorder
         internal void CtlSelect(string id) { selectedId = id; Refresh_(); }
         internal void CtlToggle() => Toggle();
         internal void CtlOpen(string dir) => ShowEditor(dir);
+
+        // 又双击了一次图标：把这个窗口调到前面（最小化了就还原）
+        internal void ShowFromOtherLaunch()
+        {
+            if (!Visible) Show();
+            if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+            Activate(); BringToFront();
+            TopMost = true; TopMost = false;   // 别的程序在前面时 Activate 不一定能抢到前台
+        }
     }
 }

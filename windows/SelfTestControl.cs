@@ -67,6 +67,9 @@ namespace ScreenRecorder
                 Check("control.json removed on quit", !File.Exists(Path.Combine(work, "control.json")), "");
                 try { Directory.Delete(dir, true); } catch { }
                 try { Directory.Delete(work, true); } catch { }
+                // 导出到桌面的测试视频（刚导完可能还被缩略图占着，多试几次）
+                foreach (var f in Directory.GetFiles(App.Desktop, Path.GetFileName(dir) + "*.mp4"))
+                    for (int i = 0; i < 20 && File.Exists(f); i++) { try { File.Delete(f); } catch { Thread.Sleep(250); } }
             }
             File.WriteAllText(Tmp("ctl_test.txt"), (ok ? "OK" : "FAIL") + Environment.NewLine + sb);
             return ok ? 0 : 1;

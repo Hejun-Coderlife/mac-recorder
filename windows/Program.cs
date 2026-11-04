@@ -11,6 +11,7 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace ScreenRecorder
@@ -88,6 +89,7 @@ namespace ScreenRecorder
         }
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool SetDllDirectory(string path);
+        [DllImport("user32.dll")] static extern bool AllowSetForegroundWindow(int pid);
 
         [MethodImpl(MethodImplOptions.NoInlining)]
         static int Run()
@@ -136,7 +138,18 @@ namespace ScreenRecorder
             // 把素材文件夹拖到 录屏.exe 上（或命令行带一个素材夹）：直接打开剪辑窗口，不开主窗口（免得和已经开着的那个抢快捷键）
             var argDir = Environment.GetCommandLineArgs().Skip(1).Select(RecentStrip.FootageOf).FirstOrDefault(d => d != null);
             if (argDir != null) { Application.Run(new StudioEditor(argDir)); Updater.ApplyStaged(Updater.RestartAfterExit); return 0; }
-            Application.Run(new MainForm());
+            // 只开一个主窗口：已经开着就把那个调到前面，自己退出（双击图标开了第二个，快捷键被占、提示「快捷键用不了」）。
+            // 自动更新「现在重启」时带 --relaunch：旧的还没退完，等它退了再开
+            bool relaunch = Environment.GetCommandLineArgs().Contains("--relaunch");
+            var single = new Mutex(false, @"Local\ScreenRecorder-main");
+            bool got;
+            try { got = single.WaitOne(relaunch ? 20000 : 0); } catch (AbandonedMutexException) { got = true; }
+            var showOther = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\ScreenRecorder-show");
+            if (!got) { AllowSetForegroundWindow(-1); showOther.Set(); return 0; }
+            var main = new MainForm();
+            new Thread(() => { while (showOther.WaitOne()) try { main.BeginInvoke((Action)main.ShowFromOtherLaunch); } catch { } }) { IsBackground = true, Name = "single" }.Start();
+            Application.Run(main);
+            try { single.ReleaseMutex(); } catch { }
             // 正常退出：把后台下好的新版换上，下次打开就是新的（点了「现在重启」就顺便打开）
             Updater.ApplyStaged(Updater.RestartAfterExit);
             return 0;
