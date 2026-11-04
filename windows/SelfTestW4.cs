@@ -205,6 +205,8 @@ namespace ScreenRecorder
                 Check("click 正圆: round again, width kept, centre kept", el != null && el.Oval == null && Math.Abs(el.W * Wp - el.H * Hp) < 1.5 && Math.Abs(el.Y + el.H / 2 - cy) < 0.002,
                     el == null ? "" : $"{el.W * Wp:0.0}x{el.H * Hp:0.0}px cy {el.Y + el.H / 2:0.0000} vs {cy:0.0000}");
             }
+            // 圈查完就删掉：它和前面几个标注时间重叠，标注轨会多一行，把音乐轨挤出时间轴看得见的地方，后面拖音乐块就点不到了
+            if (el != null) { var elId = el.Id; ed.Edit(p => p.Annotations.RemoveAll(a => a.Id == elId)); ed.Select(null, null); Pump(0.3); }
             // 点击波纹样子 6 种（右边「鼠标」里），存成 Mac 的字段名
             ed.EditLook(l => { l.RippleStyle = "glass"; l.RippleWidth = 2; }); Pump(0.3);
 
@@ -245,7 +247,7 @@ namespace ScreenRecorder
             // 6) 关掉存回工程，新字段都在
             ed.Close(); Pump(0.8);
             var saved = StudioProject.FromJson(File.ReadAllText(StudioProject.PathIn(dir)));
-            Check("project saved with redactions / annotations / music / cut", saved.Redactions.Count == 1 && saved.Annotations.Count == 4 && saved.Music.Clips.Count == 1 && saved.Cuts.Any(x => x.Speed && x.Rate == 4),
+            Check("project saved with redactions / annotations / music / cut", saved.Redactions.Count == 1 && saved.Annotations.Count == 3 && saved.Music.Clips.Count == 1 && saved.Cuts.Any(x => x.Speed && x.Rate == 4),
                 $"red {saved.Redactions.Count} ann {saved.Annotations.Count} music {saved.Music.Clips.Count} cuts {saved.Cuts.Count}");
             Check("project saved with styles (textStyle / arrow / opacity / rippleStyle)", saved.Annotations.Any(x => x.TextStyle == "glass") && saved.Annotations.Any(x => x.Arrow == "curved" && x.Opacity == 0.5) &&
                 saved.Look.RippleStyle == "glass" && saved.Look.RippleWidth == 2, "");
