@@ -330,7 +330,11 @@ final class Recorder: NSObject, ObservableObject {
         cfg.capturesAudio = systemAudio
         cfg.sampleRate = 48000
         cfg.channelCount = 2
-        cfg.excludesCurrentProcessAudio = true
+        // 平时不录本程序自己的声音（开始录制的提示音等）；录到剪辑窗口时要录（预览播放、试听配音、点击音都是本程序发的声音）
+        let me = Bundle.main.bundleIdentifier
+        let ownAudio = sel.hasPrefix("w") ? c.windows.first(where: { "w\($0.windowID)" == sel })?.owningApplication?.bundleIdentifier == me
+                                          : !StudioEditor.open.isEmpty
+        cfg.excludesCurrentProcessAudio = !ownAudio
         cfg.captureMicrophone = microphone
 
         let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd HH.mm.ss"
@@ -359,6 +363,10 @@ final class Recorder: NSObject, ObservableObject {
             try s.addStreamOutput(w, type: .screen, sampleHandlerQueue: w.queue)
             if systemAudio { try s.addStreamOutput(w, type: .audio, sampleHandlerQueue: w.queue) }
             if microphone { try s.addStreamOutput(w, type: .microphone, sampleHandlerQueue: w.queue) }
+            if ownAudio {   // 会录到本程序的声音：提示音在开录前放完，免得录进去
+                NSSound(named: "Tink")?.play()
+                try? await Task.sleep(for: .seconds(0.35))
+            }
             tr?.start()   // 比画面早一点开始记，第一帧前后都有鼠标位置
             try await s.startCapture()
         } catch {
@@ -388,7 +396,7 @@ final class Recorder: NSObject, ObservableObject {
                 if let self, let t = self.startedAt { self.elapsed = Date().timeIntervalSince(t); self.micLevel = self.microphone ? (self.writer?.micLevel ?? 0) : 0 }
             }
         }
-        NSSound(named: "Tink")?.play()
+        if !ownAudio { NSSound(named: "Tink")?.play() }
     }
 
     // 录整个屏幕 / 区域的范围：排除本程序的主窗口、状态栏、录制浮层（剪辑窗口、AI 控制窗口和它们弹出的面板 / 菜单照常录，
