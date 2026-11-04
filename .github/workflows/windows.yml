@@ -9,6 +9,7 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 120   # 平时 40 分钟左右；哪步卡住了别空跑 6 小时
     defaults:
       run:
         shell: pwsh

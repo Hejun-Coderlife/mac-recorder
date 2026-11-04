@@ -26,7 +26,19 @@ namespace ScreenRecorder
         {
             var sb = new StringBuilder(); bool ok = true;
             void Add(string res) { sb.Append(res); ok &= res.TrimEnd().EndsWith(" OK"); File.WriteAllText(Tmp("w4_test.txt"), sb.ToString()); }
-            void Check(string n, bool c, string info = "") { sb.AppendLine((c ? "PASS " : "FAIL ") + n + (info != "" ? "  " + info : "")); ok &= c; File.WriteAllText(Tmp("w4_test.txt"), sb.ToString()); }
+            void Check(string n, bool c, string info = "") { lock (sb) { sb.AppendLine((c ? "PASS " : "FAIL ") + n + (info != "" ? "  " + info : "")); ok &= c; File.WriteAllText(Tmp("w4_test.txt"), sb.ToString()); } }
+            // 看门狗：8 分钟还没跑完（比如被一个没人关的对话框卡住）就记下停在哪、退出，别让 CI 空等几个小时
+            var dog = new Thread(() =>
+            {
+                Thread.Sleep(TimeSpan.FromMinutes(8));
+                lock (sb)
+                {
+                    var open = string.Join(", ", Application.OpenForms.Cast<Form>().Select(f => f.GetType().Name + "「" + f.Text + "」"));
+                    File.WriteAllText(Tmp("w4_test.txt"), "FAIL" + Environment.NewLine + sb + "FAIL timeout after 8 min; open windows: " + open + Environment.NewLine);
+                }
+                Environment.Exit(3);
+            }) { IsBackground = true };
+            dog.Start();
             try
             {
                 string work = Env("W4TEST");
@@ -183,14 +195,12 @@ namespace ScreenRecorder
                 el == null ? "" : $"{el.W * Wp:0.0}x{el.H * Hp:0.0}px oval={el.Oval}");
             if (el != null)
             {
-                var ob = ed.OvalButton(true);
-                In.Move(ob.PointToScreen(new Point(ob.Width / 2, ob.Height / 2))); Pump(0.15); In.Click(); Pump(0.4);
+                ed.OvalButton(true).PerformClick(); Pump(0.4);
                 el = ed.Project.Annotations.FirstOrDefault(x => x.Id == el.Id);
                 Check("click 椭圆: oval = true", el?.Oval == true, $"{el?.Oval}");
                 ed.EditAnnTest(el.Id, a => a.H *= 0.5); Pump(0.2);
                 double cy = el.Y + el.H * 0.25;   // 改扁之后的中心
-                var cb = ed.OvalButton(false);
-                In.Move(cb.PointToScreen(new Point(cb.Width / 2, cb.Height / 2))); Pump(0.15); In.Click(); Pump(0.4);
+                ed.OvalButton(false).PerformClick(); Pump(0.4);
                 el = ed.Project.Annotations.FirstOrDefault(x => x.Id == el.Id);
                 Check("click 正圆: round again, width kept, centre kept", el != null && el.Oval == null && Math.Abs(el.W * Wp - el.H * Hp) < 1.5 && Math.Abs(el.Y + el.H / 2 - cy) < 0.002,
                     el == null ? "" : $"{el.W * Wp:0.0}x{el.H * Hp:0.0}px cy {el.Y + el.H / 2:0.0000} vs {cy:0.0000}");
