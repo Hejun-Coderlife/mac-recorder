@@ -1747,6 +1747,14 @@ final class AudioWarp: @unchecked Sendable {
 
 // 导出时的讲解：每段解成 48k 浮点、按成片时间放好，和原声音、点击声一起混；
 // 有讲解的地方把原声音压低约 -12 dB（讲解开始前 0.15 秒慢慢压下去，结束后 0.35 秒慢慢回来）
+// AVFoundation 同时开太多 AVAssetReader 会把解码会话整个卡死（实测同一台机器 40 个还跑得动，64 个就一个都不动，卡住后连波形都出不来）。
+// 波形、讲解这些短文件的解码一律在这里排队，最多两个同时在解，导出和编辑器加起来也不会把系统解码器占满。
+enum DecodeGate {
+    private static let sem = DispatchSemaphore(value: 2)
+    static func enter() { sem.wait() }
+    static func leave() { sem.signal() }
+}
+
 final class VoiceMix: @unchecked Sendable {
     private struct Piece { let at: Int64; let pcm: [Float] }   // 单声道，起点 = 成片第 at 个采样
     private let pieces: [Piece]
@@ -1764,6 +1772,7 @@ final class VoiceMix: @unchecked Sendable {
     static func load(dir: URL, project p: StudioProject, map: TimeMap) async throws -> VoiceMix? {
         var pcs: [Piece] = []
         for c in p.voiceovers where c.length > 0.01 && c.volume > 0.001 && p.audio.voice > 0.001 {
+            try Task.checkCancellation()      // 点了取消马上停，不会卡在解下一段
             let url = Denoise.voiceURL(dir: dir, file: c.file, level: p.audio.denoise)
             guard FileManager.default.fileExists(atPath: url.path) else { continue }
             let all = try await decode(url)
@@ -1778,10 +1787,16 @@ final class VoiceMix: @unchecked Sendable {
         VoiceMix(pieces: [], spans: r.map { (Int64(($0.0 * 48000).rounded()), Int64(($0.1 * 48000).rounded())) }, duck: duck)
     }
 
-    // 整个录音文件解成 48k 单声道浮点
+    // 整个录音文件解成 48k 单声道浮点（和波形共用排队：见 DecodeGate）
     static func decode(_ url: URL) async throws -> [Float] {
+        DecodeGate.enter()
+        defer { DecodeGate.leave() }
+        return try decodeSync(url)
+    }
+    // 同步版（波形在自己的串行队列里调）
+    static func decodeSync(_ url: URL) throws -> [Float] {
         let asset = AVURLAsset(url: url)
-        guard let t = try await asset.loadTracks(withMediaType: .audio).first else { return [] }
+        guard let t = asset.tracks(withMediaType: .audio).first else { return [] }
         let r = try AVAssetReader(asset: asset)
         let o = AVAssetReaderTrackOutput(track: t, outputSettings: [
             AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 48000, AVNumberOfChannelsKey: 1,

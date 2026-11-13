@@ -95,6 +95,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     @Published var voiceRec: VoiceRec?         // 正在录：从素材哪一刻开始、录了多久、音量
     @Published var countdown: Int?             // 录之前倒数 3-2-1
     @Published var voicePeaks: [String: [Float]] = [:]   // 每个录音文件的波形（每秒 100 个点）
+    private static let peakQueue = DispatchQueue(label: "studio.peaks")   // 波形解码一条一条来
     private var recorder: AVAudioRecorder?
     private var countdownTask: Task<Void, Never>?
     private let voicePlayer = VoicePreview()
@@ -848,12 +849,13 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         guard voicePeaks[file] == nil else { return }
         voicePeaks[file] = []
         let url = dir.appendingPathComponent(file)
-        Task.detached {
-            let pcm = (try? await VoiceMix.decode(url)) ?? []
+        // 一个接一个解：同时开一堆 AVAssetReader 会把系统解码器卡死（导出时再也读不出东西）
+        Self.peakQueue.async {
+            let pcm = (try? VoiceMix.decodeSync(url)) ?? []
             var pk: [Float] = []
             stride(from: 0, to: pcm.count, by: 480).forEach { i in pk.append(pcm[i..<min(pcm.count, i + 480)].reduce(0) { max($0, abs($1)) }) }
             let done = pk
-            await MainActor.run { self.voicePeaks[file] = done }
+            Task { @MainActor [weak self] in self?.voicePeaks[file] = done }
         }
     }
     func step(_ n: Int) {
