@@ -1979,8 +1979,8 @@ struct TimelineStrip: View {
                 // 剪辑轨：剪掉（红斜纹）/ 快放（蓝斜纹 + 倍数）
                 RoundedRectangle(cornerRadius: 5).fill(Color.secondary.opacity(0.07)).frame(width: w - 4, height: cutH)
                     .offset(x: 2, y: cutY).allowsHitTesting(false)
-                ForEach(ed.pieces, id: \.start) { p in
-                    PieceBlock(ed: ed, piece: p).frame(width: max(4, x(p.end) - x(p.start)), height: cutH)
+                ForEach(Array(ed.pieces.enumerated()), id: \.offset) { _, p in   // 按序号认（拖左边把手时起点在变，别让块换身份打断拖动）
+                    PieceBlock(ed: ed, piece: p, w: w, d: d).frame(width: max(4, x(p.end) - x(p.start)), height: cutH)
                         .offset(x: x(p.start), y: cutY)
                 }
                 ForEach(ed.removedCuts) { c in
@@ -3184,6 +3184,25 @@ enum StudioTests {
         let w = m.warp(tr)
         let at = { (o: Double) -> Double in let a = w.moves.last { $0[0] <= o }!, b = w.moves.first { $0[0] > o } ?? a; return b[0] > a[0] ? a[1] + (b[1] - a[1]) * (o - a[0]) / (b[0] - a[0]) : a[1] }
         check("cursor still in hold", near(at(5.2), 50) && near(at(6.8), 50), "\(at(5.2)) \(at(6.8))")
+        // ---- 拖片段两头 ----
+        var q = StudioProject(trimStart: 0, trimEnd: 30)
+        q.cuts = [CutSegment(start: 10, end: 15, mode: .cut)]
+        var r = q; PieceTrim.apply(&r, piece: Piece(start: 0, end: 10, rate: 1), isStart: false, dt: 2, duration: 30)
+        check("right edge out: cut shrinks", r.cuts.count == 1 && near(r.cuts[0].start, 12))
+        r = q; PieceTrim.apply(&r, piece: Piece(start: 0, end: 10, rate: 1), isStart: false, dt: 9, duration: 30)
+        check("right edge out past cut: cut gone", r.cuts.isEmpty)
+        r = q; PieceTrim.apply(&r, piece: Piece(start: 0, end: 10, rate: 1), isStart: false, dt: -3, duration: 30)
+        check("right edge in: cut grows", near(r.cuts[0].start, 7))
+        r = q; PieceTrim.apply(&r, piece: Piece(start: 15, end: 30, rate: 1), isStart: true, dt: -2, duration: 30)
+        check("left edge out: cut shrinks", near(r.cuts[0].end, 13))
+        r = q; PieceTrim.apply(&r, piece: Piece(start: 15, end: 30, rate: 1), isStart: false, dt: -4, duration: 30)
+        check("last piece right edge: trimEnd", near(r.trimEnd, 26))
+        r = q; PieceTrim.apply(&r, piece: Piece(start: 0, end: 10, rate: 1), isStart: true, dt: 1.5, duration: 30)
+        check("first piece left edge: trimStart", near(r.trimStart, 1.5))
+        q.splits = [20]; r = q; PieceTrim.apply(&r, piece: Piece(start: 15, end: 20, rate: 1), isStart: false, dt: -1, duration: 30)
+        check("no neighbour cut, drag in: new cut", r.cuts.count == 2 && r.cuts.contains { near($0.start, 19) && near($0.end, 20) })
+        r = q; PieceTrim.apply(&r, piece: Piece(start: 15, end: 20, rate: 1), isStart: false, dt: 1, duration: 30)
+        check("no neighbour cut, drag out: nothing", r.cuts.count == 1)
         print(ok ? "FREEZETEST OK" : "FREEZETEST FAILED")
         exit(ok ? 0 : 1)
     }

@@ -126,10 +126,59 @@ extension StudioEditor {
     }
 }
 
+// 拖片段两头（像剪映）：往外拖 = 把旁边删掉的内容拉回来（删掉的段变短，拉满就整段恢复）；往里拖 = 再裁掉一截。
+// 片段在最前 / 最后、旁边没有删掉的段时，改的是修剪起点 / 终点。dt = 拖过的素材秒数（被拉回 / 裁掉的部分都是原速，时间轴上 1:1）
+enum PieceTrim {
+    static let minLen = 0.1, eps = 1e-3
+    static func apply(_ p: inout StudioProject, piece: Piece, isStart: Bool, dt: Double, duration: Double) {
+        let lo = p.trimStart, hi = p.trimEnd > lo ? p.trimEnd : duration
+        if !isStart {
+            let e = piece.end
+            if let k = p.cuts.firstIndex(where: { $0.mode == .cut && abs($0.start - e) < eps }) {
+                let c = p.cuts[k], ns = min(max(c.start + dt, piece.start + minLen), c.end)
+                if ns >= c.end - eps { p.cuts.remove(at: k) } else { p.cuts[k].start = ns }
+                shrinkSpeed(&p, at: e, to: ns, isStart: false)
+            } else if abs(e - hi) < eps {
+                p.trimEnd = min(max(e + dt, piece.start + minLen), duration)
+                shrinkSpeed(&p, at: e, to: min(p.trimEnd, e), isStart: false)
+            } else if dt < 0 {
+                let ns = max(e + dt, piece.start + minLen)
+                p.cuts.append(CutSegment(start: ns, end: e, mode: .cut))
+                shrinkSpeed(&p, at: e, to: ns, isStart: false)
+            }
+        } else {
+            let s = piece.start
+            if let k = p.cuts.firstIndex(where: { $0.mode == .cut && abs($0.end - s) < eps }) {
+                let c = p.cuts[k], ne = max(min(c.end + dt, piece.end - minLen), c.start)
+                if ne <= c.start + eps { p.cuts.remove(at: k) } else { p.cuts[k].end = ne }
+                shrinkSpeed(&p, at: s, to: ne, isStart: true)
+            } else if abs(s - lo) < eps {
+                p.trimStart = max(min(s + dt, piece.end - minLen), 0)
+                shrinkSpeed(&p, at: s, to: max(p.trimStart, s), isStart: true)
+            } else if dt > 0 {
+                let ne = min(s + dt, piece.end - minLen)
+                p.cuts.append(CutSegment(start: s, end: ne, mode: .cut))
+                shrinkSpeed(&p, at: s, to: ne, isStart: true)
+            }
+        }
+        p.cuts.sort { $0.start < $1.start }
+    }
+    // 片段是快放段时，裁掉的那截也要从快放段里去掉（不然剪掉段和快放段叠在一起，剪掉的不生效）
+    private static func shrinkSpeed(_ p: inout StudioProject, at edge: Double, to v: Double, isStart: Bool) {
+        for k in p.cuts.indices where p.cuts[k].mode == .speed {
+            if !isStart, abs(p.cuts[k].end - edge) < eps, v < edge { p.cuts[k].end = v }
+            if isStart, abs(p.cuts[k].start - edge) < eps, v > edge { p.cuts[k].start = v }
+        }
+        p.cuts.removeAll { $0.mode == .speed && $0.end - $0.start < eps }
+    }
+}
+
 // 剪辑轨上的一段（像剪映的片段）：点选，选中后 Delete 删、下面条里改速度
 struct PieceBlock: View {
     @ObservedObject var ed: StudioEditor
     let piece: Piece
+    var w = 1.0, d = 1.0                  // 时间轴宽（像素）和可见总长（秒）：拖两头时 像素 → 秒
+    @State private var grab: Piece?        // 按下时的那一段（拖动中片段在变，换算要按按下时的）
     var body: some View {
         let sel = ed.selectedPiece.map { abs($0 - piece.start) < 1e-6 } ?? false
         let fast = piece.rate != 1
@@ -152,6 +201,7 @@ struct PieceBlock: View {
         .padding(.horizontal, 1)
         .contentShape(Rectangle())
         .onTapGesture { ed.selected = nil; ed.selectedBurst = nil; ed.selectedPiece = piece.start; ed.picking = false }
+        .overlay(HStack { edge(isStart: true); Spacer(minLength: 0); edge(isStart: false) })
         .contextMenu {
             Button(L("在播放头分割（S）", "Split at Playhead (S)")) { ed.split(at: ed.time) }
             Menu(L("速度", "Speed")) {
@@ -164,6 +214,24 @@ struct PieceBlock: View {
         }
         .help(L("一段素材：点选后按 Delete 删掉（时间轴直接合拢），或在下面改速度；在播放头处按 S（⌘B）分割",
                 "A part of the clip: select it and press Delete to remove it (the timeline closes up), or change its speed below; press S (⌘B) to split at the playhead"))
+    }
+
+    // 两头的把手：拖出去把删掉的内容拉回来，拖进来再裁掉
+    private func edge(isStart: Bool) -> some View {
+        Rectangle().fill(Color.white.opacity(0.001)).frame(width: 7)
+            .overlay(Capsule().fill(Color.white.opacity(0.85)).frame(width: 2.5, height: 12))
+            .contentShape(Rectangle())
+            .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
+            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named(TimelineStrip.space))
+                .onChanged { v in
+                    ed.selected = nil; ed.selectedPiece = nil
+                    ed.dragBegin()
+                    if grab == nil { grab = piece }
+                    let g = grab ?? piece, dt = v.translation.width / max(w, 1) * d
+                    ed.dragUpdate { p in PieceTrim.apply(&p, piece: g, isStart: isStart, dt: dt, duration: ed.duration) }
+                }
+                .onEnded { _ in grab = nil; ed.dragEnd() })
+            .help(L("拖出去：把剪掉的内容拉回来；拖进来：再裁掉一截", "Drag out to bring back trimmed footage; drag in to trim more"))
     }
 }
 
