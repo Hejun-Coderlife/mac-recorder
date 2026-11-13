@@ -584,9 +584,13 @@ struct AnnotationInspector: View {
                     Button(L("改文字", "Edit Text")) { ed.beginNote(a.id) }
                     Text(L("字号", "Size")).font(.callout)
                     Slider(value: ed.noteSlider(\.fontSize), in: 12...160, onEditingChanged: { if !$0 { ed.dragEnd() } }).frame(width: 80)
-                    Picker("", selection: Binding(get: { a.textLook }, set: { v in ed.edit { $0.annotations[i].textStyle = v; $0.annotations[i].pill = v != .plain } })) {
-                        ForEach(Annotation.TextLook.allCases, id: \.self) { Text(Annotation.textLookName($0)).tag($0) }
-                    }.labelsHidden().fixedSize()
+                    // 样式：用 Menu（2026-11-13 用户：原来的 Picker 点了不弹出）
+                    Menu {
+                        ForEach(Annotation.TextLook.allCases, id: \.self) { v in
+                            Button((a.textLook == v ? "✓ " : "") + Annotation.textLookName(v)) { ed.edit { $0.annotations[i].textStyle = v; $0.annotations[i].pill = v != .plain } }
+                        }
+                    } label: { Text(Annotation.textLookName(a.textLook)) }
+                    .fixedSize().help(L("文字样式", "Text style"))
                     // 字体：菜单里每项用它自己的字体显示，一眼看出长什么样
                     Menu {
                         ForEach(Annotation.fonts, id: \.name) { f in
