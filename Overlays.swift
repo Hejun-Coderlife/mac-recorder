@@ -51,6 +51,7 @@ struct Annotation: Codable, Equatable, Identifiable {
     var arrow: ArrowStyle?           // 箭头样式（没有 = 普通）；可选字段，旧工程照样能读
     var oval: Bool?                  // 圈：true = 椭圆（随便拉）；没有 = 正圆
     var textStyle: TextLook?         // 文字标签样式（没有 = 看 pill：胶囊 / 只有字）
+    var font: String?                // 文字字体（PostScript 名；没有 = 苹方粗体）。2026-11-13 用户：加标题要好看的字体
     enum TextLook: String, Codable, CaseIterable { case pill, glass, glassDark, dark, gradient, outline, sticker, bubble, neon, marker, plain }
     var textLook: TextLook { textStyle ?? (pill ? .pill : .plain) }
     static func textLookName(_ t: TextLook) -> String {
@@ -248,7 +249,7 @@ final class OverlayLayer: @unchecked Sendable {
         return CGSize(width: max(w, a.fontSize * unit) + pad * 2, height: asc + desc + pad * 1.2 + tail)
     }
     private static func textLine(_ a: Annotation, px: Double) -> CTLine {
-        let font = CTFontCreateWithName("PingFangSC-Semibold" as CFString, max(4, px), nil)
+        let font = CTFontCreateWithName(Annotation.fontName(a.font) as CFString, max(4, px), nil)
         let own = CGColor(srgbRed: a.color.r, green: a.color.g, blue: a.color.b, alpha: 1)
         let light = 0.299 * a.color.r + 0.587 * a.color.g + 0.114 * a.color.b > 0.75
         let color: CGColor
@@ -586,4 +587,29 @@ extension StudioTests {
         }
         return true
     }
+}
+
+// 文字标注可选的字体：只列这台 Mac 上装了的（按 PostScript 名找得到才出现）
+extension Annotation {
+    static let fontDefault = "PingFangSC-Semibold"
+    static let fontCatalog: [(name: String, label: String)] = [
+        ("PingFangSC-Semibold", L("苹方 粗", "PingFang Bold")),
+        ("FZLTZHK--GBK1-0", L("兰亭黑 中", "Lantinghei Medium")),
+        ("FZLTTHK--GBK1-0", L("兰亭黑 粗", "Lantinghei Heavy")),
+        ("FZVDLLOGOCCHS--GB1-0", L("方正超粗黑（标题）", "FZ Logo Black")),
+        ("STSongti-SC-Bold", L("宋体 粗", "Songti Bold")),
+        ("STSongti-SC-Black", L("宋体 特粗", "Songti Black")),
+        ("FZZILSS-B--GB1-0", L("方正字流宋", "FZ ZiLiu Song")),
+        ("FZRUNYYSS--GB1-0", L("方正润语圆宋", "FZ RunYu Song")),
+        ("STYuanti-SC-Bold", L("圆体 粗", "Yuanti Bold")),
+        ("STKaitiSC-Bold", L("楷体 粗", "Kaiti Bold")),
+        ("WeibeiSC-Bold", L("魏碑", "Weibei")),
+        ("STXingkaiSC-Bold", L("行楷", "Xingkai")),
+        ("FZOUYHGXSS--GB1-0", L("欧阳和耿行书", "FZ OuYang Xingshu")),
+        ("HannotateSC-W7", L("手札体", "Hannotate")),
+        ("HanziPenSC-W5", L("翩翩体", "HanziPen")),
+        ("DFWaWaSC-W5", L("娃娃体", "Wawati")),
+    ]
+    static var fonts: [(name: String, label: String)] { fontCatalog.filter { NSFont(name: $0.name, size: 12) != nil } }
+    static func fontName(_ f: String?) -> String { if let f, NSFont(name: f, size: 12) != nil { return f }; return fontDefault }
 }

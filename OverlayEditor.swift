@@ -587,6 +587,15 @@ struct AnnotationInspector: View {
                     Picker("", selection: Binding(get: { a.textLook }, set: { v in ed.edit { $0.annotations[i].textStyle = v; $0.annotations[i].pill = v != .plain } })) {
                         ForEach(Annotation.TextLook.allCases, id: \.self) { Text(Annotation.textLookName($0)).tag($0) }
                     }.labelsHidden().fixedSize()
+                    // 字体：菜单里每项用它自己的字体显示，一眼看出长什么样
+                    Menu {
+                        ForEach(Annotation.fonts, id: \.name) { f in
+                            Button { ed.edit { $0.annotations[i].font = f.name == Annotation.fontDefault ? nil : f.name } } label: {
+                                Text((Annotation.fontName(a.font) == f.name ? "✓ " : "") + f.label).font(.custom(f.name, size: 15))
+                            }
+                        }
+                    } label: { Text(Annotation.fonts.first { $0.name == Annotation.fontName(a.font) }?.label ?? L("字体", "Font")) }
+                    .fixedSize().help(L("字体（只列这台 Mac 上装了的）", "Font (only ones installed on this Mac)"))
                 case .highlight:
                     EmptyView()
                 default:
@@ -661,7 +670,7 @@ struct NoteField: View {
         let px = max(9, note.fontSize * k), p = m.view(CGPoint(x: note.x, y: note.y), fit: fit)
         let col = Color(red: note.color.r, green: note.color.g, blue: note.color.b)
         TextField(L("输入文字", "Type here"), text: $text)
-            .textFieldStyle(.plain).font(.custom("PingFangSC-Semibold", size: px))
+            .textFieldStyle(.plain).font(.custom(Annotation.fontName(note.font), size: px))
             .foregroundStyle([.pill, .bubble, .dark, .glassDark, .gradient].contains(note.textLook) ? Color.white : [.glass, .marker].contains(note.textLook) ? Color.black : col).focused($focused)
             .fixedSize()
             .frame(minWidth: px * 3)
