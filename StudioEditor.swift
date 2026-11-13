@@ -2530,6 +2530,7 @@ struct CaptionBlock: View {
     @ObservedObject var ed: StudioEditor
     let cap: Caption
     let w: Double, d: Double
+    @State private var moveSkip: Bool?          // 这次拖动从两头把手开始 → 不挪整句
     private let minLen = 0.3
     private let tint = Color(red: 0.96, green: 0.62, blue: 0.12)
 
@@ -2568,17 +2569,25 @@ struct CaptionBlock: View {
         }
         .simultaneousGesture(DragGesture(minimumDistance: 2, coordinateSpace: .named(TimelineStrip.space))
             .onChanged { v in
+                // 从两头把手开始拖的不算挪动（不然拉长时整句也跟着跑）
+                let x0 = ed.visTime(cap.start) / d * w, x1 = ed.visTime(cap.end) / d * w
+                if moveSkip == nil { moveSkip = abs(v.startLocation.x - x0) < 10 || abs(v.startLocation.x - x1) < 10 }
+                if moveSkip == true { return }
                 ed.selected = cap.id
                 ed.dragBegin()
-                let dt = ed.srcDelta(v.translation.width / w * d, anchor: cap.start)
+                // 按时间轴上看到的位置挪（2026-11-13：按素材时间挪会掉进剪掉的段里，看着乱跳）
+                let dv = v.translation.width / w * d
                 ed.dragUpdate { p in
                     guard let i = p.captions.firstIndex(where: { $0.id == cap.id }) else { return }
-                    let b = p.captions[i], r = ed.captionRoom(for: cap.id, in: p), len = b.end - b.start
-                    let s = min(max(b.start + dt, r.lowerBound), r.upperBound - len)
-                    p.captions[i].start = s; p.captions[i].end = s + len
+                    let b = p.captions[i], r = ed.captionRoom(for: cap.id, in: p)
+                    let lo = ed.visTime(r.lowerBound), hi = ed.visTime(r.upperBound)
+                    var vs = ed.visTime(b.start) + dv, ve = ed.visTime(b.end) + dv
+                    if vs < lo { ve += lo - vs; vs = lo }
+                    if ve > hi { vs -= ve - hi; ve = hi }
+                    p.captions[i].start = ed.srcTime(vis: max(vs, lo)); p.captions[i].end = ed.srcTime(vis: ve)
                 }
             }
-            .onEnded { _ in ed.dragEnd() })
+            .onEnded { _ in moveSkip = nil; ed.dragEnd() })
         .help(cap.text.isEmpty ? L("空白字幕：双击写字", "Empty caption: double-click to type") : cap.text)
     }
 
@@ -2592,10 +2601,14 @@ struct CaptionBlock: View {
                 .onChanged { v in
                     ed.selected = cap.id
                     ed.dragBegin()
-                    let dt = ed.srcDelta(v.translation.width / w * d, anchor: isStart ? cap.start : cap.end)
+                    // 按时间轴上看到的位置拉（跨过剪掉的段也跟手）
+                    let dv = v.translation.width / w * d
                     ed.dragUpdate { p in
                         guard let i = p.captions.firstIndex(where: { $0.id == cap.id }) else { return }
-                        p.captions[i] = CaptionDrag.resize(p.captions[i], isStart: isStart, dt: dt, room: ed.captionRoom(for: cap.id, in: p), minLen: minLen)
+                        let b = p.captions[i], r = ed.captionRoom(for: cap.id, in: p)
+                        let lo = ed.visTime(r.lowerBound), hi = ed.visTime(r.upperBound), vs = ed.visTime(b.start), ve = ed.visTime(b.end)
+                        if isStart { p.captions[i].start = ed.srcTime(vis: min(max(vs + dv, lo), ve - minLen)) }
+                        else { p.captions[i].end = ed.srcTime(vis: max(min(ve + dv, hi), vs + minLen)) }
                     }
                 }
                 .onEnded { _ in ed.dragEnd() })
