@@ -12,17 +12,32 @@ struct Piece: Equatable {
 extension StudioEditor {
     // 时间轴上的「可见时间」：删掉（cut）的段合拢，其余按素材时间（快放的段不压缩，宽度照旧）
     var removedCuts: [CutSegment] { project.cuts.filter { $0.mode == .cut }.sorted { $0.start < $1.start } }
-    func visTime(_ t: Double) -> Double {
+    // 定格在时间轴上占 len 秒宽（at 处展开）
+    private func baseVis(_ t: Double) -> Double {
         var v = t
         for c in removedCuts where c.start < t { v -= min(t, c.end) - c.start }
         return v
     }
+    func visTime(_ t: Double) -> Double {
+        var v = baseVis(t)
+        for h in timeMap.holds { if h.at < t { v += h.len } else { break } }
+        return v
+    }
     var visDuration: Double { max(0.01, visTime(duration)) }
-    // 可见时间 → 素材时间：正好落在合拢处时算到删掉那段的后面
-    func srcTime(vis u: Double) -> Double {
-        var s = u
+    // 可见时间 → 素材时间：正好落在合拢处时算到删掉那段的后面；落在定格里给定格那一帧
+    func srcTime(vis u: Double) -> Double { srcHold(vis: u).t }
+    // 同上，另外给出落在定格里的话已经停了几秒
+    func srcHold(vis u: Double) -> (t: Double, pos: Double) {
+        var acc = 0.0
+        for h in timeMap.holds {
+            let hv = baseVis(h.at) + acc
+            if u < hv { break }
+            if u < hv + h.len { return (h.at, u - hv) }
+            acc += h.len
+        }
+        var s = u - acc
         for c in removedCuts { if c.start <= s + 1e-9 { s += c.end - c.start } else { break } }
-        return min(max(s, 0), duration)
+        return (min(max(s, 0), duration), 0)
     }
 
     // 剪辑轨上的一段段：修剪范围里，按分割点和已有剪辑段的边切开；删掉的不算

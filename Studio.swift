@@ -421,6 +421,13 @@ struct ZoomSegment: Codable, Equatable, Identifiable {
 }
 
 // 中间剪掉的一段 / 快放的一段（素材时间）
+// 定格（2026-11-13 用户要的）：播到素材时间 at 那一帧停住 length 秒（成片里多出这几秒，画面不动、原声音静音），然后接着放
+struct Freeze: Codable, Equatable, Identifiable {
+    var id = UUID()
+    var at: Double                       // 素材时间
+    var length = 2.0                     // 停几秒（成片时间）
+}
+
 struct CutSegment: Codable, Equatable, Identifiable {
     enum Mode: String, Codable { case cut, speed }
     var id = UUID()
@@ -523,11 +530,12 @@ struct StudioProject: Codable, Equatable {
     var music = MusicTrack()            // 背景音乐（成片时间；Windows 版还没有）
     var splits: [Double] = []           // 剪辑轨上的分割点（素材时间；只影响怎么切成一段段，不改成片）
     var keyMutes: [[Double]] = []       // 这些段（素材时间 [起, 止]）里不要打字声
+    var freezes: [Freeze] = []          // 定格（Windows 版还没有）
 
     init(segments: [ZoomSegment] = [], trimStart: Double = 0, trimEnd: Double = 0, look: StudioLook = StudioLook()) {
         self.segments = segments; self.trimStart = trimStart; self.trimEnd = trimEnd; self.look = look
     }
-    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look, segmentsEdited, cuts, audio, voiceovers, captions, captionStyle, camera, layouts, redactions, annotations, music, splits, keyMutes }
+    enum CodingKeys: String, CodingKey { case segments, trimStart, trimEnd, look, segmentsEdited, cuts, audio, voiceovers, captions, captionStyle, camera, layouts, redactions, annotations, music, splits, keyMutes, freezes }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         segments = try c.decodeIfPresent([ZoomSegment].self, forKey: .segments) ?? []
@@ -546,6 +554,7 @@ struct StudioProject: Codable, Equatable {
         annotations = (try? c.decodeIfPresent([Annotation].self, forKey: .annotations)) ?? []
         music = (try? c.decodeIfPresent(MusicTrack.self, forKey: .music)) ?? MusicTrack()
         splits = (try? c.decodeIfPresent([Double].self, forKey: .splits)) ?? []
+        freezes = (try? c.decodeIfPresent([Freeze].self, forKey: .freezes)) ?? []
         keyMutes = (try? c.decodeIfPresent([[Double]].self, forKey: .keyMutes)) ?? []
     }
 
@@ -579,8 +588,10 @@ struct StudioProject: Codable, Equatable {
 // ---- 素材时间 ↔ 成片时间：剪掉的段压成 0 长，快放的段按倍数压短；第一处剪辑之前两边一样（修剪的起点也不变） ----
 struct TimeMap {
     struct Piece { let start: Double, end: Double, rate: Double }   // rate 0 = 剪掉
+    struct Hold { let at: Double, len: Double }                      // 定格：素材 at 处停 len 秒
     let pieces: [Piece]
-    var isIdentity: Bool { pieces.isEmpty }
+    let holds: [Hold]
+    var isIdentity: Bool { pieces.isEmpty && holds.isEmpty }
 
     init(_ p: StudioProject) {
         var out: [Piece] = []
@@ -590,11 +601,18 @@ struct TimeMap {
             out.append(Piece(start: s, end: e, rate: c.mode == .cut ? 0 : max(1, c.rate)))
         }
         pieces = out
+        // 定格：在修剪范围里、不落在剪掉的段里才算；同一时刻的几个合成一个
+        var hs: [Hold] = []
+        for f in p.freezes.sorted(by: { $0.at < $1.at }) where f.length > 0.01 && f.at >= p.trimStart && f.at < p.trimEnd {
+            if out.contains(where: { $0.rate == 0 && f.at >= $0.start && f.at < $0.end }) { continue }
+            if let l = hs.last, abs(l.at - f.at) < 1e-6 { hs[hs.count - 1] = Hold(at: l.at, len: l.len + f.length) } else { hs.append(Hold(at: f.at, len: f.length)) }
+        }
+        holds = hs
     }
     private static func outLen(_ p: Piece) -> Double { p.rate == 0 ? 0 : (p.end - p.start) / p.rate }
 
-    // 素材时间 → 成片时间
-    func out(_ s: Double) -> Double {
+    // 不算定格的换算
+    private func baseOut(_ s: Double) -> Double {
         var d = 0.0
         for p in pieces {
             if s <= p.start { break }
@@ -603,8 +621,7 @@ struct TimeMap {
         }
         return s - d
     }
-    // 成片时间 → 素材时间（落在剪掉处时给剪掉段的终点）
-    func src(_ o: Double) -> Double {
+    private func baseSrc(_ o: Double) -> Double {
         var d = 0.0
         for p in pieces {
             let os = p.start - d, ol = Self.outLen(p)
@@ -613,6 +630,34 @@ struct TimeMap {
             d += (p.end - p.start) - ol
         }
         return o + d
+    }
+    // 素材时间 → 成片时间。定格在 at 处：at 这一刻 = 定格开头，at 之后的都往后推 len
+    func out(_ s: Double) -> Double {
+        var o = baseOut(s)
+        for h in holds { if h.at < s { o += h.len } else { break } }
+        return o
+    }
+    // 成片时间 → 素材时间（落在剪掉处时给剪掉段的终点；落在定格里给定格那一帧）
+    func src(_ o: Double) -> Double {
+        var acc = 0.0
+        for h in holds {
+            let hs = baseOut(h.at) + acc
+            if o < hs { return baseSrc(o - acc) }
+            if o < hs + h.len { return h.at }
+            acc += h.len
+        }
+        return baseSrc(o - acc)
+    }
+    // 成片时间 o 是否在某个定格里：给出是哪个、已经停了几秒
+    func hold(atOut o: Double) -> (hold: Hold, pos: Double)? {
+        var acc = 0.0
+        for h in holds {
+            let hs = baseOut(h.at) + acc
+            if o < hs { return nil }
+            if o < hs + h.len { return (h, o - hs) }
+            acc += h.len
+        }
+        return nil
     }
     func piece(at s: Double) -> Piece? { pieces.first { s >= $0.start && s < $0.end } }
     func inCut(_ s: Double) -> Bool { piece(at: s)?.rate == 0 }
@@ -624,6 +669,22 @@ struct TimeMap {
         w.moves = t.moves.filter { !inCut($0[0]) }.map { var m = $0; m[0] = out(m[0]); return m }
         w.clicks = t.clicks.filter { !inCut($0[0]) }.map { var c = $0; c[0] = out(c[0]); return c }
         w.keys = t.keys.filter { !inCut($0) }.map { out($0) }
+        // 定格那几秒鼠标不动：在定格开头和结尾各补一个同位置的采样（不然会在前后两次采样间慢慢滑过去）
+        if !holds.isEmpty, !t.moves.isEmpty {
+            var extra: [[Double]] = []
+            for h in holds {
+                guard let k = t.moves.lastIndex(where: { $0[0] <= h.at }) else { continue }
+                var a = t.moves[k]
+                if k + 1 < t.moves.count {   // 插值到 at 那一刻
+                    let b = t.moves[k + 1], u = b[0] > a[0] ? min(1, max(0, (h.at - a[0]) / (b[0] - a[0]))) : 0
+                    a[1] += (b[1] - a[1]) * u; a[2] += (b[2] - a[2]) * u
+                }
+                let o0 = baseOut(h.at) + holds.filter { $0.at < h.at }.reduce(0) { $0 + $1.len }
+                var m0 = a; m0[0] = o0; var m1 = a; m1[0] = o0 + h.len
+                extra += [m0, m1]
+            }
+            w.moves = (w.moves + extra).sorted { $0[0] < $1[0] }
+        }
         return w
     }
     // 工程换到成片时间：推近段起止按新时间（整段被剪掉的去掉），修剪终点按新时间
@@ -1631,6 +1692,7 @@ final class AudioWarp: @unchecked Sendable {
     private let map: TimeMap, gain: Float, clicks: ClickSound, voice: VoiceMix?, music: MusicMix?
     private(set) var outAt: Int64?             // 下一个输出采样在成片里的位置
     private var pi = 0                         // 当前看到第几个剪辑段
+    private var hi = 0                         // 下一个定格
     private var sumL: Float = 0, sumR: Float = 0, cnt = 0
 
     init(map: TimeMap, gain: Float, clicks: ClickSound, voice: VoiceMix? = nil, music: MusicMix? = nil) {
@@ -1650,9 +1712,14 @@ final class AudioWarp: @unchecked Sendable {
         if map.isIdentity { out = src }
         else {
             out = []; out.reserveCapacity(src.count)
-            let ps = map.pieces
+            let ps = map.pieces, hs = map.holds
             for j in 0..<n {
                 let t = Double(a0 + Int64(j)) / 48000
+                // 定格：播到那一刻先补上 len 秒静音
+                while hi < hs.count && t >= hs[hi].at {
+                    if t - hs[hi].at < 0.5 { out.append(contentsOf: [Float](repeating: 0, count: Int((hs[hi].len * 48000).rounded()) * 2)) }
+                    hi += 1
+                }
                 while pi < ps.count && t >= ps[pi].end { pi += 1; sumL = 0; sumR = 0; cnt = 0 }
                 let l = src[j * 2], r = src[j * 2 + 1]
                 if pi < ps.count && t >= ps[pi].start {

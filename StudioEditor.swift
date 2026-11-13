@@ -73,6 +73,9 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     @Published var selected: UUID? { didSet { if selected != oldValue { selectedPiece = nil; selectedBurst = nil }; if let c = editingCaption, selected != c { editingCaption = nil }; if let c = editingCaptionOnPreview, selected != c { editingCaptionOnPreview = nil }   // 点了别处：字幕块收起编辑
         ; if let n = editingNote, selected != n { endNote() } } }   // 选了别的：正在改的字先收好
     @Published var time = 0.0
+    @Published var holdPos = 0.0                         // 播放头停在定格里：已经停了几秒（time 这时 = 定格那一帧）
+    var holdTimer: Timer?
+    var holdDoneAt: Double?                              // 刚放完的定格（接着放时别又停一次）
     @Published var playing = false { didSet { box.playing = playing; if playing { dragFrame = nil }; if !playing { musicPlayer.pauseAll(); if oldValue { redrawPausedFrame() } } } }
     @Published var picking = false             // 正在等用户在预览上点固定位置
     @Published var exportProgress: Double?
@@ -210,7 +213,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
                 guard let self else { return }
                 if self.scrubber.observed(t.seconds) { self.time = t.seconds }
                 let rate = self.player.rate
-                if self.playing && rate == 0 { self.playing = false }
+                if self.playing && rate == 0 && self.holdTimer == nil { self.playing = false }
                 self.syncPlayback()
                 self.voiceTick()
             }
@@ -615,6 +618,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     // ---- 播放 ----
     func seek(_ t: Double) {
         let t = min(max(t, 0), duration)
+        stopHoldTimer(); holdPos = 0; holdDoneAt = nil
         time = t
         if let go = scrubber.request(t) { startSeek(go) }
     }
@@ -644,9 +648,21 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         guard abs(o - timelineOffset) > 1e-9 else { return }
         timelineOffset = o; timelineScrollSeq += 1
     }
+    // 时间轴上点 / 拖到可见时间 u：落在定格里就停在那一帧并记下停了几秒
+    func seekVis(_ u: Double) {
+        let r = srcHold(vis: u)
+        seek(r.t)
+        holdPos = r.pos
+        if r.pos > 0 { holdDoneAt = nil }
+        voiceTick()
+    }
     func togglePlay() {
         if voiceRec != nil { stopVoice(); return }
-        if playing { player.pause(); playing = false; voiceTick(); return }
+        if playing { player.pause(); stopHoldTimer(); playing = false; voiceTick(); return }
+        // 停在定格中间：接着把剩下的几秒停完
+        if holdPos > 0, let h = timeMap.holds.first(where: { abs($0.at - time) < 0.001 }) {
+            playing = true; startHold(h, from: holdPos); return
+        }
         let now = player.currentTime().seconds   // 播到头时 time 可能没跟上，按播放器实际位置判断
         if now >= project.trimEnd - 0.05 || now < project.trimStart - 0.01 { seek(project.trimStart) }
         player.play(); playing = true
@@ -654,8 +670,31 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     // 播放中：落在剪掉的段里就跳到段尾，落在快放的段里就按倍数放，其他地方正常速度
+    // ---- 定格：播到那一帧暂停播放器、计时 len 秒（讲解、音乐照常放），然后接着放 ----
+    func stopHoldTimer() { holdTimer?.invalidate(); holdTimer = nil }
+    func startHold(_ h: TimeMap.Hold, from pos: Double) {
+        player.pause()
+        if abs(player.currentTime().seconds - h.at) > 0.001 { player.seek(to: CMTime(seconds: h.at, preferredTimescale: 6000), toleranceBefore: .zero, toleranceAfter: .zero) }
+        time = h.at; holdPos = pos
+        stopHoldTimer()
+        let t0 = Date().timeIntervalSinceReferenceDate - pos
+        holdTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.playing else { return }
+                let p = Date().timeIntervalSinceReferenceDate - t0
+                if p >= h.len {
+                    self.stopHoldTimer(); self.holdPos = 0; self.holdDoneAt = h.at
+                    self.player.play(); self.syncPlayback(); self.voiceTick()
+                } else { self.holdPos = p; self.voiceTick() }
+            }
+        }
+        voiceTick()
+    }
     func syncPlayback() {
-        guard playing, player.rate != 0 else { return }
+        guard playing, holdTimer == nil else { return }
+        let t0 = player.currentTime().seconds
+        if let h = timeMap.holds.first(where: { t0 >= $0.at - 0.02 && t0 < $0.at + 0.08 && holdDoneAt != $0.at }) { startHold(h, from: 0); return }
+        guard player.rate != 0 else { return }
         let t = player.currentTime().seconds
         if let pc = timeMap.piece(at: t + 0.001) {
             if pc.rate == 0 {
@@ -667,7 +706,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     private func resetBoundaries() {
         if let boundaryObserver { player.removeTimeObserver(boundaryObserver); self.boundaryObserver = nil }
         let map = timeMap
-        var times = map.pieces.flatMap { [$0.start, $0.end] }
+        var times = map.pieces.flatMap { [$0.start, $0.end] } + map.holds.map { $0.at }
         let clickAt = project.look.clickSound
             ? track.clicks.map { $0[0] }.filter { $0 >= project.trimStart && $0 < project.trimEnd && !map.inCut($0) } : []
         let keyAt = track.keys.filter { $0 >= project.trimStart && $0 < project.trimEnd && !map.inCut($0) && project.keySounds(at: $0) }
@@ -700,7 +739,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
     // ---- 录讲解 ----
     // 每次播放器报时间（每秒 30 次）：讲解跟着画面放、原声音按讲解压低；录音中更新时长和音量、播到头就停
     func voiceTick() {
-        let map = timeMap, o = map.out(player.currentTime().seconds)
+        let map = timeMap, o = map.out(player.currentTime().seconds) + holdPos
         let mute = voiceRec != nil && Self.muteWhileRecording
         musicTick(outTime: o)
         let active = voicePlayer.sync(dir: dir, clips: project.voiceovers, map: map, outTime: o, level: project.audio.denoise,
@@ -792,6 +831,18 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         loadPeaks(c.file)
     }
     func voiceIndex(_ id: UUID?) -> Int? { project.voiceovers.firstIndex { $0.id == id } }
+    // ---- 定格 ----
+    func freezeIndex(_ id: UUID?) -> Int? { project.freezes.firstIndex { $0.id == id } }
+    // 在播放头这一帧加一个定格（默认停 2 秒）；这里已经有定格就选中它
+    func addFreeze() {
+        let t = time
+        if let f = project.freezes.first(where: { abs($0.at - t) < 0.001 }) { selected = f.id; return }
+        guard t >= project.trimStart, t < project.trimEnd - 0.05, !timeMap.inCut(t) else { NSSound.beep(); return }
+        let f = Freeze(at: t, length: 2)
+        edit { $0.freezes.append(f); $0.freezes.sort { $0.at < $1.at } }
+        selected = f.id
+        showToast(L("已在 \(clock(t)) 定格 2 秒 · 下面可以改停几秒，按 Delete 去掉", "Freeze-frame added at \(clock(t)) for 2s · change the length below, press Delete to remove"))
+    }
     // 波形：每秒 100 个点（取绝对值最大）
     func loadPeaks(_ file: String) {
         guard voicePeaks[file] == nil else { return }
@@ -900,6 +951,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         if let i = cutIndex(selected) { edit { $0.cuts.remove(at: i) }; selected = nil; return }
         if let i = layoutIndex(selected) { edit { $0.layouts.remove(at: i) }; selected = nil; return }
         if let i = voiceIndex(selected) { edit { $0.voiceovers.remove(at: i) }; selected = nil; return }
+        if let i = freezeIndex(selected) { edit { $0.freezes.remove(at: i) }; selected = nil; return }
         if let i = musicIndex(selected) { edit { $0.music.clips.remove(at: i) }; selected = nil; return }
         guard let i = index(selected) else { return }
         edit { $0.segments.remove(at: i) }
@@ -1317,6 +1369,7 @@ struct EditorView: View {
                         else if ed.cutIndex(ed.selected) != nil { cutInspector.frame(height: 30) }   // 选中剪辑段
                         else if ed.layoutIndex(ed.selected) != nil { layoutInspector.frame(height: 30) }   // 选中布局段
                         else if ed.voiceIndex(ed.selected) != nil { voiceInspector.frame(height: 30) }   // 选中讲解
+                        else if ed.freezeIndex(ed.selected) != nil { freezeInspector.frame(height: 30) }   // 选中定格
                         else if ed.musicIndex(ed.selected) != nil { MusicInspector(ed: ed).frame(height: 30) }   // 选中音乐
                         else if ed.selected != nil { inspector.frame(height: 30) }   // 选中推近段才出现
                         else if !ed.suggestions.isEmpty || ed.suggesting || ed.suggestNone { SuggestionBar(ed: ed).frame(height: 30) }   // 建议加速
@@ -1373,6 +1426,8 @@ struct EditorView: View {
                     .help(L("在播放头处新加一段推近（镜头放大凑近看）；也可以在时间轴空白处双击", "Add a zoom-in at the playhead; you can also double-click empty space on the timeline"))
                 Button { ed.splitHere() } label: { Label(L("分割", "Split"), systemImage: "scissors") }
                     .help(L("在播放头处切一刀（S 或 ⌘B）：点选切出来的一段按 Delete 删掉，时间轴直接合拢；也能给那段改速度", "Split at the playhead (S or ⌘B): select a part and press Delete to remove it, the timeline closes up; you can also change its speed"))
+                Button { ed.addFreeze() } label: { Label(L("定格", "Freeze"), systemImage: "pause.rectangle") }
+                    .help(L("让画面在播放头这一帧停住几秒（默认 2 秒），讲解、字幕照常；选中后能改停几秒、按 Delete 去掉", "Hold the frame at the playhead for a few seconds (2s by default); voiceover and captions keep going. Select it to change the length or press Delete to remove"))
                 voiceButton
                 captionButton
                 OverlayButtons(ed: ed)
@@ -1418,7 +1473,7 @@ struct EditorView: View {
                 }
                 .buttonStyle(.plain).help(L("播放 / 暂停（空格）", "Play / Pause (Space)"))
                 let m = ed.timeMap
-                Text(clock(m.out(ed.time) - ed.project.trimStart) + " / " + clock(m.out(ed.project.trimEnd) - ed.project.trimStart))   // 按成片算（修剪、剪掉、快放之后）
+                Text(clock(m.out(ed.time) + ed.holdPos - ed.project.trimStart) + " / " + clock(m.out(ed.project.trimEnd) - ed.project.trimStart))   // 按成片算（修剪、剪掉、快放之后）
                     .font(.callout.monospacedDigit()).foregroundStyle(.secondary).frame(width: 130, alignment: .leading)
             }
         }
@@ -1616,6 +1671,26 @@ extension EditorView {
                     .disabled(c.text.isEmpty || ed.speaking != nil)
                     .help(L("用系统声音把这句念出来，放到讲解轨上（声音在「字幕」菜单里选）", "Speak this caption onto the voiceover lane (choose the voice in the Captions menu)"))
                 Button(role: .destructive) { ed.deleteSelected() } label: { Image(systemName: "trash") }.help(L("删除这句", "Delete this caption"))
+            }
+        }
+    }
+
+    // 选中定格：在哪一帧、停几秒、删除
+    @ViewBuilder var freezeInspector: some View {
+        if let i = ed.freezeIndex(ed.selected) {
+            let f = ed.project.freezes[i]
+            HStack(spacing: 14) {
+                Text(L("定格", "Freeze")).font(.callout.weight(.semibold))
+                Text(L("停在 ", "At ") + clock(f.at)).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                Divider().frame(height: 16)
+                Text(L("停几秒", "Length")).font(.callout)
+                Slider(value: Binding(get: { f.length }, set: { v in ed.dragBegin(); ed.dragUpdate { $0.freezes[i].length = (v * 10).rounded() / 10 } }),
+                       in: 0.5...10, onEditingChanged: { if !$0 { ed.dragEnd() } })
+                    .frame(width: 180)
+                Text(String(format: L("%.1f 秒", "%.1fs"), f.length)).font(.callout.monospacedDigit()).frame(width: 52, alignment: .leading)
+                Stepper("", value: Binding(get: { f.length }, set: { v in ed.edit { $0.freezes[i].length = min(max((v * 10).rounded() / 10, 0.5), 30) } }), in: 0.5...30, step: 0.5).labelsHidden()
+                Spacer()
+                Button(role: .destructive) { ed.deleteSelected() } label: { Label(L("删除", "Delete"), systemImage: "trash") }
             }
         }
     }
@@ -1882,7 +1957,7 @@ struct TimelineStrip: View {
                 RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(nsColor: .separatorColor)))
                     .gesture(SpatialTapGesture(count: 2).onEnded { ed.addSegment(at: tAt($0.location.x)) }
-                        .exclusively(before: SpatialTapGesture().onEnded { ed.selected = nil; ed.picking = false; ed.seek(tAt($0.location.x)) }))
+                        .exclusively(before: SpatialTapGesture().onEnded { ed.selected = nil; ed.picking = false; ed.seekVis(min(max($0.location.x / w * d, 0), d)) }))
                     .contextMenu {
                         Button(L("在播放头分割（S）", "Split at Playhead (S)")) { ed.split(at: ed.time) }
                         Button(L("在播放头加推近", "Add Zoom at Playhead")) { ed.addSegment(at: ed.time) }
@@ -1895,7 +1970,7 @@ struct TimelineStrip: View {
                 ruler(w: w, d: d, x: { $0 / d * w })
                     .contentShape(Rectangle())
                     .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.space))
-                        .onChanged { ed.scrubBegin(); ed.seek(tAt($0.location.x)) }
+                        .onChanged { ed.scrubBegin(); ed.seekVis(min(max($0.location.x / w * d, 0), d)) }
                         .onEnded { _ in ed.scrubEnd() })
                 // 点击、打字的时刻
                 ForEach(Array(ed.events.enumerated()), id: \.offset) { _, t in
@@ -1910,6 +1985,13 @@ struct TimelineStrip: View {
                 }
                 ForEach(ed.removedCuts) { c in
                     CutSeam(ed: ed, cut: c).offset(x: x(c.start) - 8, y: cutY + (cutH - 16) / 2)
+                }
+                // 定格：剪辑轨上一块（at 处展开 len 秒宽），点选、按 Delete 去掉
+                ForEach(ed.project.freezes) { f in
+                    if let h = ed.timeMap.holds.first(where: { abs($0.at - f.at) < 1e-6 }) {
+                        FreezeBlock(ed: ed, freeze: f).frame(width: max(8, h.len / d * w), height: cutH)
+                            .offset(x: x(f.at), y: cutY)
+                    }
                 }
                 // 建议加速：虚线半透明，块上直接点 ✓ 采纳 / ✕ 忽略
                 ForEach(ed.suggestions) { g in
@@ -2010,7 +2092,7 @@ struct TimelineStrip: View {
                 trimHandle(isStart: true, w: w, d: d, h: g.size.height).offset(x: x(ed.project.trimStart) - (Self.handleW - Self.bar))
                 trimHandle(isStart: false, w: w, d: d, h: g.size.height).offset(x: x(ed.project.trimEnd) - Self.bar)
                 // 播放头：细线 + 顶上小把手，压在最上面；深色模式白、浅色模式深灰，带一圈淡阴影，和黄色括号重叠也分得清
-                Playhead(height: g.size.height).offset(x: x(ed.time) - Playhead.knobW / 2).allowsHitTesting(false)
+                Playhead(height: g.size.height).offset(x: x(ed.time) + ed.holdPos / d * w - Playhead.knobW / 2).allowsHitTesting(false)
             }
             .coordinateSpace(name: Self.space)
         }
@@ -2335,6 +2417,27 @@ struct SegmentBlock: View {
                     }
                 }
                 .onEnded { _ in ed.dragEnd() })
+    }
+}
+
+// 剪辑轨上的定格块：浅蓝 + 暂停图标 + 秒数；单击选中（选中后下面能改停几秒）
+struct FreezeBlock: View {
+    @ObservedObject var ed: StudioEditor
+    let freeze: Freeze
+    var body: some View {
+        let sel = ed.selected == freeze.id
+        ZStack {
+            RoundedRectangle(cornerRadius: 5).fill(Color(red: 0.25, green: 0.62, blue: 0.95).opacity(sel ? 0.95 : 0.75))
+            RoundedRectangle(cornerRadius: 5).stroke(sel ? Color.white : Color.clear, lineWidth: 2)
+            HStack(spacing: 3) {
+                Image(systemName: "pause.fill").font(.system(size: 8, weight: .bold))
+                Text(String(format: "%.1fs", freeze.length)).font(.system(size: 9, weight: .bold).monospacedDigit())
+            }.foregroundStyle(.white).lineLimit(1).padding(.horizontal, 4)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { ed.selected = freeze.id; ed.picking = false; ed.seek(freeze.at) }
+        .help(L("定格：画面在这一帧停住；选中后能改停几秒，按 Delete 去掉", "Freeze-frame: select to change the length, press Delete to remove"))
+        .contextMenu { Button(L("删除定格", "Delete Freeze"), role: .destructive) { ed.selected = freeze.id; ed.deleteSelected() } }
     }
 }
 
@@ -3052,6 +3155,38 @@ enum StudioTests {
 
     // VOICETEST=素材夹（raw.mp4 的声音最好是一段持续的测试音，用来量压低）→ 讲解的规则 + 真导出：
     // 放置 / 覆盖、锚点跟着剪辑走、拖两头、压低曲线、旧工程兼容；再合成一段测试录音（2 kHz 短促音），导出后量出现的时刻、音量、压低
+    // FREEZETEST=1：定格的时间换算（纯计算）
+    static func freezeTest() -> Bool {
+        guard ProcessInfo.processInfo.environment["FREEZETEST"] != nil else { return false }
+        var ok = true
+        func check(_ n: String, _ c: Bool, _ info: String = "") { print(c ? "PASS" : "FAIL", n, info); ok = ok && c }
+        func near(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 1e-6 }
+        var p = StudioProject(trimStart: 0, trimEnd: 30)
+        p.freezes = [Freeze(at: 5, length: 2)]
+        var m = TimeMap(p)
+        check("out before", near(m.out(4), 4)); check("out at = hold start", near(m.out(5), 5)); check("out after +2", near(m.out(6), 8))
+        check("src in hold", near(m.src(5.5), 5) && near(m.src(6.9), 5)); check("src after", near(m.src(8), 6))
+        check("hold pos", m.hold(atOut: 6)?.pos.isNaN == false && near(m.hold(atOut: 6)!.pos, 1))
+        check("trimEnd out", near(m.out(30), 32))
+        // 和剪掉、快放一起
+        p.cuts = [CutSegment(start: 1, end: 3, mode: .cut), CutSegment(start: 10, end: 14, mode: .speed, rate: 2)]
+        m = TimeMap(p)
+        check("cut+hold out", near(m.out(5), 3) && near(m.out(6), 6), "\(m.out(5)) \(m.out(6))")
+        check("cut+hold src", near(m.src(4), 5) && near(m.src(6), 6), "\(m.src(4)) \(m.src(6))")
+        check("speed after hold", near(m.out(14), 14 - 2 - 2 + 2), "\(m.out(14))")
+        for o in stride(from: 0.0, through: 29.0, by: 0.37) { let s = m.src(o); if !m.inCut(s) && m.hold(atOut: o) == nil && !near(m.out(s), o) { check("roundtrip \(o)", false, "\(s) \(m.out(s))") } }
+        // 落在剪掉段里的定格不算
+        p.freezes.append(Freeze(at: 2, length: 3)); m = TimeMap(p)
+        check("freeze in cut ignored", m.holds.count == 1)
+        // 鼠标定格时不动
+        var tr = Track(width: 100, height: 100, pixelsPerPoint: 1); tr.moves = [[4, 0, 0, 0], [6, 100, 0, 0]]
+        p = StudioProject(trimStart: 0, trimEnd: 30); p.freezes = [Freeze(at: 5, length: 2)]; m = TimeMap(p)
+        let w = m.warp(tr)
+        let at = { (o: Double) -> Double in let a = w.moves.last { $0[0] <= o }!, b = w.moves.first { $0[0] > o } ?? a; return b[0] > a[0] ? a[1] + (b[1] - a[1]) * (o - a[0]) / (b[0] - a[0]) : a[1] }
+        check("cursor still in hold", near(at(5.2), 50) && near(at(6.8), 50), "\(at(5.2)) \(at(6.8))")
+        print(ok ? "FREEZETEST OK" : "FREEZETEST FAILED")
+        exit(ok ? 0 : 1)
+    }
     @MainActor static func voiceTest() -> Bool {
         guard let path = ProcessInfo.processInfo.environment["VOICETEST"] else { return false }
         Task { @MainActor in

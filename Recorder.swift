@@ -967,7 +967,7 @@ struct RecorderApp: App {   // 入口在 Control.swift 的 Main（带 --mcp 时�
             ContentView(rec: rec)
                 .onAppear {
                     HotKey.action = { [weak rec] in rec?.toggle() }
-                    if Studio.selfTest() || Updater.selfTest() || ExportOptionsPanel.selfTest() || StudioTests.planTest() || StudioTests.scrubTest() || StudioTests.cutTest() || StudioTests.voiceTest() || StudioTests.captionTest() || StudioTests.batchATest() || StudioTests.overlayTest() || StudioTests.dTest() || MainShot.run() || StudioTests.editorShot() || StudioTests.blurTest() || StudioTests.presetTest() || Countdown.selfTest() || Recorder.iconsTest() { return }
+                    if Studio.selfTest() || Updater.selfTest() || ExportOptionsPanel.selfTest() || StudioTests.planTest() || StudioTests.scrubTest() || StudioTests.cutTest() || StudioTests.voiceTest() || StudioTests.freezeTest() || StudioTests.captionTest() || StudioTests.batchATest() || StudioTests.overlayTest() || StudioTests.dTest() || MainShot.run() || StudioTests.editorShot() || StudioTests.blurTest() || StudioTests.presetTest() || Countdown.selfTest() || Recorder.iconsTest() { return }
                     if ProcessInfo.processInfo.environment["AUTOTEST"] == nil {
                         Updater.shared.isBusy = { [weak rec] in rec.map { $0.recording || $0.busy } ?? false }
                         Updater.shared.start()
