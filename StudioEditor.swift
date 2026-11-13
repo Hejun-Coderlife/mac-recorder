@@ -364,7 +364,7 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         case 51, 117: deleteSelected(); return true
         case 6 where cmd: shift ? redo() : undo(); return true
         case 2 where cmd: duplicateOverlay(); return true
-        case 1 where !cmd, 11 where cmd: split(at: time); return true   // S / ⌘B 分割
+        case 1 where !cmd, 11 where cmd: splitHere(); return true   // S / ⌘B 分割（选着字幕就拆字幕）
         case 53: if picking { picking = false; return true }; if drawing != nil { drawing = nil; return true }; return false
         default: return false
         }
@@ -1018,6 +1018,63 @@ final class StudioEditor: NSObject, ObservableObject, NSWindowDelegate {
         let t = text.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
         edit { $0.captions[i].text = t }
     }
+    // 工具栏「分割」/ S / ⌘B：选中哪条轨上的哪一块、播放头又落在它里面 → 就切那一块；什么都没选（或播放头不在选中的块里）→ 切画面
+    // （2026-11-13 用户：「所有的轨道，我选哪个就能编辑哪个，剪辑哪个」——字幕、讲解、音乐、标注、打码、推近都一样）
+    func splitHere() {
+        let t = time, m = timeMap, pad = 0.1
+        if let i = captionIndex(selected) {
+            let c = project.captions[i]
+            if t > c.start, t < c.end { splitCaption(c.id, at: t); return }
+        }
+        if let i = voiceIndex(selected) {
+            let c = project.voiceovers[i], k = m.out(t) - m.out(c.start)   // 讲解按成片时间走
+            if k > pad, k < c.length - pad {
+                var a = c, b = c
+                a.trimOut = c.trimIn + k
+                b.id = UUID(); b.trimIn = c.trimIn + k; b.start = t
+                edit { $0.voiceovers[i] = a; $0.voiceovers.insert(b, at: i + 1) }
+                selected = b.id; splitToast(t); return
+            }
+        }
+        if let i = musicIndex(selected) {
+            let c = project.music.clips[i], k = m.out(t) - c.start            // 音乐的 start 本来就是成片时间
+            if k > pad, k < c.length - pad {
+                var a = c, b = c
+                a.trimOut = c.trimIn + k
+                b.id = UUID(); b.trimIn = c.trimIn + k; b.start = c.start + k
+                edit { $0.music.clips[i] = a; $0.music.clips.insert(b, at: i + 1) }
+                selected = b.id; splitToast(t); return
+            }
+        }
+        if let i = annotationIndex(selected) {
+            let c = project.annotations[i]
+            if t > c.start + pad, t < c.end - pad {
+                var a = c, b = c; a.end = t; b.id = UUID(); b.start = t
+                edit { $0.annotations[i] = a; $0.annotations.insert(b, at: i + 1) }
+                selected = b.id; splitToast(t); return
+            }
+        }
+        if let i = redactionIndex(selected) {
+            let c = project.redactions[i]
+            if t > c.start + pad, t < c.end - pad {
+                var a = c, b = c; a.end = t; b.id = UUID(); b.start = t
+                edit { $0.redactions[i] = a; $0.redactions.insert(b, at: i + 1) }
+                selected = b.id; splitToast(t); return
+            }
+        }
+        if let i = index(selected) {
+            let c = project.segments[i]
+            if t > c.start + pad, t < c.end - pad {
+                var a = c, b = c; a.end = t; b.id = UUID(); b.start = t
+                edit { $0.segments[i] = a; $0.segments.insert(b, at: i + 1); $0.segmentsEdited = true }
+                selected = b.id; splitToast(t); return
+            }
+        }
+        split(at: t)
+    }
+    private func splitToast(_ t: Double) {
+        showToast(L("已在 \(clock(t)) 拆成两段 · 选中一段按 Delete 删掉", "Split at \(clock(t)) · select a part and press Delete to remove it"))
+    }
     // 在播放头处拆成两句：字按时间比例分
     func splitCaption(_ id: UUID, at t: Double) {
         guard let i = captionIndex(id) else { return }
@@ -1314,7 +1371,7 @@ struct EditorView: View {
             HStack(spacing: 10) {
                 Button { ed.addSegment(at: ed.time) } label: { Label(L("推近", "Zoom"), systemImage: "plus.magnifyingglass") }
                     .help(L("在播放头处新加一段推近（镜头放大凑近看）；也可以在时间轴空白处双击", "Add a zoom-in at the playhead; you can also double-click empty space on the timeline"))
-                Button { ed.split(at: ed.time) } label: { Label(L("分割", "Split"), systemImage: "scissors") }
+                Button { ed.splitHere() } label: { Label(L("分割", "Split"), systemImage: "scissors") }
                     .help(L("在播放头处切一刀（S 或 ⌘B）：点选切出来的一段按 Delete 删掉，时间轴直接合拢；也能给那段改速度", "Split at the playhead (S or ⌘B): select a part and press Delete to remove it, the timeline closes up; you can also change its speed"))
                 voiceButton
                 captionButton
@@ -2335,7 +2392,7 @@ struct VoiceBlock: View {
                 let dt = ed.srcDelta(v.translation.width / w * d, anchor: clip.start)
                 ed.dragUpdate { p in
                     guard let i = p.voiceovers.firstIndex(where: { $0.id == clip.id }) else { return }
-                    p.voiceovers[i].start = VoiceDrag.move(clip, dt: dt, duration: ed.duration)
+                    p.voiceovers[i].start = VoiceDrag.move(p.voiceovers[i], dt: dt, duration: ed.duration)   // 按「按下时」的位置 + 拖了多远；用 clip（已经挪过的）会越拖越快乱飞（2026-11-13 修）
                 }
             }
             .onEnded { _ in ed.dragEnd() })
